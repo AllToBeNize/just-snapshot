@@ -31,11 +31,12 @@ use windows_sys::{
 use crate::{
     annotation::{Draft, History, Mark, Style, Tool},
     annotation_options::{Choice, Options},
-    capture::{save_path, Desktop, Image, Surface},
+    capture::{Desktop, Image, Surface},
+    output,
     hotkey::{self, Shortcut},
     icons::Cursor,
     overlay_ui::{monitor_info, HintMode, HintPanel, Loupe},
-    pinned, scroll_capture,
+    scroll_capture,
     selection_geometry::{
         contains, drag_rect, hit_drag, intersect, DragKind, Handle, BORDER_BLUE, HANDLES,
     },
@@ -2250,31 +2251,20 @@ unsafe fn output(window: HWND, action: Action) {
         Some((image, screen))
     });
     let Some((image, screen)) = image else { return };
-    let result = match image {
-        Ok(image) => match action {
-            Action::Save => save_path(window, "Snapshot.png").and_then(|path| match path {
-                Some(path) => image
-                    .save_png(&path)
-                    .map(|()| true)
-                    .map_err(|error| error.to_string()),
-                None => Ok(false),
-            }),
-            Action::Pin => pinned::open(image, screen)
-                .map(|()| true)
-                .map_err(|error| error.to_string()),
-            _ => image
-                .copy_to_clipboard(window)
-                .map(|()| true)
-                .map_err(|error| error.to_string()),
-        },
-        Err(error) => Err(error.to_string()),
+    let target = match action {
+        Action::Save => output::Target::Save("Snapshot.png"),
+        Action::Pin => output::Target::Pin(screen),
+        _ => output::Target::Copy,
     };
+    let result = image
+        .map_err(|error| format!("无法生成截图。\n{error}"))
+        .and_then(|image| output::deliver(window, &image, target));
     match result {
         Ok(true) => {
             DestroyWindow(window);
         }
         Ok(false) => {}
-        Err(error) => show_error(window, &format!("输出截图失败。\n{error}")),
+        Err(error) => show_error(window, &error),
     }
 }
 

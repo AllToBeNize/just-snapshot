@@ -1,40 +1,21 @@
 use std::{
-    ffi::OsString,
     fs::File,
     io::{self, BufWriter, Write},
     mem::size_of,
-    os::windows::ffi::OsStringExt,
-    path::{Path, PathBuf},
+    path::Path,
     ptr::{null_mut, NonNull},
     slice,
 };
-use windows_sys::{
-    core::w,
-    Win32::{
-        Foundation::{GlobalFree, HWND, RECT},
-        Graphics::Gdi::*,
-        System::{
-            DataExchange::{
-                CloseClipboard, EmptyClipboard, OpenClipboard, RegisterClipboardFormatW,
-                SetClipboardData,
-            },
-            Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE},
-        },
-        UI::{
-            Controls::Dialogs::{
-                CommDlgExtendedError, GetSaveFileNameW, OFN_EXPLORER, OFN_NOCHANGEDIR,
-                OFN_OVERWRITEPROMPT, OFN_PATHMUSTEXIST, OPENFILENAMEW,
-            },
-            WindowsAndMessaging::{
-                GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
-                SM_YVIRTUALSCREEN,
-            },
-        },
+use windows_sys::Win32::{
+    Foundation::RECT,
+    Graphics::Gdi::*,
+    UI::WindowsAndMessaging::{
+        GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
+        SM_YVIRTUALSCREEN,
     },
 };
 
-const BYTES_PER_PIXEL: usize = 4;
-const CF_DIB: u32 = 8;
+pub(crate) const BYTES_PER_PIXEL: usize = 4;
 
 pub struct Desktop {
     pub bounds: RECT,
@@ -310,6 +291,7 @@ impl Drop for Surface {
     }
 }
 
+#[derive(Clone)]
 pub struct Image {
     pub(crate) width: i32,
     pub(crate) height: i32,
@@ -347,62 +329,6 @@ impl Image {
         Ok((surface, self.width, self.height))
     }
 
-    /// Puts the image on the clipboard as an opaque bottom-up CF_DIB plus PNG.
-    ///
-    /// GDI captures leave alpha at 0, and apps that honor alpha in a 32-bit DIB
-    /// (Feishu, browsers) would paste a fully transparent image. Many apps also
-    /// mishandle top-down DIBs, so rows are flipped. PNG is what Chromium-based
-    /// apps and Office prefer; it is added best-effort next to the DIB.
-    pub fn copy_to_clipboard(&self, owner: HWND) -> io::Result<()> {
-        let dib = self.clipboard_dib();
-        let mut png = Vec::new();
-        let png = self.write_png(&mut png).ok().map(|()| png);
-        unsafe {
-            let dib_memory = global_copy(&dib)?;
-            if OpenClipboard(owner) == 0 {
-                let error = io::Error::last_os_error();
-                GlobalFree(dib_memory);
-                return Err(error);
-            }
-            if EmptyClipboard() == 0 || SetClipboardData(CF_DIB, dib_memory).is_null() {
-                let error = io::Error::last_os_error();
-                CloseClipboard();
-                GlobalFree(dib_memory);
-                return Err(error);
-            }
-            // SetClipboardData transfers ownership to Windows.
-            let format = RegisterClipboardFormatW(w!("PNG"));
-            if let (Some(png), true) = (png, format != 0) {
-                if let Ok(memory) = global_copy(&png) {
-                    if SetClipboardData(format, memory).is_null() {
-                        GlobalFree(memory);
-                    }
-                }
-            }
-            CloseClipboard();
-        }
-        Ok(())
-    }
-
-    /// BITMAPINFOHEADER followed by bottom-up rows with alpha forced to 255.
-    fn clipboard_dib(&self) -> Vec<u8> {
-        let mut header = bitmap_header(self.width, self.height);
-        header.biHeight = self.height;
-        let header_size = size_of::<BITMAPINFOHEADER>();
-        let mut data = Vec::with_capacity(header_size + self.pixels.len());
-        // SAFETY: BITMAPINFOHEADER is a plain C struct.
-        data.extend_from_slice(unsafe {
-            slice::from_raw_parts((&header as *const BITMAPINFOHEADER).cast::<u8>(), header_size)
-        });
-        let row_bytes = self.width as usize * BYTES_PER_PIXEL;
-        for row in self.pixels.chunks_exact(row_bytes).rev() {
-            for pixel in row.chunks_exact(BYTES_PER_PIXEL) {
-                data.extend_from_slice(&[pixel[0], pixel[1], pixel[2], 255]);
-            }
-        }
-        data
-    }
-
     pub fn save_png(&self, path: &Path) -> Result<(), Box<dyn std::error::Error>> {
         let mut file = BufWriter::new(File::create(path)?);
         self.write_png(&mut file)?;
@@ -410,7 +336,7 @@ impl Image {
         Ok(())
     }
 
-    fn write_png(&self, output: impl Write) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn write_png(&self, output: impl Write) -> Result<(), Box<dyn std::error::Error>> {
         let mut encoder = png::Encoder::new(output, self.width as u32, self.height as u32);
         encoder.set_color(png::ColorType::Rgba);
         encoder.set_depth(png::BitDepth::Eight);
@@ -431,53 +357,7 @@ impl Image {
     }
 }
 
-pub unsafe fn save_path(window: HWND, default_name: &str) -> Result<Option<PathBuf>, String> {
-    let mut filename = [0u16; 1024];
-    let default_name: Vec<u16> = default_name.encode_utf16().collect();
-    filename[..default_name.len()].copy_from_slice(&default_name);
-    let mut dialog = OPENFILENAMEW {
-        lStructSize: size_of::<OPENFILENAMEW>() as u32,
-        hwndOwner: window,
-        lpstrFilter: w!("PNG 图片 (*.png)\0*.png\0"),
-        lpstrFile: filename.as_mut_ptr(),
-        nMaxFile: filename.len() as u32,
-        Flags: OFN_EXPLORER | OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR,
-        lpstrDefExt: w!("png"),
-        ..Default::default()
-    };
-    if GetSaveFileNameW(&mut dialog) == 0 {
-        let error = CommDlgExtendedError();
-        return if error == 0 {
-            Ok(None)
-        } else {
-            Err(format!("保存对话框错误 {error:#x}"))
-        };
-    }
-    let end = filename
-        .iter()
-        .position(|&unit| unit == 0)
-        .unwrap_or(filename.len());
-    Ok(Some(OsString::from_wide(&filename[..end]).into()))
-}
-
-/// Copies bytes into a movable global block for SetClipboardData.
-unsafe fn global_copy(bytes: &[u8]) -> io::Result<*mut core::ffi::c_void> {
-    let memory = GlobalAlloc(GMEM_MOVEABLE, bytes.len());
-    if memory.is_null() {
-        return Err(io::Error::last_os_error());
-    }
-    let target = GlobalLock(memory).cast::<u8>();
-    if target.is_null() {
-        let error = io::Error::last_os_error();
-        GlobalFree(memory);
-        return Err(error);
-    }
-    target.copy_from_nonoverlapping(bytes.as_ptr(), bytes.len());
-    GlobalUnlock(memory);
-    Ok(memory)
-}
-
-fn bitmap_header(width: i32, height: i32) -> BITMAPINFOHEADER {
+pub(crate) fn bitmap_header(width: i32, height: i32) -> BITMAPINFOHEADER {
     BITMAPINFOHEADER {
         biSize: size_of::<BITMAPINFOHEADER>() as u32,
         biWidth: width,
@@ -498,28 +378,4 @@ fn pixel_len(width: i32, height: i32) -> io::Result<usize> {
         io::ErrorKind::InvalidInput,
         "桌面或选区尺寸无效",
     ))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn clipboard_dib_is_opaque_and_bottom_up() {
-        // A 1×2 GDI capture: alpha is 0, rows are top-down.
-        let image = Image {
-            width: 1,
-            height: 2,
-            pixels: vec![10, 20, 30, 0, 40, 50, 60, 0],
-        };
-        let dib = image.clipboard_dib();
-        let header_size = size_of::<BITMAPINFOHEADER>();
-        let header =
-            unsafe { dib.as_ptr().cast::<BITMAPINFOHEADER>().read_unaligned() };
-        assert_eq!(header.biHeight, 2, "positive height means bottom-up");
-        assert_eq!(&dib[header_size..], &[40, 50, 60, 255, 10, 20, 30, 255]);
-        let mut png = Vec::new();
-        image.write_png(&mut png).unwrap();
-        assert_eq!(&png[1..4], b"PNG");
-    }
 }

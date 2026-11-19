@@ -8,13 +8,9 @@ use std::{
 use windows_sys::{
     core::w,
     Win32::{
-        Foundation::{GlobalFree, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM},
+        Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM},
         Graphics::Gdi::*,
-        System::{
-            DataExchange::{CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData},
-            LibraryLoader::GetModuleHandleW,
-            Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE},
-        },
+        System::LibraryLoader::GetModuleHandleW,
         UI::{
             HiDpi::GetDpiForWindow,
             Input::KeyboardAndMouse::{
@@ -34,7 +30,6 @@ use crate::{
 };
 
 const CLASS: *const u16 = w!("Snapshot.Dialog");
-const CF_UNICODETEXT: u32 = 13;
 const WIDTH: i32 = 420;
 const PAD: i32 = 24;
 const BADGE: i32 = 36;
@@ -276,25 +271,9 @@ unsafe fn copy_message(window: HWND) {
     }) else {
         return;
     };
-    let units: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
-    if OpenClipboard(window) == 0 {
+    if crate::output::copy_text(window, &text).is_err() {
         return;
     }
-    EmptyClipboard();
-    let memory = GlobalAlloc(GMEM_MOVEABLE, units.len() * 2);
-    if !memory.is_null() {
-        let target = GlobalLock(memory) as *mut u16;
-        if !target.is_null() {
-            target.copy_from_nonoverlapping(units.as_ptr(), units.len());
-            GlobalUnlock(memory);
-            if SetClipboardData(CF_UNICODETEXT, memory).is_null() {
-                GlobalFree(memory);
-            }
-        } else {
-            GlobalFree(memory);
-        }
-    }
-    CloseClipboard();
     STATE.with_borrow_mut(|state| {
         if let Some(state) = state {
             state.copied = true;

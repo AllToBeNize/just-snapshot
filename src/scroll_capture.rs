@@ -25,7 +25,8 @@ use windows_sys::{
 };
 
 use crate::{
-    capture::{save_path, Image, RegionCapture},
+    capture::{Image, RegionCapture},
+    output,
     overlay_ui::monitor_info,
     scroll_input::{
         InputHooks, InputTarget, CANCEL_CAPTURE, COPY_CAPTURE, SAVE_CAPTURE, WHEEL_RECEIVED,
@@ -636,36 +637,22 @@ unsafe fn export(window: HWND, save: bool) {
     });
     KillTimer(window, TIMER);
     let input = InputHooks::target(None);
-    let result = if save {
-        save_path(window, "Snapshot-Long.png").and_then(|path| {
-            SESSION.with_borrow(|session| match (path, session.as_ref()) {
-                (Some(path), Some(session)) => session
-                    .stitcher
-                    .image
-                    .save_png(&path)
-                    .map(|()| true)
-                    .map_err(|error| error.to_string()),
-                _ => Ok(false),
-            })
-        })
+    let target = if save {
+        output::Target::Save("Snapshot-Long.png")
     } else {
-        SESSION.with_borrow(|session| match session {
-            Some(session) => session
-                .stitcher
-                .image
-                .copy_to_clipboard(window)
-                .map(|()| true)
-                .map_err(|error| error.to_string()),
-            None => Ok(false),
-        })
+        output::Target::Copy
     };
+    let result = SESSION.with_borrow(|session| match session {
+        Some(session) => output::deliver(window, &session.stitcher.image, target),
+        None => Ok(false),
+    });
     match result {
         Ok(true) => {
             DestroyWindow(window);
             return;
         }
         Ok(false) => {}
-        Err(error) => show_error(window, &format!("输出长截图失败。\n{error}")),
+        Err(error) => show_error(window, &error),
     }
     let resume = SESSION.with_borrow_mut(|session| {
         if let Some(session) = session {

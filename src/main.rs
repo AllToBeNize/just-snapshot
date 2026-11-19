@@ -8,6 +8,7 @@ mod dialog;
 mod hotkey;
 mod icons;
 mod mosaic;
+mod output;
 mod overlay_ui;
 mod panel_edges;
 mod pinned;
