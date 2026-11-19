@@ -141,10 +141,6 @@ pub fn inflate(rect: RECT, amount: i32) -> RECT {
     }
 }
 
-pub fn contains(rect: RECT, x: i32, y: i32) -> bool {
-    x >= rect.left && x < rect.right && y >= rect.top && y < rect.bottom
-}
-
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Badge {
     Check,

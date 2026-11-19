@@ -24,6 +24,7 @@ use windows_sys::{
 
 use crate::{
     overlay_ui::monitor_info,
+    selection_geometry::{contains, mouse_point},
     text_render::Graphics,
     theme::{self, argb, mix},
     ui::{self, Badge, Fonts},
@@ -125,10 +126,10 @@ impl Layout {
         }
     }
 
-    fn hit(&self, x: i32, y: i32) -> Option<Button> {
-        if ui::contains(self.ok, x, y) {
+    fn hit(&self, point: POINT) -> Option<Button> {
+        if contains(self.ok, point) {
             Some(Button::Ok)
-        } else if ui::contains(self.copy, x, y) {
+        } else if contains(self.copy, point) {
             Some(Button::Copy)
         } else {
             None
@@ -282,17 +283,14 @@ unsafe fn copy_message(window: HWND) {
     InvalidateRect(window, null(), 0);
 }
 
-fn point(lparam: LPARAM) -> (i32, i32) {
-    (
-        (lparam & 0xffff) as i16 as i32,
-        ((lparam >> 16) & 0xffff) as i16 as i32,
-    )
-}
-
 unsafe fn hit(window: HWND, lparam: LPARAM) -> Option<Button> {
-    let (x, y) = point(lparam);
+    let point = mouse_point(lparam);
     let dc = GetDC(window);
-    let hit = STATE.with_borrow(|state| state.as_ref().and_then(|state| Layout::new(dc, state).hit(x, y)));
+    let hit = STATE.with_borrow(|state| {
+        state
+            .as_ref()
+            .and_then(|state| Layout::new(dc, state).hit(point))
+    });
     ReleaseDC(window, dc);
     hit
 }
@@ -312,10 +310,7 @@ unsafe extern "system" fn window_proc(
             EndPaint(window, &paint);
         }
         WM_NCHITTEST => {
-            let mut client = POINT {
-                x: (lparam & 0xffff) as i16 as i32,
-                y: ((lparam >> 16) & 0xffff) as i16 as i32,
-            };
+            let mut client = mouse_point(lparam);
             ScreenToClient(window, &mut client);
             let lparam = ((client.y as u32 & 0xffff) << 16 | (client.x as u32 & 0xffff)) as LPARAM;
             // Anything outside the buttons drags the dialog.

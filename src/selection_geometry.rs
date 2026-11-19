@@ -24,6 +24,14 @@ pub enum DragKind {
     Resize(Handle),
 }
 
+/// Client coordinates from a mouse message's LPARAM (signed, multi-monitor safe).
+pub fn mouse_point(lparam: isize) -> POINT {
+    POINT {
+        x: i32::from(lparam as i16),
+        y: i32::from((lparam >> 16) as i16),
+    }
+}
+
 pub fn contains(rect: RECT, point: POINT) -> bool {
     point.x >= rect.left && point.x < rect.right && point.y >= rect.top && point.y < rect.bottom
 }

@@ -7,6 +7,7 @@ use crate::{
     text_render::Graphics,
     theme::{self, argb},
     typography::{self, TextStyle},
+    ui::{inset, to_f},
 };
 use windows_sys::{
     core::w,
@@ -353,19 +354,6 @@ fn action_icon(action: Action) -> Icon {
         Action::Pin => Icon::Pin,
         Action::Cancel => Icon::Close,
     }
-}
-
-fn to_f(rect: RECT) -> [f32; 4] {
-    [
-        rect.left as f32,
-        rect.top as f32,
-        rect.right as f32,
-        rect.bottom as f32,
-    ]
-}
-
-fn inset([left, top, right, bottom]: [f32; 4], amount: f32) -> [f32; 4] {
-    [left + amount, top + amount, right - amount, bottom - amount]
 }
 
 unsafe fn rounded(dc: HDC, rect: RECT, diameter: i32) {

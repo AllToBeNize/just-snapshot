@@ -29,7 +29,9 @@ use crate::{
     hotkey::{Binding, Bindings, Preferences, Shortcut, BINDINGS, DEFAULT_OPACITY_STEP},
     icons::{self, Icon},
     overlay_ui::monitor_info,
-    pinned, retry_hotkey, startup,
+    pinned, retry_hotkey,
+    selection_geometry::{contains, mouse_point},
+    startup,
     text_render::Graphics,
     theme::{self, argb, mix, Palette, Theme, THEMES},
     ui::{self, Badge, Fonts},
@@ -310,7 +312,7 @@ impl Layout {
 
     fn hit(&self, point: POINT) -> Option<Target> {
         self.targets()
-            .find(|(_, rect)| ui::contains(*rect, point.x, point.y))
+            .find(|(_, rect)| contains(*rect, point))
             .map(|(target, _)| target)
     }
 }
@@ -627,13 +629,6 @@ unsafe fn stop_recording(window: HWND) {
     }
 }
 
-fn point(lparam: LPARAM) -> POINT {
-    POINT {
-        x: (lparam & 0xffff) as i16 as i32,
-        y: ((lparam >> 16) & 0xffff) as i16 as i32,
-    }
-}
-
 fn layout() -> Option<Layout> {
     STATE.with_borrow(|state| state.as_ref().map(|state| Layout::new(state.scale)))
 }
@@ -654,10 +649,10 @@ unsafe extern "system" fn window_proc(
         }
         WM_NCHITTEST => {
             // The header drags the window, except where its buttons are.
-            let mut client = point(lparam);
+            let mut client = mouse_point(lparam);
             ScreenToClient(window, &mut client);
             if let Some(layout) = layout() {
-                if ui::contains(layout.header, client.x, client.y) && layout.hit(client).is_none() {
+                if contains(layout.header, client) && layout.hit(client).is_none() {
                     return HTCAPTION as LRESULT;
                 }
             }
@@ -675,7 +670,7 @@ unsafe extern "system" fn window_proc(
                 };
                 TrackMouseEvent(&mut track);
             }
-            let hit = layout().and_then(|layout| layout.hit(point(lparam)));
+            let hit = layout().and_then(|layout| layout.hit(mouse_point(lparam)));
             set_hovered(window, hit);
         }
         WM_MOUSELEAVE => {
@@ -698,7 +693,7 @@ unsafe extern "system" fn window_proc(
         }
         WM_LBUTTONDOWN => {
             SetFocus(window);
-            let hit = layout().and_then(|layout| layout.hit(point(lparam)));
+            let hit = layout().and_then(|layout| layout.hit(mouse_point(lparam)));
             let recording = STATE.with_borrow(|state| state.as_ref()?.recording);
             if recording.is_some() && hit != recording.map(Target::Key) {
                 stop_recording(window);
@@ -715,7 +710,7 @@ unsafe extern "system" fn window_proc(
         WM_LBUTTONUP => {
             let pressed = with_state(|state| state.pressed.take()).flatten();
             ReleaseCapture();
-            let hit = layout().and_then(|layout| layout.hit(point(lparam)));
+            let hit = layout().and_then(|layout| layout.hit(mouse_point(lparam)));
             animate(window);
             if let Some(target) = pressed.filter(|&target| Some(target) == hit) {
                 activate(window, target);

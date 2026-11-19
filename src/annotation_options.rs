@@ -12,6 +12,7 @@ use crate::{
     text_render::Graphics,
     theme::{self, argb},
     toolbar::{paint_panel, SHADOW},
+    ui::to_f,
     typography::{self, TextStyle},
     wide,
 };
@@ -195,8 +196,7 @@ impl Options {
                 Choice::Primary(step) | Choice::Block(step) => {
                     if hover {
                         if let Some(graphics) = &graphics {
-                            let bounds = [rect.left as f32, rect.top as f32, rect.right as f32, rect.bottom as f32];
-                            graphics.fill_round(bounds, 6.0, argb(palette.hover, 255));
+                            graphics.fill_round(to_f(rect), 6.0, argb(palette.hover, 255));
                         }
                     }
                     label(dc, rect, if step < 0 { w!("−") } else { w!("+") });

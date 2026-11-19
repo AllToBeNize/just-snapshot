@@ -38,7 +38,8 @@ use crate::{
     overlay_ui::{monitor_info, HintMode, HintPanel, Loupe},
     scroll_capture,
     selection_geometry::{
-        contains, drag_rect, hit_drag, intersect, DragKind, Handle, BORDER_BLUE, HANDLES,
+        contains, drag_rect, hit_drag, intersect, mouse_point, DragKind, Handle, BORDER_BLUE,
+        HANDLES,
     },
     show_error,
     targets::{self, ElementProbe, Request, WindowTarget, ELEMENT_READY},
@@ -515,13 +516,6 @@ unsafe extern "system" fn window_proc(
         _ => return DefWindowProcW(window, message, wparam, lparam),
     }
     0
-}
-
-fn mouse_point(lparam: LPARAM) -> POINT {
-    POINT {
-        x: i32::from(lparam as i16),
-        y: i32::from((lparam >> 16) as i16),
-    }
 }
 
 fn point_param(point: POINT) -> LPARAM {

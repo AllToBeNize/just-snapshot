@@ -33,7 +33,7 @@ use crate::{
     },
     scroll_stitch::{Stitcher, Update, MIN_HEIGHT},
     selection,
-    selection_geometry::{contains, BORDER_BLUE},
+    selection_geometry::{contains, mouse_point, BORDER_BLUE},
     show_error,
     toolbar::{paint_button, paint_panel, paint_tooltip, Action},
 };
@@ -405,13 +405,6 @@ unsafe fn set_panel_shape(window: HWND, panel: RECT) {
     );
     if !region.is_null() && SetWindowRgn(window, region, 1) == 0 {
         DeleteObject(region);
-    }
-}
-
-fn mouse_point(position: LPARAM) -> POINT {
-    POINT {
-        x: i32::from(position as i16),
-        y: i32::from((position >> 16) as i16),
     }
 }
 
