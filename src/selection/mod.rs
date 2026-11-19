@@ -19,8 +19,8 @@ use windows_sys::{
                 IMN_OPENCANDIDATE,
             },
             Input::KeyboardAndMouse::{
-                GetKeyState, ReleaseCapture, SetCapture, SetFocus, TrackMouseEvent, TME_LEAVE,
-                TRACKMOUSEEVENT, VK_CONTROL, VK_ESCAPE, VK_RETURN,
+                GetKeyState, ReleaseCapture, SetCapture, SetFocus, TrackMouseEvent, MOD_CONTROL,
+                TME_LEAVE, TRACKMOUSEEVENT, VK_CONTROL, VK_ESCAPE, VK_RETURN,
             },
             Shell::{DefSubclassProc, SetWindowSubclass},
             WindowsAndMessaging::*,
@@ -58,6 +58,7 @@ mod text;
 #[cfg(test)]
 mod tests {
     mod clipboard;
+    mod select;
     mod text;
 }
 
@@ -522,6 +523,9 @@ unsafe extern "system" fn window_proc(
                 if lparam & (1 << 30) == 0 {
                     command(window, action);
                 }
+            } else if modifiers == MOD_CONTROL && key == u32::from(b'A') {
+                // Fixed shortcut, used only when no binding claims Ctrl+A.
+                select_screen(window);
             } else if message == WM_SYSKEYDOWN {
                 return DefWindowProcW(window, message, wparam, lparam);
             }

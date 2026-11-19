@@ -69,6 +69,7 @@ impl HintMode {
                     &[
                         (Mouse(Icon::MouseLeft), w!("锁定自动选区")),
                         (Mouse(Icon::Drag), w!("手动拖出选区")),
+                        (Key("Ctrl+A"), w!("全选当前屏幕")),
                         (
                             HintInput::MouseOrKey(Icon::MouseRight, "Esc"),
                             w!("退出截图"),
@@ -541,10 +542,12 @@ mod tests {
             let [before, selected] = hint.set_mode(source.dc, HintMode::Selected).unwrap();
             assert_eq!(before.top, automatic.top);
             assert_eq!(selected.bottom, automatic.bottom);
-            assert_eq!(automatic.top - selected.top, 2 * ROW_HEIGHT);
+            // Automatic has 4 rows (with Ctrl+A), Selected has 5.
+            assert_eq!(automatic.top - selected.top, ROW_HEIGHT);
             assert!(hint.set_mode(source.dc, HintMode::Selected).is_none());
             let [_, text] = hint.set_mode(source.dc, HintMode::EditText).unwrap();
-            assert_eq!(text.top, automatic.top);
+            // EditText has 3 rows; the panel stays anchored at the bottom.
+            assert_eq!(text.top - automatic.top, ROW_HEIGHT);
             assert_eq!(text.bottom, automatic.bottom);
             let mut custom = hotkey::DEFAULT;
             custom.set(

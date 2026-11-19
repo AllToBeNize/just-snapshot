@@ -150,6 +150,41 @@ pub(super) fn rect_area(rect: RECT) -> i64 {
     i64::from(rect.right - rect.left) * i64::from(rect.bottom - rect.top)
 }
 
+/// Ctrl+A: selects the whole monitor under the cursor and locks it, so the
+/// toolbar appears right away. Ignored while a drag or text edit is active.
+pub(super) unsafe fn select_screen(window: HWND) {
+    let mut cursor = POINT::default();
+    GetCursorPos(&mut cursor);
+    let change = SESSION.with_borrow_mut(|session| {
+        let selection = session.as_mut()?;
+        if selection.drag.is_some()
+            || selection.text_drag.is_some()
+            || selection.editor.is_some()
+            || selection.annotations.draft.is_some()
+        {
+            return None;
+        }
+        let screen = monitor_info(cursor)
+            .and_then(|info| overlay_rect(info.rcMonitor, selection.desktop.bounds))?;
+        let previous = selection.rect;
+        selection.rect = screen;
+        selection.automatic = false;
+        selection.target = None;
+        selection.visual_probe = None;
+        Some((previous, screen, selection.canvas))
+    });
+    if let Some((old, new, canvas)) = change {
+        invalidate_change(window, old, new, canvas);
+        InvalidateRect(window, &old, 0);
+        hide_loupe(window);
+        refresh_toolbar(window);
+        refresh_hint(window);
+        let mut point = cursor;
+        ScreenToClient(window, &mut point);
+        update_cursor(point);
+    }
+}
+
 pub(super) unsafe fn reset_automatic(window: HWND, point: POINT) {
     let change = SESSION.with_borrow_mut(|session| {
         let selection = session.as_mut()?;

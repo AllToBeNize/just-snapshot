@@ -4,7 +4,8 @@ use super::super::*;
 fn new_text_can_be_resized_before_typing_and_reopened_after_moving() {
     unsafe {
         let instance = GetModuleHandleW(null());
-        register(instance).unwrap();
+        // Tests share the process-wide window class; another test may have registered it.
+        let _ = register(instance);
         let canvas = RECT {
             right: 480,
             bottom: 320,

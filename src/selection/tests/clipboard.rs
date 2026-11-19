@@ -9,7 +9,7 @@ use windows_sys::Win32::System::{
 
 const CF_DIB: u32 = 8;
 
-unsafe fn session(instance: HINSTANCE) -> HWND {
+pub(super) unsafe fn session(instance: HINSTANCE) -> HWND {
     let canvas = RECT {
         right: 640,
         bottom: 420,
