@@ -9,6 +9,7 @@ use windows_sys::{
 
 use crate::{
     annotation::Tool,
+    theme::{self, mix},
     capture::Surface,
     hotkey::{self, Binding},
     icons::{self, Icon},
@@ -197,8 +198,9 @@ impl Keycap {
     }
 
     unsafe fn paint(&self, dc: HDC, rect: RECT) {
+        let palette = theme::palette();
         if !matches!(self, Self::Separator) {
-            SetDCBrushColor(dc, 0x00b0_b0b0);
+            SetDCBrushColor(dc, mix(palette.tooltip, palette.tooltip_text, 0.6));
             FrameRect(dc, &rect, GetStockObject(DC_BRUSH));
         }
         match self {
@@ -211,11 +213,11 @@ impl Keycap {
                     bottom: rect.bottom - 2,
                 },
                 *icon,
-                0x00ff_ffff,
+                palette.tooltip_text,
             ),
             Self::Text(_) | Self::Separator => {
                 let mut text_rect = rect;
-                SetTextColor(dc, 0x00ff_ffff);
+                SetTextColor(dc, palette.tooltip_text);
                 let label = match self {
                     Self::Text(text) => text.as_ptr(),
                     _ => w!("/"),
@@ -317,7 +319,10 @@ impl HintPanel {
             bottom: height,
             ..Default::default()
         };
-        FillRect(surface.dc, &panel, GetStockObject(BLACK_BRUSH));
+        // A dark HUD in every theme: the theme's tooltip color over the screenshot.
+        let palette = theme::palette();
+        SetDCBrushColor(surface.dc, palette.tooltip);
+        FillRect(surface.dc, &panel, GetStockObject(DC_BRUSH));
         let blend = BLENDFUNCTION {
             SourceConstantAlpha: 51,
             ..Default::default()
@@ -336,7 +341,7 @@ impl HintPanel {
             blend,
         );
         let brush = GetStockObject(DC_BRUSH);
-        SetDCBrushColor(surface.dc, 0x0057_5757);
+        SetDCBrushColor(surface.dc, mix(palette.tooltip, palette.tooltip_text, 0.3));
         FrameRect(surface.dc, &panel, brush);
         SetBkMode(surface.dc, TRANSPARENT as i32);
         let split = (PANEL_INSET + key_column).min(width.saturating_sub(2 * PANEL_INSET));
@@ -365,7 +370,7 @@ impl HintPanel {
                 bottom: top + ROW_HEIGHT,
             };
             SelectObject(surface.dc, description_font);
-            SetTextColor(surface.dc, 0x00f4_f4f4);
+            SetTextColor(surface.dc, palette.tooltip_text);
             DrawTextW(
                 surface.dc,
                 description,

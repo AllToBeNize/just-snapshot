@@ -1,5 +1,6 @@
 use crate::{
     capture::{Image, Surface},
+    theme::{self, mix},
     hotkey::DEFAULT_OPACITY_STEP,
     toolbar::paint_size_badge,
 };
@@ -177,13 +178,10 @@ unsafe extern "system" fn window_proc(
             let mut bounds = RECT::default();
             GetClientRect(window, &mut bounds);
             let brush = GetStockObject(DC_BRUSH);
-            for color in [
-                0x0056_3515,
-                0x0088_5220,
-                0x00bd_7130,
-                0x00ee_9a42,
-                0x00ff_c174,
-            ] {
+            // A glow that fades from the theme accent into its shadow.
+            let palette = theme::palette();
+            for step in 0..5 {
+                let color = mix(palette.shadow, palette.accent_hover, step as f32 / 4.0);
                 SetDCBrushColor(dc, color);
                 FrameRect(dc, &bounds, brush);
                 InflateRect(&mut bounds, -1, -1);

@@ -27,6 +27,7 @@ use windows_sys::{
 use crate::{
     capture::{Image, RegionCapture},
     output,
+    theme,
     overlay_ui::monitor_info,
     scroll_input::{
         InputHooks, InputTarget, CANCEL_CAPTURE, COPY_CAPTURE, SAVE_CAPTURE, WHEEL_RECEIVED,
@@ -163,7 +164,7 @@ impl Preview {
     }
 
     unsafe fn paint(&self, dc: HDC) {
-        SetDCBrushColor(dc, 0x00ef_efef);
+        SetDCBrushColor(dc, theme::palette().background);
         let visible = RECT {
             bottom: self.bounds.top + self.thumbnail.height + 2,
             ..self.bounds
