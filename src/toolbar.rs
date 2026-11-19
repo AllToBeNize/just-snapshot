@@ -48,7 +48,7 @@ impl Action {
 
     pub fn enabled(self, history: &History) -> bool {
         match self {
-            Self::Undo => history.draft.is_none() && history.has_marks(),
+            Self::Undo => history.draft.is_none() && history.can_undo(),
             Self::Redo => history.draft.is_none() && history.can_redo(),
             _ => true,
         }
@@ -518,13 +518,13 @@ mod tests {
         history.push(Mark::Rectangle(RECT::default()));
         assert!(Action::Undo.enabled(&history));
         assert!(!Action::Redo.enabled(&history));
-        history.undo();
+        history.undo(&mut RECT::default());
         assert!(!Action::Undo.enabled(&history));
         assert!(Action::Redo.enabled(&history));
-        history.redo();
+        history.redo(&mut RECT::default());
         assert!(Action::Undo.enabled(&history));
         assert!(!Action::Redo.enabled(&history));
-        history.undo();
+        history.undo(&mut RECT::default());
         history.push(Mark::Rectangle(RECT::default()));
         assert!(!Action::Redo.enabled(&history));
     }

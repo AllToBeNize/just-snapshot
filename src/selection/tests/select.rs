@@ -34,3 +34,28 @@ fn select_screen_locks_the_monitor_under_the_cursor() {
         DestroyWindow(window);
     }
 }
+
+#[test]
+fn moving_the_selection_can_be_undone_and_redone() {
+    unsafe {
+        let instance = GetModuleHandleW(null());
+        let _ = register(instance);
+        let window = session(instance);
+        let rect = || SESSION.with_borrow(|s| s.as_ref().unwrap().selection_rect());
+        let original = rect();
+        let mouse = |message, x: i32, y: i32| {
+            SendMessageW(window, message, 0, ((y << 16) | x) as LPARAM);
+        };
+        // Drag from inside the locked selection: a move.
+        mouse(WM_LBUTTONDOWN, 300, 150);
+        mouse(WM_MOUSEMOVE, 320, 170);
+        mouse(WM_LBUTTONUP, 320, 170);
+        let moved = rect();
+        assert_eq!((moved.0 - original.0, moved.1 - original.1), (20, 20));
+        command(window, Action::Undo);
+        assert_eq!(rect(), original, "undo restores the selection");
+        command(window, Action::Redo);
+        assert_eq!(rect(), moved, "redo moves it again");
+        DestroyWindow(window);
+    }
+}

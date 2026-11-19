@@ -59,6 +59,8 @@ enum Edit {
     Remove(usize),
     Insert(usize, Mark),
     ReplaceText(usize, TextMark),
+    /// The selection rectangle before a move or resize.
+    Region(RECT),
 }
 
 impl Edit {
@@ -84,8 +86,18 @@ impl History {
         !self.marks.is_empty()
     }
 
+    pub fn can_undo(&self) -> bool {
+        !self.undo.is_empty()
+    }
+
     pub fn can_redo(&self) -> bool {
         !self.redo.is_empty()
+    }
+
+    /// Records a selection move or resize so it can be undone like a mark.
+    pub fn record_region(&mut self, previous: RECT) {
+        self.redo.clear();
+        self.undo.push(Edit::Region(previous));
     }
 
     pub fn push(&mut self, mark: Mark) -> usize {
@@ -139,23 +151,25 @@ impl History {
         }
     }
 
-    pub fn undo(&mut self) -> Option<usize> {
+    /// Undoes one step. `region` is the live selection rectangle, which a
+    /// region step swaps. Returns the text box to reselect, if any.
+    pub fn undo(&mut self, region: &mut RECT) -> Option<usize> {
         let edit = self.undo.pop()?;
         let selected = edit.selected_text();
-        let inverse = self.apply(edit);
+        let inverse = self.apply(edit, region);
         self.redo.push(inverse);
         selected
     }
 
-    pub fn redo(&mut self) -> Option<usize> {
+    pub fn redo(&mut self, region: &mut RECT) -> Option<usize> {
         let edit = self.redo.pop()?;
         let selected = edit.selected_text();
-        let inverse = self.apply(edit);
+        let inverse = self.apply(edit, region);
         self.undo.push(inverse);
         selected
     }
 
-    fn apply(&mut self, edit: Edit) -> Edit {
+    fn apply(&mut self, edit: Edit, region: &mut RECT) -> Edit {
         match edit {
             Edit::Remove(index) => Edit::Insert(index, self.marks.remove(index)),
             Edit::Insert(index, mark) => {
@@ -166,6 +180,7 @@ impl History {
                 index,
                 std::mem::replace(self.text_mut(index).unwrap(), previous),
             ),
+            Edit::Region(previous) => Edit::Region(std::mem::replace(region, previous)),
         }
     }
 
@@ -425,17 +440,17 @@ mod tests {
         );
         history.replace_text(text_index, moved.clone());
 
-        assert_eq!(history.undo(), Some(text_index));
+        assert_eq!(history.undo(&mut RECT::default()), Some(text_index));
         assert!(history.text(text_index) == Some(&edited));
-        assert_eq!(history.undo(), Some(text_index));
+        assert_eq!(history.undo(&mut RECT::default()), Some(text_index));
         assert!(history.text(text_index) == Some(&original));
         assert_eq!(history.marks.len(), 2);
-        history.redo();
-        history.redo();
+        history.redo(&mut RECT::default());
+        history.redo(&mut RECT::default());
         assert!(history.text(text_index) == Some(&moved));
         history.remove_text(text_index);
         assert_eq!(history.marks.len(), 1);
-        assert_eq!(history.undo(), Some(text_index));
+        assert_eq!(history.undo(&mut RECT::default()), Some(text_index));
         assert!(history.text(text_index) == Some(&moved));
     }
 
@@ -493,7 +508,7 @@ mod tests {
                 .unwrap();
             let offset = 20 * image.width as usize * 4;
             assert_eq!(image.pixels[offset..offset + 3], [128; 3]);
-            history.undo();
+            history.undo(&mut RECT::default());
             assert!(!history.has_marks());
         }
     }

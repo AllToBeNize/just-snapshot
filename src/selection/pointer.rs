@@ -24,7 +24,10 @@ pub(super) unsafe fn update_drag(window: HWND, point: POINT, end: bool) -> bool 
             selection.automatic = false;
         }
         if end {
-            selection.drag = None;
+            let drag = selection.drag.take()?;
+            if drag.started && drag.locked && EqualRect(&drag.previous, &selection.rect) == 0 {
+                selection.annotations.record_region(drag.previous);
+            }
         }
         Some((previous, selection.rect, selection.canvas, copy))
     });
@@ -167,6 +170,9 @@ pub(super) unsafe fn select_screen(window: HWND) {
         let screen = monitor_info(cursor)
             .and_then(|info| overlay_rect(info.rcMonitor, selection.desktop.bounds))?;
         let previous = selection.rect;
+        if !selection.automatic && EqualRect(&previous, &screen) == 0 {
+            selection.annotations.record_region(previous);
+        }
         selection.rect = screen;
         selection.automatic = false;
         selection.target = None;

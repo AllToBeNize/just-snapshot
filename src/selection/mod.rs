@@ -136,6 +136,11 @@ impl Editor {
 }
 
 impl Selection {
+    #[cfg(test)]
+    fn selection_rect(&self) -> (i32, i32, i32, i32) {
+        (self.rect.left, self.rect.top, self.rect.right, self.rect.bottom)
+    }
+
     fn selected_text(&self) -> Option<&TextMark> {
         self.selected_text
             .and_then(|index| self.annotations.text(index))
@@ -170,6 +175,8 @@ impl Selection {
 struct Drag {
     anchor: POINT,
     previous: RECT,
+    /// The selection was already locked, so a change is an undoable edit.
+    locked: bool,
     kind: DragKind,
     started: bool,
     copy_on_click: bool,
@@ -375,6 +382,7 @@ unsafe extern "system" fn window_proc(
                     selection.drag = Some(Drag {
                         anchor: point,
                         previous: selection.rect,
+                        locked: !selection.automatic,
                         kind: if selection.automatic {
                             DragKind::Draw
                         } else {

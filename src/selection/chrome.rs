@@ -246,6 +246,7 @@ pub(super) unsafe fn command(window: HWND, action: Action) {
             return None;
         }
         let previous = selection.selected_text().map(TextMark::bounds);
+        let region = selection.rect;
         match action {
             Action::Tool(tool) => {
                 selection.annotations.tool =
@@ -253,10 +254,11 @@ pub(super) unsafe fn command(window: HWND, action: Action) {
                 selection.selected_text = None;
             }
             Action::Undo | Action::Redo => {
+                let region = &mut selection.rect;
                 let text = if action == Action::Undo {
-                    selection.annotations.undo()
+                    selection.annotations.undo(region)
                 } else {
-                    selection.annotations.redo()
+                    selection.annotations.redo(region)
                 };
                 selection.selected_text =
                     text.filter(|_| selection.annotations.tool == Some(Tool::Text));
@@ -271,9 +273,19 @@ pub(super) unsafe fn command(window: HWND, action: Action) {
             toolbar.bounds,
             previous,
             selection.selected_text().map(TextMark::bounds),
+            region,
         ))
     });
-    if let Some((rect, toolbar, previous, current)) = changed {
+    if let Some((rect, toolbar, previous, current, region)) = changed {
+        if EqualRect(&rect, &region) == 0 {
+            // Undoing a selection move: repaint both outlines and move the toolbar.
+            let canvas = SESSION.with_borrow(|session| session.as_ref().map(|s| s.canvas));
+            if let Some(canvas) = canvas {
+                invalidate_change(window, region, rect, canvas);
+            }
+            InvalidateRect(window, &region, 0);
+            refresh_toolbar(window);
+        }
         InvalidateRect(window, &rect, 0);
         InvalidateRect(window, &toolbar, 0);
         for bounds in [previous, current].into_iter().flatten() {
