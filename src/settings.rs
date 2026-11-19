@@ -9,7 +9,7 @@ use windows_sys::{
         Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM},
         Graphics::Gdi::COLOR_WINDOW,
         UI::{
-            Controls::{EM_LIMITTEXT, EM_SETSEL},
+            Controls::{BST_CHECKED, EM_LIMITTEXT, EM_SETSEL},
             Input::KeyboardAndMouse::{SetFocus, VK_ESCAPE, VK_TAB},
             Shell::{DefSubclassProc, SetWindowSubclass},
             WindowsAndMessaging::*,
@@ -21,20 +21,21 @@ use crate::{
     apply_preferences,
     hotkey::{self, Bindings, Preferences, Shortcut, BINDINGS},
     overlay_ui::monitor_info,
-    pinned, show_error,
+    pinned, show_error, startup,
     typography::{self, TextStyle},
     wide,
 };
 
 const CLASS: *const u16 = w!("Snapshot.Settings");
 const WIDTH: i32 = 396;
-const HEIGHT: i32 = 476;
+const HEIGHT: i32 = 506;
 const ROW: i32 = 30;
 const FIELD: usize = 100;
 const OPACITY_STEP_FIELD: usize = FIELD + BINDINGS.len();
 const APPLY: usize = 1;
 const CANCEL: usize = 2;
 const RESET: usize = 3;
+const START_AT_LOGIN: usize = 4;
 
 thread_local! {
     static WINDOW: Cell<HWND> = const { Cell::new(null_mut()) };
@@ -86,6 +87,7 @@ pub unsafe fn open(owner: HWND, instance: HINSTANCE) -> io::Result<()> {
         SetForegroundWindow(existing);
         return Ok(());
     }
+    let start_at_login = startup::is_enabled().map_err(io::Error::other)?;
     let style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU;
     let mut frame = RECT {
         right: WIDTH,
@@ -121,7 +123,7 @@ pub unsafe fn open(owner: HWND, instance: HINSTANCE) -> io::Result<()> {
     if window.is_null() {
         return Err(io::Error::last_os_error());
     }
-    if let Err(error) = create_controls(window, instance) {
+    if let Err(error) = create_controls(window, instance, start_at_login) {
         DestroyWindow(window);
         return Err(error);
     }
@@ -132,7 +134,11 @@ pub unsafe fn open(owner: HWND, instance: HINSTANCE) -> io::Result<()> {
     Ok(())
 }
 
-unsafe fn create_controls(window: HWND, instance: HINSTANCE) -> io::Result<()> {
+unsafe fn create_controls(
+    window: HWND,
+    instance: HINSTANCE,
+    start_at_login: bool,
+) -> io::Result<()> {
     let font = typography::font(TextStyle::Ui) as usize;
     let control = |class, label, style, rect: (i32, i32, i32, i32), id: usize| {
         let (x, y, width, height) = rect;
@@ -204,25 +210,33 @@ unsafe fn create_controls(window: HWND, instance: HINSTANCE) -> io::Result<()> {
         OPACITY_STEP_FIELD,
     )?;
     SendMessageW(input, EM_LIMITTEXT, 3, 0);
+    let checkbox = control(
+        w!("BUTTON"),
+        w!("登录 Windows 时自动启动"),
+        WS_TABSTOP | BS_AUTOCHECKBOX as u32,
+        (22, y + ROW, 352, 25),
+        START_AT_LOGIN,
+    )?;
+    SendMessageW(checkbox, BM_SETCHECK, usize::from(start_at_login), 0);
     control(
         w!("BUTTON"),
         w!("恢复默认"),
         WS_TABSTOP,
-        (22, 437, 86, 27),
+        (22, 467, 86, 27),
         RESET,
     )?;
     control(
         w!("BUTTON"),
         w!("取消"),
         WS_TABSTOP,
-        (215, 437, 73, 27),
+        (215, 467, 73, 27),
         CANCEL,
     )?;
     control(
         w!("BUTTON"),
         w!("保存"),
         WS_TABSTOP | BS_DEFPUSHBUTTON as u32,
-        (301, 437, 73, 27),
+        (301, 467, 73, 27),
         APPLY,
     )?;
     Ok(())
@@ -297,7 +311,12 @@ unsafe extern "system" fn window_proc(
         WM_COMMAND => match wparam & 0xffff {
             APPLY => {
                 let owner = GetWindow(window, GW_OWNER);
-                match read_preferences(window).and_then(|config| apply_preferences(owner, config)) {
+                let checkbox = GetDlgItem(window, START_AT_LOGIN as i32);
+                let start_at_login =
+                    SendMessageW(checkbox, BM_GETCHECK, 0, 0) == BST_CHECKED as LRESULT;
+                match read_preferences(window)
+                    .and_then(|config| apply_preferences(owner, config, start_at_login))
+                {
                     Ok(()) => {
                         DestroyWindow(window);
                     }
@@ -316,6 +335,8 @@ unsafe extern "system" fn window_proc(
                 let input = GetDlgItem(window, OPACITY_STEP_FIELD as i32);
                 let label = wide(&hotkey::DEFAULT_OPACITY_STEP.to_string());
                 SetWindowTextW(input, label.as_ptr());
+                let checkbox = GetDlgItem(window, START_AT_LOGIN as i32);
+                SendMessageW(checkbox, BM_SETCHECK, 0, 0);
             }
             _ => {}
         },
@@ -358,7 +379,14 @@ mod tests {
                 null(),
             );
             assert!(!window.is_null());
-            create_controls(window, instance).unwrap();
+            create_controls(window, instance, true).unwrap();
+            let checkbox = GetDlgItem(window, START_AT_LOGIN as i32);
+            assert_eq!(
+                SendMessageW(checkbox, BM_GETCHECK, 0, 0),
+                BST_CHECKED as LRESULT
+            );
+            SendMessageW(window, WM_COMMAND, RESET, 0);
+            assert_eq!(SendMessageW(checkbox, BM_GETCHECK, 0, 0), 0);
             assert_eq!(read_preferences(window).unwrap(), Preferences::default());
             let opacity = GetDlgItem(window, OPACITY_STEP_FIELD as i32);
             SetWindowTextW(opacity, w!("0"));

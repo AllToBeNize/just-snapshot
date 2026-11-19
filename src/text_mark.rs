@@ -1,12 +1,9 @@
 use windows_sys::Win32::{
     Foundation::{POINT, RECT},
-    Graphics::Gdi::*,
+    Graphics::{Gdi::*, GdiPlus::PointF},
 };
 
-use crate::{
-    selection_geometry::{intersect, BORDER_BLUE},
-    typography,
-};
+use crate::{capture::Image, selection_geometry::BORDER_BLUE, text_render::Graphics, typography};
 
 #[derive(Clone, PartialEq)]
 pub struct TextMark {
@@ -61,26 +58,15 @@ impl TextMark {
 
     pub fn edit_rect(&self, clip: RECT) -> RECT {
         if self.is_rotated() {
-            let (sin, cos) = self.angle.sin_cos();
-            let (sin, cos) = (sin.abs(), cos.abs());
-            let width = f64::from(self.width);
-            let height = f64::from(self.height);
-            // Keep the horizontal native input inside the rotated outline.
-            let projected_width = width * cos + height * sin;
-            let projected_height = width * sin + height * cos;
-            let scale = ((width - 4.0).max(1.0) / (projected_width * cos + projected_height * sin))
-                .min((height - 4.0).max(1.0) / (projected_width * sin + projected_height * cos));
-            let half_width = projected_width * scale / 2.0;
-            let half_height = projected_height * scale / 2.0;
-            let inside = RECT {
-                left: (self.center.0 - half_width).ceil() as i32,
-                top: (self.center.1 - half_height).ceil() as i32,
-                right: (self.center.0 + half_width).floor() as i32,
-                bottom: (self.center.1 + half_height).floor() as i32,
+            let rect = self.local_rect();
+            let x = self.center.0.round() as i32;
+            let y = self.center.1.round() as i32;
+            return RECT {
+                left: rect.left + x,
+                top: rect.top + y,
+                right: rect.left + x + self.width.min(clip.right - clip.left),
+                bottom: rect.top + y + self.height.min(clip.bottom - clip.top),
             };
-            if let Some(visible) = intersect(inside, clip) {
-                return visible;
-            }
         }
         let width = self.width.max(32).min(clip.right - clip.left);
         let height = self.height.max(self.size + 10).min(clip.bottom - clip.top);
@@ -111,6 +97,69 @@ impl TextMark {
         let x = f64::from(point.x) - self.center.0;
         let y = f64::from(point.y) - self.center.1;
         (x * cos + y * sin, -x * sin + y * cos)
+    }
+
+    fn input_origin(&self) -> (i32, i32) {
+        let rect = self.local_rect();
+        (
+            rect.left + ((self.width - 1) / 2).min(2),
+            rect.top + ((self.height - 1) / 2).min(2),
+        )
+    }
+
+    pub fn input_point(&self, point: POINT) -> POINT {
+        let (x, y) = self.local_point(point);
+        let (left, top) = self.input_origin();
+        POINT {
+            x: x.round() as i32 - left,
+            y: y.round() as i32 - top,
+        }
+    }
+
+    pub fn input_screen_point(&self, point: POINT) -> POINT {
+        let (left, top) = self.input_origin();
+        self.screen_point(left + point.x, top + point.y)
+    }
+
+    fn precise_point(&self, x: i32, y: i32) -> PointF {
+        let (x, y) = self.transform(f64::from(x), f64::from(y));
+        PointF {
+            X: x as f32,
+            Y: y as f32,
+        }
+    }
+
+    pub unsafe fn paint_input(&self, dc: HDC, image: &Image, caret: Option<RECT>) {
+        let Some(graphics) = Graphics::new(dc) else {
+            return;
+        };
+        let (left, top) = self.input_origin();
+        graphics.image(
+            image,
+            [
+                self.precise_point(left, top),
+                self.precise_point(left + image.width, top),
+                self.precise_point(left, top + image.height),
+            ],
+            self.is_rotated(),
+        );
+        if let Some(caret) = caret {
+            let start = caret.top.clamp(0, image.height);
+            let end = caret.bottom.clamp(0, image.height);
+            if start < end && (0..image.width).contains(&caret.left) {
+                let pen = graphics.pen(self.color, (caret.right - caret.left).max(1) as f32);
+                if let Some(pen) = pen {
+                    let x = left + caret.left;
+                    graphics.lines(
+                        &pen,
+                        &[
+                            self.precise_point(x, top + start),
+                            self.precise_point(x, top + end),
+                        ],
+                    );
+                }
+            }
+        }
     }
 
     pub fn contains(&self, point: POINT) -> bool {
@@ -306,6 +355,9 @@ impl TextMark {
     }
 
     pub unsafe fn paint_frame(&self, dc: HDC) {
+        if self.is_rotated() && self.paint_smooth_frame(dc) {
+            return;
+        }
         let saved = SaveDC(dc);
         if saved == 0 {
             return;
@@ -348,6 +400,34 @@ impl TextMark {
             DeleteObject(pen);
         }
     }
+
+    unsafe fn paint_smooth_frame(&self, dc: HDC) -> bool {
+        let Some(graphics) = Graphics::new(dc) else {
+            return false;
+        };
+        let Some(pen) = graphics.pen(BORDER_BLUE, 2.0) else {
+            return false;
+        };
+        let rect = self.local_rect();
+        let corners = [
+            self.precise_point(rect.left, rect.top),
+            self.precise_point(rect.right, rect.top),
+            self.precise_point(rect.right, rect.bottom),
+            self.precise_point(rect.left, rect.bottom),
+        ];
+        graphics.lines(
+            &pen,
+            &[corners[0], corners[1], corners[2], corners[3], corners[0]],
+        );
+        let rotation = self.precise_point(0, rect.top - ROTATE_OFFSET);
+        graphics.lines(&pen, &[self.precise_point(0, rect.top), rotation]);
+        for corner in corners {
+            graphics.handle(&pen, corner, 4.0);
+        }
+        graphics.handle(&pen, rotation, ROTATE_RADIUS as f32);
+        graphics.rotation_arrow(&pen, rotation);
+        true
+    }
 }
 
 #[cfg(test)]
@@ -355,6 +435,43 @@ mod tests {
     use super::*;
     use crate::capture::{Desktop, Surface};
     use std::ptr::null_mut;
+
+    #[test]
+    fn rotated_frame_edges_blend_into_the_background() {
+        unsafe {
+            let surface = Surface::new(null_mut(), 220, 180).unwrap();
+            let bounds = RECT {
+                right: 220,
+                bottom: 180,
+                ..Default::default()
+            };
+            FillRect(surface.dc, &bounds, GetStockObject(WHITE_BRUSH));
+            let frame = RECT {
+                left: 55,
+                top: 60,
+                right: 175,
+                bottom: 120,
+            };
+            let mut text = TextMark::new(frame, 20, 0);
+            text.angle = 0.47;
+            text.paint_frame(surface.dc);
+            let edge = text.local_rect().top;
+            let mut blended = 0;
+            for x in -45..-15 {
+                let point = text.screen_point(x, edge);
+                for dy in -2..=2 {
+                    let pixel = GetPixel(surface.dc, point.x, point.y + dy);
+                    if pixel != BORDER_BLUE && pixel != 0x00ff_ffff && pixel != CLR_INVALID {
+                        blended += 1;
+                    }
+                }
+            }
+            assert!(
+                blended > 20,
+                "diagonal edge must contain partial-coverage pixels"
+            );
+        }
+    }
 
     #[test]
     fn rotated_text_renders_on_a_translated_crop_without_a_fill_or_handles() {

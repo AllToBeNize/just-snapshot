@@ -12,7 +12,12 @@ use windows_sys::{
         Graphics::Gdi::*,
         System::LibraryLoader::GetModuleHandleW,
         UI::{
-            Controls::{EM_SETRECT, WM_MOUSELEAVE},
+            Controls::{EM_SETRECT, EM_SETSEL, WM_MOUSELEAVE},
+            Input::Ime::{
+                ImmGetContext, ImmReleaseContext, ImmSetCandidateWindow, ImmSetCompositionWindow,
+                CANDIDATEFORM, CFS_CANDIDATEPOS, CFS_FORCE_POSITION, COMPOSITIONFORM,
+                IMN_OPENCANDIDATE,
+            },
             Input::KeyboardAndMouse::{
                 GetKeyState, ReleaseCapture, SetCapture, SetFocus, TrackMouseEvent, TME_LEAVE,
                 TRACKMOUSEEVENT, VK_CONTROL, VK_ESCAPE, VK_RETURN,
@@ -26,7 +31,7 @@ use windows_sys::{
 use crate::{
     annotation::{Draft, History, Mark, Style, Tool},
     annotation_options::{Choice, Options},
-    capture::{save_path, Desktop, Surface},
+    capture::{save_path, Desktop, Image, Surface},
     hotkey::{self, Shortcut},
     icons::Cursor,
     overlay_ui::{monitor_info, HintMode, HintPanel, Loupe},
@@ -37,12 +42,15 @@ use crate::{
     show_error,
     targets::{self, ElementProbe, Request, WindowTarget, ELEMENT_READY},
     text_mark::{TextHandle, TextMark},
+    text_render::{self, PRINT_BACKGROUND},
     toolbar::{paint_size_badge, paint_tooltip, Action, Toolbar},
     typography,
 };
 
 const CLASS: *const u16 = w!("Snapshot.Selection");
 const FINISH_TEXT: u32 = WM_APP + 3;
+const TEXT_INPUT_CLICK: u32 = WM_APP + 8;
+const TEXT_CARET_TIMER: usize = 3;
 
 thread_local! {
     static SESSION: RefCell<Option<Selection>> = const { RefCell::new(None) };
@@ -83,14 +91,16 @@ struct TextDrag {
     handle: TextHandle,
     original: TextMark,
     frame: Option<TextMark>,
+    caret: Option<RECT>,
 }
 
 struct Editor {
     window: HWND,
     rect: RECT,
-    background: HBRUSH,
     index: Option<usize>,
     text: TextMark,
+    preview: Option<Image>,
+    caret_visible: bool,
 }
 
 impl Editor {
@@ -99,14 +109,6 @@ impl Editor {
             Cow::Borrowed(&self.text)
         } else {
             Cow::Owned(TextMark::new(self.rect, self.text.size, self.text.color))
-        }
-    }
-}
-
-impl Drop for Editor {
-    fn drop(&mut self) {
-        unsafe {
-            DeleteObject(self.background);
         }
     }
 }
@@ -323,7 +325,12 @@ unsafe extern "system" fn window_proc(
                 let editor = session.as_ref()?.editor.as_ref()?;
                 editor.frame().contains(point).then_some(editor.window)
             }) {
-                SetFocus(editor);
+                SendMessageW(
+                    editor,
+                    TEXT_INPUT_CLICK,
+                    ((message as usize) << 16) | (wparam & 0xffff),
+                    lparam,
+                );
                 return 0;
             }
             finish_text(window, true);
@@ -406,15 +413,35 @@ unsafe extern "system" fn window_proc(
                 finish_text(window, wparam != 0);
             }
         }
+        WM_COMMAND if (wparam >> 16) as u32 == EN_CHANGE => {
+            invalidate_text_input(window, lparam as HWND);
+        }
+        WM_TIMER if wparam == TEXT_CARET_TIMER => {
+            if let Some(bounds) = SESSION.with_borrow_mut(|session| {
+                let editor = session.as_mut()?.editor.as_mut()?;
+                editor.caret_visible = !editor.caret_visible;
+                Some(editor.frame().bounds())
+            }) {
+                InvalidateRect(window, &bounds, 0);
+            }
+        }
         WM_CTLCOLOREDIT => {
-            if let Some((brush, color)) = SESSION.with_borrow(|session| {
+            if let Some(color) = SESSION.with_borrow(|session| {
                 let editor = session.as_ref()?.editor.as_ref()?;
-                (editor.window == lparam as HWND).then_some((editor.background, editor.text.color))
+                (editor.window == lparam as HWND).then_some(editor.text.color)
             }) {
                 SetTextColor(wparam as HDC, color);
                 SetBkMode(wparam as HDC, TRANSPARENT as i32);
                 SetBrushOrgEx(wparam as HDC, 0, 0, null_mut());
-                return brush as LRESULT;
+                if let Some(background) = PRINT_BACKGROUND.get() {
+                    SetBkColor(wparam as HDC, background);
+                    return GetStockObject(if background == 0 {
+                        BLACK_BRUSH
+                    } else {
+                        WHITE_BRUSH
+                    }) as LRESULT;
+                }
+                return GetStockObject(NULL_BRUSH) as LRESULT;
             }
             return DefWindowProcW(window, message, wparam, lparam);
         }
@@ -494,6 +521,10 @@ fn mouse_point(lparam: LPARAM) -> POINT {
         x: i32::from(lparam as i16),
         y: i32::from((lparam >> 16) as i16),
     }
+}
+
+fn point_param(point: POINT) -> LPARAM {
+    (u32::from(point.x as u16) | (u32::from(point.y as u16) << 16)) as LPARAM
 }
 
 unsafe fn refresh_toolbar(window: HWND) {
@@ -620,18 +651,14 @@ unsafe fn change_option(window: HWND, choice: Choice) {
             text.size = style.text_size;
             text.color = style.text_color;
             let rect = text_editor_bounds(selection, &text);
-            let layout = (EqualRect(&editor.rect, &rect) == 0)
-                .then(|| text_editor_background(selection, rect, editor.index).ok())
-                .flatten();
+            let resized = (EqualRect(&editor.rect, &rect) == 0).then_some(rect);
             let editor = selection.editor.as_mut().unwrap();
             editor.text = text;
-            let resized = layout.map(|background| {
-                DeleteObject(std::mem::replace(&mut editor.background, background));
+            if let Some(rect) = resized {
                 dirty[0] = Some(editor.frame().bounds());
                 editor.rect = rect;
                 dirty[1] = Some(editor.frame().bounds());
-                rect
-            });
+            }
             editor_font = Some((
                 editor.window,
                 typography::annotation_font(style.text_size),
@@ -662,6 +689,7 @@ unsafe fn change_option(window: HWND, choice: Choice) {
             }
             InvalidateRect(editor, null(), 1);
             SetFocus(editor);
+            invalidate_text_input(window, editor);
         }
         if let Some(options) = options {
             InvalidateRect(window, &options.bounds, 0);
@@ -897,6 +925,7 @@ unsafe fn begin_text_drag(window: HWND, point: POINT, double: bool) -> bool {
                 handle,
                 original: text,
                 frame: None,
+                caret: None,
             });
             Some((previous, bounds, None))
         }
@@ -929,11 +958,18 @@ unsafe fn begin_editor_drag(window: HWND, point: POINT) -> bool {
         return false;
     };
     let bounds = frame.bounds();
+    suppress_native_caret(editor);
     let value = read_editor_text(editor);
+    let (preview, caret) = if matches!(handle, TextHandle::Rotate) {
+        (text_render::snapshot_input(editor), input_caret(editor))
+    } else {
+        (None, None)
+    };
     SESSION.with_borrow_mut(|session| {
         let selection = session.as_mut().unwrap();
         let editor = selection.editor.as_mut().unwrap();
         editor.text.text = value;
+        editor.preview = preview;
         if !editor.text.text.is_empty() {
             editor.text.fit_text(selection.desktop.surface.dc);
             let index = if let Some(index) = editor.index {
@@ -953,9 +989,11 @@ unsafe fn begin_editor_drag(window: HWND, point: POINT) -> bool {
             handle,
             original: editor.text.clone(),
             frame: Some(frame),
+            caret,
         });
     });
     SetCapture(window);
+    KillTimer(window, TEXT_CARET_TIMER);
     ShowWindow(editor, SW_HIDE);
     SetFocus(window);
     InvalidateRect(window, &bounds, 0);
@@ -1020,6 +1058,7 @@ unsafe fn update_text_drag(window: HWND, point: POINT, end: bool) -> bool {
             invalidate_toolbar(window);
             if editing {
                 resume_editor(window);
+                invalidate_text_selection(window);
             } else {
                 update_cursor(point);
             }
@@ -1050,6 +1089,7 @@ unsafe fn cancel_text_drag(window: HWND) {
         invalidate_toolbar(window);
         if editing {
             resume_editor(window);
+            invalidate_text_selection(window);
         }
     }
 }
@@ -1084,37 +1124,30 @@ unsafe fn leave_tool(window: HWND, point: POINT) -> bool {
 }
 
 unsafe fn open_text(window: HWND, index: Option<usize>, text: TextMark) {
-    let background = SESSION.with_borrow(|session| {
-        let selection = session.as_ref().unwrap();
-        let rect = text_editor_bounds(selection, &text);
-        text_editor_background(selection, rect, index).map(|brush| (rect, brush))
-    });
-    let (rect, background) = match background {
-        Ok(value) => value,
-        Err(error) => {
-            show_error(window, &format!("无法创建文本框。\n{error}"));
-            return;
-        }
-    };
+    let rect = SESSION.with_borrow(|session| text_editor_bounds(session.as_ref().unwrap(), &text));
     let content: Vec<u16> = text.text.iter().copied().chain([0]).collect();
     let input = editor_input_rect(rect);
+    let width = input.right - input.left;
+    let height = input.bottom - input.top;
     let editor = CreateWindowExW(
         0,
         w!("EDIT"),
         content.as_ptr(),
         WS_CHILD | ES_MULTILINE as u32 | ES_AUTOVSCROLL as u32,
-        input.left,
-        input.top,
-        input.right - input.left,
-        input.bottom - input.top,
+        0,
+        -height - 1,
+        width,
+        height,
         window,
         null_mut(),
         GetModuleHandleW(null()),
         null(),
     );
-    if editor.is_null() || SetWindowSubclass(editor, Some(text_proc), 1, window as usize) == 0 {
+    if editor.is_null()
+        || SetWindowSubclass(editor, Some(text_proc), 1, window as usize) == 0
+        || !clip_native_editor(editor)
+    {
         let error = io::Error::last_os_error();
-        DeleteObject(background);
         if !editor.is_null() {
             DestroyWindow(editor);
         }
@@ -1132,13 +1165,15 @@ unsafe fn open_text(window: HWND, index: Option<usize>, text: TextMark) {
         session.as_mut().unwrap().editor = Some(Editor {
             window: editor,
             rect,
-            background,
             index,
             text,
+            preview: None,
+            caret_visible: true,
         });
     });
     SendMessageW(editor, WM_SETFONT, font as usize, 0);
     set_editor_format(editor, input);
+    start_text_caret(window, editor);
     ShowWindow(editor, SW_SHOW);
     SetFocus(editor);
     SetCursor(LoadCursorW(null_mut(), IDC_IBEAM));
@@ -1153,13 +1188,9 @@ unsafe fn resume_editor(window: HWND) {
         let selection = session.as_mut()?;
         let editor = selection.editor.as_ref()?;
         let rect = text_editor_bounds(selection, &editor.text);
-        let background = text_editor_background(selection, rect, editor.index).ok();
         let editor = selection.editor.as_mut().unwrap();
         let previous = editor.frame().bounds();
-        if let Some(background) = background {
-            DeleteObject(std::mem::replace(&mut editor.background, background));
-            editor.rect = rect;
-        }
+        editor.rect = rect;
         Some((
             editor.window,
             editor.rect,
@@ -1178,6 +1209,7 @@ unsafe fn resume_editor(window: HWND) {
         0,
     );
     position_editor(editor, rect);
+    start_text_caret(window, editor);
     ShowWindow(editor, SW_SHOW);
     SetFocus(editor);
     InvalidateRect(editor, null(), 1);
@@ -1198,16 +1230,145 @@ fn editor_input_rect(mut frame: RECT) -> RECT {
 
 unsafe fn position_editor(editor: HWND, frame: RECT) {
     let rect = editor_input_rect(frame);
+    let height = rect.bottom - rect.top;
     SetWindowPos(
         editor,
         null_mut(),
-        rect.left,
-        rect.top,
+        0,
+        -height - 1,
         rect.right - rect.left,
-        rect.bottom - rect.top,
-        SWP_NOZORDER | SWP_NOACTIVATE,
+        height,
+        SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOCOPYBITS,
     );
     set_editor_format(editor, rect);
+}
+
+unsafe fn clip_native_editor(editor: HWND) -> bool {
+    // Keep native keyboard editing and caret coordinates without a visible child surface.
+    let region = CreateRectRgn(0, 0, 0, 0);
+    if region.is_null() {
+        return false;
+    }
+    if SetWindowRgn(editor, region, 0) != 0 {
+        return true;
+    }
+    DeleteObject(region);
+    false
+}
+
+unsafe fn start_text_caret(window: HWND, editor: HWND) {
+    KillTimer(window, TEXT_CARET_TIMER);
+    let blink = GetCaretBlinkTime();
+    if blink != u32::MAX {
+        SetTimer(window, TEXT_CARET_TIMER, blink, None);
+    }
+    invalidate_text_input(window, editor);
+}
+
+unsafe fn invalidate_text_selection(window: HWND) {
+    if let Some(rect) =
+        SESSION.with_borrow(|session| session.as_ref().map(|selection| selection.rect))
+    {
+        InvalidateRect(window, &rect, 0);
+    }
+}
+
+unsafe fn invalidate_text_input(window: HWND, input: HWND) {
+    suppress_native_caret(input);
+    let bounds = SESSION.with_borrow_mut(|session| {
+        let selection = session.as_mut()?;
+        if selection.text_drag.is_some() {
+            return None;
+        }
+        let editor = selection.editor.as_mut()?;
+        if editor.window != input {
+            return None;
+        }
+        editor.preview = None;
+        editor.caret_visible = true;
+        Some(editor.frame().bounds())
+    });
+    if let Some(bounds) = bounds {
+        InvalidateRect(window, &bounds, 0);
+    }
+}
+
+unsafe fn refresh_text_preview() {
+    let input = SESSION.with_borrow(|session| {
+        let selection = session.as_ref()?;
+        let editor = selection.editor.as_ref()?;
+        (selection.text_drag.is_none() && editor.preview.is_none()).then_some(editor.window)
+    });
+    if let Some(input) = input {
+        let image = text_render::snapshot_input(input);
+        SESSION.with_borrow_mut(|session| {
+            if let Some(editor) = session
+                .as_mut()
+                .and_then(|s| s.editor.as_mut())
+                .filter(|e| e.window == input)
+            {
+                editor.preview = image;
+            }
+        });
+    }
+}
+
+unsafe fn input_caret(window: HWND) -> Option<RECT> {
+    input_caret_info(window).map(|info| info.rcCaret)
+}
+
+unsafe fn input_caret_info(window: HWND) -> Option<GUITHREADINFO> {
+    let mut info = GUITHREADINFO {
+        cbSize: size_of::<GUITHREADINFO>() as u32,
+        ..Default::default()
+    };
+    let thread = GetWindowThreadProcessId(window, null_mut());
+    (GetGUIThreadInfo(thread, &mut info) != 0
+        && info.hwndCaret == window
+        && info.hwndFocus == window)
+        .then_some(info)
+}
+
+unsafe fn suppress_native_caret(window: HWND) {
+    if input_caret_info(window).is_some_and(|info| info.flags & GUI_CARETBLINKING != 0) {
+        HideCaret(window);
+    }
+}
+
+unsafe fn position_input_method(parent: HWND, editor: HWND) {
+    let Some(caret) = input_caret(editor) else {
+        return;
+    };
+    let Some(mut point) = SESSION.with_borrow(|session| {
+        let input = session.as_ref()?.editor.as_ref()?;
+        Some(input.frame().input_screen_point(POINT {
+            x: caret.left,
+            y: caret.bottom,
+        }))
+    }) else {
+        return;
+    };
+    MapWindowPoints(parent, editor, &mut point, 1);
+    let context = ImmGetContext(editor);
+    if !context.is_null() {
+        ImmSetCompositionWindow(
+            context,
+            &COMPOSITIONFORM {
+                dwStyle: CFS_FORCE_POSITION,
+                ptCurrentPos: point,
+                ..Default::default()
+            },
+        );
+        ImmSetCandidateWindow(
+            context,
+            &CANDIDATEFORM {
+                dwStyle: CFS_CANDIDATEPOS,
+                ptCurrentPos: point,
+                ..Default::default()
+            },
+        );
+        ImmReleaseContext(editor, context);
+    }
 }
 
 unsafe fn set_editor_format(editor: HWND, rect: RECT) {
@@ -1218,26 +1379,6 @@ unsafe fn set_editor_format(editor: HWND, rect: RECT) {
         bottom: (rect.bottom - rect.top - 1).max(2),
     };
     SendMessageW(editor, EM_SETRECT, 0, &format_rect as *const RECT as LPARAM);
-}
-
-unsafe fn text_editor_background(
-    selection: &Selection,
-    rect: RECT,
-    index: Option<usize>,
-) -> io::Result<HBRUSH> {
-    let image = selection
-        .desktop
-        .composite_crop(editor_input_rect(rect), |dc| {
-            selection
-                .annotations
-                .paint(dc, selection.rect, false, index);
-        })?;
-    let (surface, _, _) = image.into_surface()?;
-    let brush = CreatePatternBrush(surface.bitmap());
-    if brush.is_null() {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(brush)
 }
 
 fn text_editor_bounds(selection: &Selection, text: &TextMark) -> RECT {
@@ -1277,6 +1418,12 @@ unsafe extern "system" fn text_proc(
     parent: usize,
 ) -> LRESULT {
     let parent = parent as HWND;
+    let from_overlay = message == TEXT_INPUT_CLICK;
+    let (message, key) = if from_overlay {
+        ((key >> 16) as u32, key & 0xffff)
+    } else {
+        (message, key)
+    };
     if message == WM_SETCURSOR {
         let mut point = POINT::default();
         let handle = if GetCursorPos(&mut point) != 0 && ScreenToClient(parent, &mut point) != 0 {
@@ -1291,10 +1438,12 @@ unsafe extern "system" fn text_proc(
         ));
         return 1;
     }
-    if matches!(
-        message,
-        WM_LBUTTONDOWN | WM_LBUTTONDBLCLK | WM_NCLBUTTONDOWN | WM_NCLBUTTONDBLCLK
-    ) {
+    if !from_overlay
+        && matches!(
+            message,
+            WM_LBUTTONDOWN | WM_LBUTTONDBLCLK | WM_NCLBUTTONDOWN | WM_NCLBUTTONDBLCLK
+        )
+    {
         let mut point = mouse_point(lparam);
         if matches!(message, WM_NCLBUTTONDOWN | WM_NCLBUTTONDBLCLK) {
             ScreenToClient(parent, &mut point);
@@ -1313,7 +1462,52 @@ unsafe extern "system" fn text_proc(
             return 0;
         }
     }
-    DefSubclassProc(editor, message, key, lparam)
+    let lparam = if matches!(
+        message,
+        WM_LBUTTONDOWN | WM_LBUTTONDBLCLK | WM_LBUTTONUP | WM_MOUSEMOVE
+    ) {
+        let mut point = mouse_point(lparam);
+        if !from_overlay {
+            MapWindowPoints(editor, parent, &mut point, 1);
+        }
+        SESSION
+            .with_borrow(|session| {
+                let input = session.as_ref()?.editor.as_ref()?;
+                Some(point_param(input.frame().input_point(point)))
+            })
+            .unwrap_or(lparam)
+    } else {
+        lparam
+    };
+    let result = DefSubclassProc(editor, message, key, lparam);
+    if matches!(message, WM_IME_STARTCOMPOSITION | WM_IME_COMPOSITION)
+        || (message == WM_IME_NOTIFY && key == IMN_OPENCANDIDATE as usize)
+    {
+        position_input_method(parent, editor);
+    }
+    if matches!(
+        message,
+        WM_KEYDOWN
+            | WM_CHAR
+            | WM_SETTEXT
+            | WM_SETFOCUS
+            | WM_KILLFOCUS
+            | WM_SETFONT
+            | WM_SIZE
+            | WM_LBUTTONDOWN
+            | WM_LBUTTONDBLCLK
+            | WM_LBUTTONUP
+            | WM_VSCROLL
+            | WM_MOUSEWHEEL
+            | WM_IME_COMPOSITION
+            | WM_IME_ENDCOMPOSITION
+            | EM_SETSEL
+            | EM_SETRECT
+    ) || (message == WM_MOUSEMOVE && key & 1 != 0)
+    {
+        invalidate_text_input(parent, editor);
+    }
+    result
 }
 
 unsafe fn read_editor_text(editor: HWND) -> Vec<u16> {
@@ -1337,6 +1531,7 @@ unsafe fn finish_text(window: HWND, save: bool) {
     }
     let editor = SESSION.with_borrow_mut(|session| session.as_mut()?.editor.take());
     let Some(editor) = editor else { return };
+    KillTimer(window, TEXT_CARET_TIMER);
     let changed = if save {
         let value = read_editor_text(editor.window);
         SESSION.with_borrow_mut(|session| {
@@ -1377,6 +1572,7 @@ unsafe fn finish_text(window: HWND, save: bool) {
     {
         InvalidateRect(window, &rect, 0);
     }
+    invalidate_text_selection(window);
     refresh_options(window);
     invalidate_toolbar(window);
     refresh_hint(window);
@@ -1848,6 +2044,7 @@ fn edges(rect: RECT) -> [RECT; 4] {
 }
 
 unsafe fn paint(window: HWND) {
+    refresh_text_preview();
     let update_region = CreateRectRgn(0, 0, 0, 0);
     let clipped = !update_region.is_null() && GetUpdateRgn(window, update_region, 0) != 0;
     let mut paint = PAINTSTRUCT::default();
@@ -1898,15 +2095,24 @@ unsafe fn paint(window: HWND) {
                 true,
                 selection.editor.as_ref().and_then(|editor| editor.index),
             );
-            if let Some(editor) = selection
-                .editor
-                .as_ref()
-                .filter(|_| selection.text_drag.is_some())
-            {
+            if let Some(editor) = selection.editor.as_ref() {
                 let saved = SaveDC(dc);
                 if saved != 0 {
                     IntersectClipRect(dc, rect.left, rect.top, rect.right, rect.bottom);
-                    editor.text.paint(dc);
+                    if let Some(drag) = &selection.text_drag {
+                        if let Some(preview) = &editor.preview {
+                            editor.text.paint_input(dc, preview, drag.caret);
+                        } else {
+                            editor.text.paint(dc);
+                        }
+                    } else if let Some(preview) = &editor.preview {
+                        let caret = if editor.caret_visible {
+                            input_caret(editor.window)
+                        } else {
+                            None
+                        };
+                        editor.frame().paint_input(dc, preview, caret);
+                    }
                     RestoreDC(dc, saved);
                 }
             }
@@ -2108,7 +2314,7 @@ mod text_interaction_tests {
                 bounds: canvas,
                 surface: surface(),
             };
-            FillRect(desktop.surface.dc, &canvas, GetStockObject(WHITE_BRUSH));
+            FillRect(desktop.surface.dc, &canvas, GetStockObject(BLACK_BRUSH));
             let hint = HintPanel::new(desktop.surface.dc, canvas).unwrap();
             let window = CreateWindowExW(
                 0,
@@ -2170,27 +2376,40 @@ mod text_interaction_tests {
                 let editor = s.as_ref().unwrap().editor.as_ref().unwrap();
                 (editor.window, editor.text.size)
             });
-            let chrome = Surface::new(null_mut(), 180, 68).unwrap();
-            let chrome_bounds = RECT {
-                right: 180,
-                bottom: 68,
-                ..Default::default()
+            let assert_input_off_canvas = |editor| {
+                let mut overlay = RECT::default();
+                let mut input = RECT::default();
+                assert_ne!(GetWindowRect(window, &mut overlay), 0);
+                assert_ne!(GetWindowRect(editor, &mut input), 0);
+                assert!(
+                    intersect(overlay, input).is_none(),
+                    "native EDIT must stay outside the drawable overlay"
+                );
             };
-            FillRect(chrome.dc, &chrome_bounds, GetStockObject(WHITE_BRUSH));
-            let saved = SaveDC(chrome.dc);
-            SendMessageW(
-                editor,
-                WM_PRINTCLIENT,
-                chrome.dc as WPARAM,
-                (PRF_CLIENT | PRF_ERASEBKGND) as LPARAM,
-            );
-            RestoreDC(chrome.dc, saved);
-            assert_eq!(GetPixel(chrome.dc, 20, 0), 0x00ff_ffff, "native top border");
+            assert_input_off_canvas(editor);
+            let region = CreateRectRgn(0, 0, 0, 0);
+            let kind = GetWindowRgn(editor, region);
+            DeleteObject(region);
             assert_eq!(
-                GetPixel(chrome.dc, 0, 20),
-                0x00ff_ffff,
-                "native left border"
+                kind, NULLREGION,
+                "the horizontal editor must have no visible native surface"
             );
+            refresh_text_preview();
+            SESSION.with_borrow(|session| {
+                let editor = session.as_ref().unwrap().editor.as_ref().unwrap();
+                let blank = editor.preview.as_ref().unwrap();
+                assert!(blank.pixels.chunks_exact(4).all(|pixel| pixel[3] == 0));
+                let composite = surface();
+                FillRect(composite.dc, &canvas, GetStockObject(BLACK_BRUSH));
+                editor.frame().paint_input(composite.dc, blank, None);
+                for x in [82, 90, 165, 250, 257] {
+                    assert_eq!(
+                        GetPixel(composite.dc, x, 145),
+                        0,
+                        "empty editor leaves no white strips"
+                    );
+                }
+            });
             let (frame, input, options) = SESSION.with_borrow(|s| {
                 let selection = s.as_ref().unwrap();
                 let editor = selection.editor.as_ref().unwrap();
@@ -2251,6 +2470,23 @@ mod text_interaction_tests {
                 editor.window
             });
             SetWindowTextW(editor, w!("Snapshot"));
+            refresh_text_preview();
+            let native = input_caret_info(editor).expect("the editor retains the insertion point");
+            assert_eq!(
+                native.flags & GUI_CARETBLINKING,
+                0,
+                "only the overlay may draw the caret"
+            );
+            assert!(SESSION.with_borrow(|session| {
+                let editor = session.as_ref().unwrap().editor.as_ref().unwrap();
+                editor
+                    .preview
+                    .as_ref()
+                    .unwrap()
+                    .pixels
+                    .chunks_exact(4)
+                    .any(|pixel| pixel[3] > 128)
+            }));
             SendMessageW(window, FINISH_TEXT, 1, editor as LPARAM);
             mouse(WM_LBUTTONDOWN, 148, 143);
             mouse(WM_MOUSEMOVE, 181, 160);
@@ -2282,7 +2518,109 @@ mod text_interaction_tests {
             assert!(SESSION.with_borrow(|s| s.as_ref().unwrap().options.is_some()));
             let editor =
                 SESSION.with_borrow(|s| s.as_ref().unwrap().editor.as_ref().unwrap().window);
+            let region = CreateRectRgn(0, 0, 0, 0);
+            let kind = GetWindowRgn(editor, region);
+            DeleteObject(region);
+            assert_eq!(
+                kind, NULLREGION,
+                "the rotated editor must not draw a horizontal layer"
+            );
+            refresh_text_preview();
+            assert!(
+                SESSION.with_borrow(|session| {
+                    let editor = session.as_ref().unwrap().editor.as_ref().unwrap();
+                    editor
+                        .preview
+                        .as_ref()
+                        .unwrap()
+                        .pixels
+                        .chunks_exact(4)
+                        .all(|pixel| pixel[3] == 0)
+                }),
+                "rotating an empty editor cannot introduce a background"
+            );
             SetWindowTextW(editor, w!("Rotated"));
+            assert_input_off_canvas(editor);
+            SendMessageW(editor, EM_SETSEL, 7, 7);
+            let click = SESSION.with_borrow(|session| {
+                let input = session.as_ref().unwrap().editor.as_ref().unwrap();
+                input.frame().input_screen_point(POINT { x: 6, y: 12 })
+            });
+            mouse(WM_LBUTTONDOWN, click.x, click.y);
+            let mut native_click = click;
+            MapWindowPoints(window, editor, &mut native_click, 1);
+            SendMessageW(editor, WM_LBUTTONUP, 0, point_param(native_click));
+            let selected = SendMessageW(editor, windows_sys::Win32::UI::Controls::EM_GETSEL, 0, 0);
+            assert!(
+                (selected as u16) <= 1,
+                "click near the start of rotated text moves the caret there"
+            );
+            SendMessageW(editor, EM_SETSEL, 3, 3);
+            SendMessageW(editor, WM_CHAR, '测' as usize, 1);
+            assert_eq!(
+                String::from_utf16_lossy(&read_editor_text(editor)),
+                "Rot测ated"
+            );
+            assert_input_off_canvas(editor);
+            let native =
+                input_caret_info(editor).expect("the native insertion point is still available");
+            assert_eq!(native.flags & GUI_CARETBLINKING, 0);
+            let caret = native.rcCaret;
+            refresh_text_preview();
+            SESSION.with_borrow(|session| {
+                let input = session.as_ref().unwrap().editor.as_ref().unwrap();
+                let preview = input.preview.as_ref().unwrap();
+                assert!(
+                    preview.pixels.chunks_exact(4).any(|pixel| pixel[3] > 128),
+                    "native text is visible in the rotated preview"
+                );
+                assert_eq!(
+                    preview.pixels[3], 0,
+                    "native editor background stays transparent"
+                );
+                let render = |caret| {
+                    let surface = surface();
+                    FillRect(surface.dc, &canvas, GetStockObject(WHITE_BRUSH));
+                    input.text.paint_input(surface.dc, preview, caret);
+                    GdiFlush();
+                    Desktop {
+                        bounds: canvas,
+                        surface,
+                    }
+                    .crop(canvas)
+                    .unwrap()
+                };
+                let text_only = render(None);
+                let with_caret = render(Some(caret));
+                assert!(text_only
+                    .pixels
+                    .chunks_exact(4)
+                    .any(|pixel| pixel[..3] != [255; 3]));
+                let mut affected = RECT {
+                    left: canvas.right,
+                    top: canvas.bottom,
+                    ..Default::default()
+                };
+                for (index, (text, active)) in text_only
+                    .pixels
+                    .chunks_exact(4)
+                    .zip(with_caret.pixels.chunks_exact(4))
+                    .enumerate()
+                {
+                    if text[..3] != active[..3] {
+                        let x = index as i32 % canvas.right;
+                        let y = index as i32 / canvas.right;
+                        affected.left = affected.left.min(x);
+                        affected.right = affected.right.max(x);
+                        affected.top = affected.top.min(y);
+                        affected.bottom = affected.bottom.max(y);
+                    }
+                }
+                assert!(
+                    affected.right - affected.left > 2 && affected.bottom - affected.top > 2,
+                    "the caret should run diagonally"
+                );
+            });
             SendMessageW(window, FINISH_TEXT, 1, editor as LPARAM);
             assert!(SESSION.with_borrow(|s| s
                 .as_ref()

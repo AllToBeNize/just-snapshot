@@ -15,8 +15,10 @@ mod scroll_stitch;
 mod selection;
 mod selection_geometry;
 mod settings;
+mod startup;
 mod targets;
 mod text_mark;
+mod text_render;
 mod toolbar;
 mod typography;
 
@@ -243,7 +245,11 @@ unsafe fn begin_capture(window: HWND) {
     }
 }
 
-unsafe fn apply_preferences(window: HWND, preferences: hotkey::Preferences) -> Result<(), String> {
+unsafe fn apply_preferences(
+    window: HWND,
+    preferences: hotkey::Preferences,
+    start_at_login: bool,
+) -> Result<(), String> {
     let bindings = preferences.bindings.validate()?;
     let capture = bindings.get(hotkey::Binding::Capture);
     let previous = HOTKEY_ID.get();
@@ -255,7 +261,7 @@ unsafe fn apply_preferences(window: HWND, preferences: hotkey::Preferences) -> R
             capture.label()
         ));
     }
-    if let Err(error) = hotkey::save(preferences) {
+    if let Err(error) = startup::save_with(start_at_login, || hotkey::save(preferences)) {
         if changed {
             UnregisterHotKey(window, next);
         }
