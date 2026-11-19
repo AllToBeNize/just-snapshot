@@ -2403,7 +2403,10 @@ mod text_interaction_tests {
                     selection.toolbar.unwrap().bounds,
                 )
             });
-            assert_eq!(options.left, toolbar.left, "text settings hang under the toolbar");
+            assert!(
+                options.left >= toolbar.left && options.right <= toolbar.right,
+                "text settings hang centered under the toolbar"
+            );
             assert!(options.top >= toolbar.bottom || options.bottom <= toolbar.top);
             let composed = surface();
             FillRect(composed.dc, &canvas, GetStockObject(WHITE_BRUSH));
@@ -2417,19 +2420,26 @@ mod text_interaction_tests {
                 (PRF_CLIENT | PRF_ERASEBKGND) as LPARAM,
             );
             RestoreDC(composed.dc, saved);
-            for (edge, samples) in [
-                ("top", [(120, 109), (120, 110)]),
-                ("left", [(79, 145), (80, 145)]),
-                ("bottom", [(120, 177), (120, 178)]),
-                ("right", [(259, 145), (260, 145)]),
+            // Each edge is a thin dashed line: blue dashes with gaps between them.
+            for (edge, horizontal, band, range) in [
+                ("top", true, 109..=110, 100..240),
+                ("left", false, 79..=80, 120..170),
+                ("bottom", true, 177..=178, 100..240),
+                ("right", false, 259..=260, 120..170),
             ] {
-                for (x, y) in samples {
-                    assert_eq!(
-                        GetPixel(composed.dc, x, y),
-                        BORDER_BLUE,
-                        "{edge} border at ({x}, {y})"
-                    );
+                let (mut dashes, mut gaps) = (0, 0);
+                for along in range {
+                    let blue = band.clone().any(|across| {
+                        let (x, y) = if horizontal { (along, across) } else { (across, along) };
+                        GetPixel(composed.dc, x, y) == BORDER_BLUE
+                    });
+                    if blue {
+                        dashes += 1;
+                    } else {
+                        gaps += 1;
+                    }
                 }
+                assert!(dashes > 10 && gaps > 5, "{edge}: {dashes} dash, {gaps} gap pixels");
             }
             let mut corner = POINT { x: 80, y: 110 };
             ClientToScreen(window, &mut corner);

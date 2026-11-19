@@ -5,6 +5,8 @@ use std::{
 };
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::*;
 
+use crate::theme::Theme;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Shortcut {
     pub modifiers: u32,
@@ -72,11 +74,13 @@ pub struct Bindings([Shortcut; BINDINGS.len()]);
 
 pub const DEFAULT_OPACITY_STEP: u8 = 5;
 const OPACITY_STEP_KEY: &str = "pin_opacity_step";
+const THEME_KEY: &str = "theme";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Preferences {
     pub bindings: Bindings,
     pub opacity_step: u8,
+    pub theme: Theme,
 }
 
 impl Default for Preferences {
@@ -84,6 +88,7 @@ impl Default for Preferences {
         Self {
             bindings: DEFAULT,
             opacity_step: DEFAULT_OPACITY_STEP,
+            theme: Theme::default(),
         }
     }
 }
@@ -279,6 +284,7 @@ pub fn load() -> Result<Preferences, String> {
 fn load_from(path: &Path) -> Result<Preferences, String> {
     let mut bindings = DEFAULT;
     let mut opacity_step = DEFAULT_OPACITY_STEP;
+    let mut theme = Theme::default();
     match fs::read_to_string(path) {
         Ok(contents) => {
             for line in contents
@@ -292,6 +298,9 @@ fn load_from(path: &Path) -> Result<Preferences, String> {
                 let name = name.trim();
                 if name == OPACITY_STEP_KEY {
                     opacity_step = parse_opacity_step(value)?;
+                } else if name == THEME_KEY {
+                    // An unknown theme falls back to the default instead of failing startup.
+                    theme = Theme::parse(value).unwrap_or_default();
                 } else if let Some(index) = NAMES.iter().position(|&key| key == name) {
                     bindings.set(
                         BINDINGS[index],
@@ -329,6 +338,7 @@ fn load_from(path: &Path) -> Result<Preferences, String> {
     Ok(Preferences {
         bindings: bindings.validate()?,
         opacity_step,
+        theme,
     })
 }
 
@@ -349,8 +359,9 @@ fn save_to(path: &Path, preferences: Preferences) -> Result<(), String> {
         })
         .collect();
     contents.push_str(&format!(
-        "{OPACITY_STEP_KEY}={}\r\n",
-        preferences.opacity_step
+        "{OPACITY_STEP_KEY}={}\r\n{THEME_KEY}={}\r\n",
+        preferences.opacity_step,
+        preferences.theme.key()
     ));
     fs::create_dir_all(path.parent().expect("settings directory"))
         .map_err(|error| error.to_string())?;
@@ -417,6 +428,7 @@ mod tests {
             .bindings
             .set(Binding::Copy, Shortcut::parse("Ctrl+Shift+C").unwrap());
         preferences.opacity_step = 10;
+        preferences.theme = Theme::Midnight;
         save_to(&file, preferences).unwrap();
         assert_eq!(load_from(&file).unwrap(), preferences);
         save_to(&file, Preferences::default()).unwrap();

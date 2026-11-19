@@ -8,15 +8,16 @@ use std::{
 use windows_sys::{
     core::w,
     Win32::{
-        Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM},
-        Graphics::{Gdi::*, GdiPlus::PointF},
+        Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM},
+        Graphics::Gdi::*,
         UI::{
             Controls::WM_MOUSELEAVE,
-            HiDpi::{AdjustWindowRectExForDpi, GetDpiForWindow},
+            HiDpi::GetDpiForWindow,
             Input::KeyboardAndMouse::{
                 RegisterHotKey, ReleaseCapture, SetCapture, SetFocus, TrackMouseEvent,
-                UnregisterHotKey, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, MOD_WIN, TME_LEAVE, TRACKMOUSEEVENT, VK_CONTROL,
-                VK_ESCAPE, VK_LWIN, VK_MENU, VK_RETURN, VK_RWIN, VK_SHIFT,
+                UnregisterHotKey, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, MOD_WIN,
+                TME_LEAVE, TRACKMOUSEEVENT, VK_CONTROL, VK_ESCAPE, VK_LWIN, VK_MENU, VK_RETURN,
+                VK_RWIN, VK_SHIFT,
             },
             WindowsAndMessaging::*,
         },
@@ -30,7 +31,8 @@ use crate::{
     overlay_ui::monitor_info,
     pinned, retry_hotkey, startup,
     text_render::Graphics,
-    wide,
+    theme::{self, argb, mix, Palette, Theme, THEMES},
+    ui::{self, Badge, Fonts},
 };
 
 const CLASS: *const u16 = w!("Snapshot.Settings");
@@ -44,7 +46,7 @@ const PULSE_MS: f32 = 1100.0;
 // Layout in 96-DPI pixels.
 const WIDTH: i32 = 620;
 const PAD: i32 = 24;
-const HEADER: i32 = 52;
+const HEADER: i32 = 56;
 const LABEL: i32 = 22;
 const SECTION_GAP: i32 = 14;
 const HERO: i32 = 82;
@@ -52,37 +54,12 @@ const ROW: i32 = 42;
 const ROWS: i32 = 5;
 const CARD_INSET: i32 = 6;
 const GENERAL_ROW: i32 = 56;
+const GENERAL_ROWS: i32 = 3;
 const FOOTER: i32 = 60;
 const HERO_KEYS: i32 = 220;
 const ROW_KEYS: i32 = 136;
-
-// COLORREF values (0x00BBGGRR).
-const BACKGROUND: u32 = rgb(0xf3, 0xf4, 0xf6);
-const CARD: u32 = rgb(0xff, 0xff, 0xff);
-const CARD_BORDER: u32 = rgb(0xe3, 0xe5, 0xe9);
-const DIVIDER: u32 = rgb(0xee, 0xef, 0xf2);
-const TEXT: u32 = rgb(0x1f, 0x23, 0x29);
-const SECONDARY: u32 = rgb(0x6b, 0x72, 0x80);
-const TERTIARY: u32 = rgb(0x9a, 0xa0, 0xa8);
-const ICON: u32 = rgb(0x4b, 0x52, 0x5c);
-const ACCENT: u32 = rgb(0x3d, 0x6f, 0xd9);
-const ACCENT_DARK: u32 = rgb(0x2f, 0x5b, 0xbd);
-const ACCENT_SOFT: u32 = rgb(0xea, 0xf0, 0xfc);
-const ACCENT_MUTED: u32 = rgb(0xbf, 0xcf, 0xf0);
-const SUCCESS: u32 = rgb(0x3a, 0x93, 0x5e);
-const WARNING: u32 = rgb(0xc4, 0x7d, 0x1a);
-const WARNING_SOFT: u32 = rgb(0xfd, 0xf4, 0xe4);
-const ERROR: u32 = rgb(0xc9, 0x45, 0x45);
-const HOVER: u32 = rgb(0xf0, 0xf2, 0xf5);
-const PRESSED: u32 = rgb(0xe4, 0xe7, 0xeb);
-const KEY_FACE: u32 = rgb(0xf8, 0xf9, 0xfb);
-const KEY_BORDER: u32 = rgb(0xd5, 0xd9, 0xdf);
-const KEY_DEPTH: u32 = rgb(0xc9, 0xce, 0xd5);
-const TRACK_OFF: u32 = rgb(0xc9, 0xcd, 0xd4);
-
-const fn rgb(red: u32, green: u32, blue: u32) -> u32 {
-    red | (green << 8) | (blue << 16)
-}
+const CHIP: i32 = 78;
+const CHIP_GAP: i32 = 6;
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 enum Target {
@@ -90,6 +67,8 @@ enum Target {
     Toggle,
     Minus,
     Plus,
+    Theme(usize),
+    Close,
     Reset,
     Cancel,
     Save,
@@ -116,6 +95,7 @@ struct Draft {
     bindings: Bindings,
     opacity_step: u8,
     start_at_login: bool,
+    theme: Theme,
 }
 
 impl Draft {
@@ -124,6 +104,7 @@ impl Draft {
             bindings: hotkey::DEFAULT,
             opacity_step: DEFAULT_OPACITY_STEP,
             start_at_login: true,
+            theme: Theme::default(),
         }
     }
 
@@ -152,56 +133,8 @@ impl Draft {
         Ok(Preferences {
             bindings: self.bindings.validate()?,
             opacity_step: self.opacity_step,
+            theme: self.theme,
         })
-    }
-}
-
-struct Fonts {
-    title: HFONT,
-    heading: HFONT,
-    body: HFONT,
-    small: HFONT,
-    key: HFONT,
-}
-
-impl Fonts {
-    unsafe fn new(scale: f32) -> Self {
-        let font = |size: f32, weight: i32, face: *const u16| {
-            CreateFontW(
-                -(size * scale).round() as i32,
-                0,
-                0,
-                0,
-                weight,
-                0,
-                0,
-                0,
-                DEFAULT_CHARSET as u32,
-                OUT_DEFAULT_PRECIS as u32,
-                CLIP_DEFAULT_PRECIS as u32,
-                CLEARTYPE_QUALITY as u32,
-                DEFAULT_PITCH as u32,
-                face,
-            )
-        };
-        let ui = w!("Microsoft YaHei UI");
-        Self {
-            title: font(20.0, FW_SEMIBOLD as i32, ui),
-            heading: font(14.0, FW_SEMIBOLD as i32, ui),
-            body: font(14.0, FW_NORMAL as i32, ui),
-            small: font(12.0, FW_NORMAL as i32, ui),
-            key: font(12.5, FW_SEMIBOLD as i32, w!("Segoe UI")),
-        }
-    }
-}
-
-impl Drop for Fonts {
-    fn drop(&mut self) {
-        for font in [self.title, self.heading, self.body, self.small, self.key] {
-            if !font.is_null() {
-                unsafe { DeleteObject(font) };
-            }
-        }
     }
 }
 
@@ -234,6 +167,8 @@ struct Layout {
     scale: f32,
     width: i32,
     height: i32,
+    header: RECT,
+    close: RECT,
     capture_label: RECT,
     hero: RECT,
     toolbar_label: RECT,
@@ -247,6 +182,7 @@ struct Layout {
     stepper: RECT,
     minus: RECT,
     plus: RECT,
+    themes: [RECT; THEMES.len()],
     reset: RECT,
     cancel: RECT,
     save: RECT,
@@ -261,9 +197,12 @@ impl Layout {
             right: s(right),
             bottom: s(bottom),
         };
+        let header = rect(0, 0, WIDTH, HEADER);
+        let close = rect(WIDTH - 12 - 36, 10, WIDTH - 12, 46);
         let mut y = HEADER;
         let capture_label = rect(PAD, y, WIDTH - PAD, y + LABEL);
         y += LABEL;
+        let hero_top = y;
         let hero = rect(PAD, y, WIDTH - PAD, y + HERO);
         y += HERO + SECTION_GAP;
         let toolbar_label = rect(PAD, y, WIDTH - PAD, y + LABEL);
@@ -275,14 +214,13 @@ impl Layout {
         let general_label = rect(PAD, y, WIDTH - PAD, y + LABEL);
         y += LABEL;
         let general_top = y;
-        let general = rect(PAD, y, WIDTH - PAD, y + GENERAL_ROW * 2);
-        y += GENERAL_ROW * 2 + SECTION_GAP + 4;
+        let general = rect(PAD, y, WIDTH - PAD, y + GENERAL_ROW * GENERAL_ROWS);
+        y += GENERAL_ROW * GENERAL_ROWS + SECTION_GAP + 4;
         let footer = s(y);
         let height = s(y + FOOTER);
 
         let mut keys = [RECT::default(); BINDINGS.len()];
         let mut rows = [RECT::default(); BINDINGS.len()];
-        let hero_top = HEADER + LABEL;
         rows[0] = hero;
         keys[0] = rect(
             WIDTH - PAD - 16 - HERO_KEYS,
@@ -301,12 +239,20 @@ impl Layout {
         }
 
         let right = WIDTH - PAD - 18;
-        let toggle_top = general_top + (GENERAL_ROW - 24) / 2;
+        let row_top = |row: i32, height: i32| general_top + GENERAL_ROW * row + (GENERAL_ROW - height) / 2;
+        let toggle_top = row_top(0, 24);
         let toggle = rect(right - 44, toggle_top, right, toggle_top + 24);
-        let stepper_top = general_top + GENERAL_ROW + (GENERAL_ROW - 30) / 2;
+        let stepper_top = row_top(1, 30);
         let stepper = rect(right - 112, stepper_top, right, stepper_top + 30);
         let minus = rect(right - 112, stepper_top, right - 80, stepper_top + 30);
         let plus = rect(right - 32, stepper_top, right, stepper_top + 30);
+        let chip_top = row_top(2, 32);
+        let mut themes = [RECT::default(); THEMES.len()];
+        let count = THEMES.len() as i32;
+        for (index, chip) in themes.iter_mut().enumerate() {
+            let left = right - count * CHIP - (count - 1) * CHIP_GAP + index as i32 * (CHIP + CHIP_GAP);
+            *chip = rect(left, chip_top, left + CHIP, chip_top + 32);
+        }
 
         let button_top = y + (FOOTER - 34) / 2;
         let save = rect(WIDTH - PAD - 84, button_top, WIDTH - PAD, button_top + 34);
@@ -321,6 +267,8 @@ impl Layout {
             scale,
             width: s(WIDTH),
             height,
+            header,
+            close,
             capture_label,
             hero,
             toolbar_label,
@@ -334,6 +282,7 @@ impl Layout {
             stepper,
             minus,
             plus,
+            themes,
             reset,
             cancel,
             save,
@@ -347,10 +296,12 @@ impl Layout {
     fn targets(&self) -> impl Iterator<Item = (Target, RECT)> + '_ {
         (0..BINDINGS.len())
             .map(|index| (Target::Key(index), self.keys[index]))
+            .chain((0..THEMES.len()).map(|index| (Target::Theme(index), self.themes[index])))
             .chain([
                 (Target::Toggle, self.toggle),
                 (Target::Minus, self.minus),
                 (Target::Plus, self.plus),
+                (Target::Close, self.close),
                 (Target::Reset, self.reset),
                 (Target::Cancel, self.cancel),
                 (Target::Save, self.save),
@@ -359,18 +310,14 @@ impl Layout {
 
     fn hit(&self, point: POINT) -> Option<Target> {
         self.targets()
-            .find(|(_, rect)| contains(*rect, point))
+            .find(|(_, rect)| ui::contains(*rect, point.x, point.y))
             .map(|(target, _)| target)
     }
 }
 
-fn contains(rect: RECT, point: POINT) -> bool {
-    point.x >= rect.left && point.x < rect.right && point.y >= rect.top && point.y < rect.bottom
-}
-
 pub unsafe fn register(instance: HINSTANCE) -> io::Result<()> {
     let class = WNDCLASSW {
-        style: CS_HREDRAW | CS_VREDRAW,
+        style: CS_HREDRAW | CS_VREDRAW | CS_DROPSHADOW,
         lpfnWndProc: Some(window_proc),
         hInstance: instance,
         hCursor: LoadCursorW(null_mut(), IDC_ARROW),
@@ -396,12 +343,12 @@ pub unsafe fn open(owner: HWND, instance: HINSTANCE) -> io::Result<()> {
     // The other program may have released the shortcut since startup.
     retry_hotkey(owner);
     let start_at_login = startup::is_enabled().map_err(io::Error::other)?;
-    let style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
+    // A frameless window: the header doubles as the title bar.
     let window = CreateWindowExW(
         0,
         CLASS,
         w!("Snapshot 设置"),
-        style,
+        WS_POPUP | WS_SYSMENU,
         CW_USEDEFAULT,
         CW_USEDEFAULT,
         WIDTH,
@@ -418,10 +365,12 @@ pub unsafe fn open(owner: HWND, instance: HINSTANCE) -> io::Result<()> {
         bindings: hotkey::current(),
         opacity_step: pinned::opacity_step(),
         start_at_login,
+        theme: theme::current(),
     };
     install(window, owner, draft);
     WINDOW.set(window);
     place(window, None);
+    ui::round_corners(window);
     ShowWindow(window, SW_SHOW);
     SetForegroundWindow(window);
     SetFocus(window);
@@ -429,7 +378,10 @@ pub unsafe fn open(owner: HWND, instance: HINSTANCE) -> io::Result<()> {
 }
 
 unsafe fn install(window: HWND, owner: HWND, draft: Draft) {
-    let scale = window_scale(window);
+    let scale = match GetDpiForWindow(window) {
+        0 => 1.0,
+        dpi => dpi as f32 / 96.0,
+    };
     STATE.set(Some(State {
         owner,
         draft,
@@ -450,28 +402,13 @@ unsafe fn install(window: HWND, owner: HWND, draft: Draft) {
     refresh_capture_status(window);
 }
 
-unsafe fn window_scale(window: HWND) -> f32 {
-    match GetDpiForWindow(window) {
-        0 => 1.0,
-        dpi => dpi as f32 / 96.0,
-    }
-}
-
 /// Sizes the window to the layout; centers it unless a DPI change suggested a spot.
 unsafe fn place(window: HWND, suggested: Option<RECT>) {
     let Some(scale) = STATE.with_borrow(|state| state.as_ref().map(|state| state.scale)) else {
         return;
     };
     let layout = Layout::new(scale);
-    let style = GetWindowLongW(window, GWL_STYLE) as u32;
-    let mut frame = RECT {
-        right: layout.width,
-        bottom: layout.height,
-        ..Default::default()
-    };
-    AdjustWindowRectExForDpi(&mut frame, style, 0, 0, (scale * 96.0) as u32);
-    let width = frame.right - frame.left;
-    let height = frame.bottom - frame.top;
+    let (width, height) = (layout.width, layout.height);
     let (x, y) = match suggested {
         Some(rect) => (rect.left, rect.top),
         None => {
@@ -606,6 +543,11 @@ unsafe fn activate(window: HWND, target: Target) {
             with_state(|state| state.draft.step_opacity(delta));
             redraw(window);
         }
+        Target::Theme(index) => {
+            // Previewed live in this window; applied everywhere on save.
+            with_state(|state| state.draft.theme = THEMES[index]);
+            redraw(window);
+        }
         Target::Reset => {
             with_state(|state| {
                 state.draft = Draft::defaults();
@@ -615,7 +557,7 @@ unsafe fn activate(window: HWND, target: Target) {
             refresh_capture_status(window);
             animate(window);
         }
-        Target::Cancel => {
+        Target::Close | Target::Cancel => {
             DestroyWindow(window);
         }
         Target::Save => save(window),
@@ -710,6 +652,17 @@ unsafe extern "system" fn window_proc(
             paint_window(window, dc);
             EndPaint(window, &paint);
         }
+        WM_NCHITTEST => {
+            // The header drags the window, except where its buttons are.
+            let mut client = point(lparam);
+            ScreenToClient(window, &mut client);
+            if let Some(layout) = layout() {
+                if ui::contains(layout.header, client.x, client.y) && layout.hit(client).is_none() {
+                    return HTCAPTION as LRESULT;
+                }
+            }
+            return HTCLIENT as LRESULT;
+        }
         WM_TIMER if wparam == ANIMATION_TIMER => tick(window),
         WM_MOUSEMOVE => {
             let start = with_state(|state| !std::mem::replace(&mut state.tracking, true));
@@ -737,7 +690,10 @@ unsafe extern "system" fn window_proc(
                     })
                 })
             });
-            SetCursor(LoadCursorW(null_mut(), if clickable { IDC_HAND } else { IDC_ARROW }));
+            SetCursor(LoadCursorW(
+                null_mut(),
+                if clickable { IDC_HAND } else { IDC_ARROW },
+            ));
             return 1;
         }
         WM_LBUTTONDOWN => {
@@ -793,9 +749,10 @@ unsafe extern "system" fn window_proc(
             }
             return DefWindowProcW(window, message, wparam, lparam);
         }
-        WM_SYSCHAR if STATE.with_borrow(|state| {
-            state.as_ref().is_some_and(|state| state.recording.is_some())
-        }) => {}
+        WM_SYSCHAR
+            if STATE.with_borrow(|state| {
+                state.as_ref().is_some_and(|state| state.recording.is_some())
+            }) => {}
         WM_KILLFOCUS => stop_recording(window),
         WM_DPICHANGED => {
             let scale = (wparam & 0xffff) as f32 / 96.0;
@@ -832,12 +789,7 @@ unsafe fn paint_window(window: HWND, target: HDC) {
     };
     STATE.with_borrow(|state| {
         if let Some(state) = state {
-            Painter {
-                dc: surface.dc,
-                state,
-                layout: Layout::new(state.scale),
-            }
-            .paint(client);
+            Painter::new(surface.dc, state).paint(client);
         }
     });
     BitBlt(
@@ -857,9 +809,20 @@ struct Painter<'a> {
     dc: HDC,
     state: &'a State,
     layout: Layout,
+    /// The draft theme, so picking one previews it immediately.
+    palette: &'static Palette,
 }
 
-impl Painter<'_> {
+impl<'a> Painter<'a> {
+    fn new(dc: HDC, state: &'a State) -> Self {
+        Self {
+            dc,
+            state,
+            layout: Layout::new(state.scale),
+            palette: state.draft.theme.palette(),
+        }
+    }
+
     fn s(&self, value: i32) -> i32 {
         self.layout.s(value)
     }
@@ -872,24 +835,51 @@ impl Painter<'_> {
         self.state.hover.get(&target).copied().unwrap_or(0.0)
     }
 
+    fn face(&self, target: Target, base: u32) -> u32 {
+        if self.state.pressed == Some(target) {
+            self.palette.pressed
+        } else {
+            mix(base, self.palette.hover, self.hover(target))
+        }
+    }
+
+    unsafe fn text(&self, rect: RECT, value: &str, font: HFONT, color: u32, format: u32) {
+        ui::text(self.dc, rect, value, font, color, format | DT_SINGLELINE);
+    }
+
     unsafe fn paint(&self, client: RECT) {
-        fill(self.dc, client, BACKGROUND);
+        let palette = self.palette;
+        let fonts = &self.state.fonts;
+        ui::fill(self.dc, client, palette.background);
+        if let Some(graphics) = Graphics::new(self.dc) {
+            graphics.stroke_round(
+                ui::inset(ui::to_f(client), 0.5),
+                0.0,
+                argb(palette.card_border, 255),
+                1.0,
+            );
+        }
         let layout = &self.layout;
         let header = RECT {
             left: self.s(PAD),
-            top: 0,
-            right: layout.width - self.s(PAD),
-            bottom: self.s(HEADER),
+            right: layout.close.left,
+            ..layout.header
         };
-        text(self.dc, header, "设置", self.state.fonts.title, TEXT, DT_LEFT | DT_VCENTER);
-        text(
-            self.dc,
-            header,
+        self.text(header, "设置", fonts.title, palette.text, DT_LEFT | DT_VCENTER);
+        let title_width = ui::measure(self.dc, "设置", fonts.title);
+        let version = RECT {
+            left: header.left + title_width + self.s(10),
+            top: header.top + self.s(4),
+            ..header
+        };
+        self.text(
+            version,
             &format!("Snapshot v{}", env!("CARGO_PKG_VERSION")),
-            self.state.fonts.small,
-            TERTIARY,
-            DT_RIGHT | DT_VCENTER,
+            fonts.small,
+            palette.tertiary,
+            DT_LEFT | DT_VCENTER,
         );
+        self.close_button();
         for (rect, label) in [
             (layout.capture_label, "截图"),
             (layout.toolbar_label, "截图工具栏"),
@@ -900,7 +890,7 @@ impl Painter<'_> {
                 bottom: rect.bottom - self.s(6),
                 ..rect
             };
-            text(self.dc, rect, label, self.state.fonts.small, SECONDARY, DT_LEFT | DT_BOTTOM);
+            self.text(rect, label, fonts.small, palette.secondary, DT_LEFT | DT_BOTTOM);
         }
         for card in [layout.hero, layout.toolbar, layout.general] {
             self.card(card);
@@ -911,18 +901,45 @@ impl Painter<'_> {
         self.footer();
     }
 
+    unsafe fn close_button(&self) {
+        let rect = self.layout.close;
+        let hover = self.hover(Target::Close);
+        if hover > 0.0 || self.state.pressed == Some(Target::Close) {
+            if let Some(graphics) = Graphics::new(self.dc) {
+                let face = self.face(Target::Close, self.palette.background);
+                graphics.fill_round(ui::to_f(rect), self.f(8.0), argb(face, 255));
+            }
+        }
+        let size = self.s(18);
+        let icon = RECT {
+            left: (rect.left + rect.right - size) / 2,
+            top: (rect.top + rect.bottom - size) / 2,
+            right: (rect.left + rect.right - size) / 2 + size,
+            bottom: (rect.top + rect.bottom - size) / 2 + size,
+        };
+        let color = mix(self.palette.secondary, self.palette.text, hover);
+        icons::paint(self.dc, icon, Icon::Close, color);
+    }
+
     unsafe fn card(&self, rect: RECT) {
         let Some(graphics) = Graphics::new(self.dc) else {
-            fill(self.dc, rect, CARD);
+            ui::fill(self.dc, rect, self.palette.card);
             return;
         };
-        let bounds = to_f(rect);
+        let bounds = ui::to_f(rect);
         let radius = self.f(10.0);
-        graphics.fill_round(bounds, radius, argb(CARD, 255));
-        graphics.stroke_round(inset(bounds, 0.5), radius, argb(CARD_BORDER, 255), 1.0);
+        graphics.fill_round(bounds, radius, argb(self.palette.card, 255));
+        graphics.stroke_round(
+            ui::inset(bounds, 0.5),
+            radius,
+            argb(self.palette.card_border, 255),
+            1.0,
+        );
     }
 
     unsafe fn hero(&self) {
+        let palette = self.palette;
+        let fonts = &self.state.fonts;
         let card = self.layout.hero;
         let tile_size = self.s(40);
         let tile = RECT {
@@ -932,10 +949,9 @@ impl Painter<'_> {
             bottom: (card.top + card.bottom + tile_size) / 2,
         };
         if let Some(graphics) = Graphics::new(self.dc) {
-            graphics.fill_round(to_f(tile), self.f(10.0), argb(ACCENT_SOFT, 255));
+            graphics.fill_round(ui::to_f(tile), self.f(10.0), argb(palette.accent_soft, 255));
         }
-        let icon = inflate(tile, -self.s(10));
-        icons::paint(self.dc, icon, Icon::Rectangle, ACCENT);
+        icons::paint(self.dc, ui::inflate(tile, -self.s(8)), Icon::Rectangle, palette.accent);
 
         let left = tile.right + self.s(14);
         let middle = (card.top + card.bottom) / 2;
@@ -945,18 +961,17 @@ impl Painter<'_> {
             right: self.layout.keys[0].left,
             bottom: middle,
         };
-        text(self.dc, title, "开始截图", self.state.fonts.heading, TEXT, DT_LEFT | DT_BOTTOM);
+        self.text(title, "开始截图", fonts.heading, palette.text, DT_LEFT | DT_BOTTOM);
         let description = RECT {
             top: middle + self.s(3),
             bottom: middle + self.s(23),
             ..title
         };
-        text(
-            self.dc,
+        self.text(
             description,
             "全局快捷键，在任何程序里按下都能截图",
-            self.state.fonts.small,
-            SECONDARY,
+            fonts.small,
+            palette.secondary,
             DT_LEFT | DT_TOP,
         );
 
@@ -969,44 +984,49 @@ impl Painter<'_> {
             right: keys.right - self.s(6),
             bottom: keys.bottom + self.s(24),
         };
-        let (color, label, good) = if self.state.recording == Some(0) {
-            (TERTIARY, "按下新的组合键，Esc 取消".to_string(), None)
+        let (color, label, badge) = if self.state.recording == Some(0) {
+            (palette.tertiary, "按下新的组合键，Esc 取消".to_string(), None)
         } else {
             match self.state.capture_status {
-                CaptureStatus::Active => (SUCCESS, "已生效".into(), Some(true)),
-                CaptureStatus::Available => (SUCCESS, "可以使用，保存后生效".into(), Some(true)),
-                CaptureStatus::Occupied => {
-                    (WARNING, "已被其他程序占用，换一个组合键试试".into(), Some(false))
+                CaptureStatus::Active => (palette.success, "已生效".into(), Some(Badge::Check)),
+                CaptureStatus::Available => {
+                    (palette.success, "可以使用，保存后生效".into(), Some(Badge::Check))
                 }
+                CaptureStatus::Occupied => (
+                    palette.warning,
+                    "已被其他程序占用，换一个组合键试试".into(),
+                    Some(Badge::Exclamation),
+                ),
                 CaptureStatus::Duplicate(other) => (
-                    WARNING,
+                    palette.warning,
                     format!("和「{}」重复", BINDINGS[other].label()),
-                    Some(false),
+                    Some(Badge::Exclamation),
                 ),
             }
         };
-        let width = measure(self.dc, &label, self.state.fonts.small);
+        let width = ui::measure(self.dc, &label, fonts.small);
         let mut label_rect = status;
         label_rect.left = label_rect.right - width;
-        text(self.dc, label_rect, &label, self.state.fonts.small, color, DT_LEFT | DT_VCENTER);
-        if let Some(good) = good {
+        self.text(label_rect, &label, fonts.small, color, DT_LEFT | DT_VCENTER);
+        if let Some(badge) = badge {
             let size = self.s(14);
             let center_y = (status.top + status.bottom) / 2;
-            let badge = RECT {
+            let rect = RECT {
                 left: label_rect.left - self.s(5) - size,
                 top: center_y - size / 2,
                 right: label_rect.left - self.s(5),
                 bottom: center_y - size / 2 + size,
             };
-            status_badge(self.dc, badge, color, good);
+            ui::badge(self.dc, rect, color, badge, palette.card);
         }
     }
 
     unsafe fn toolbar_rows(&self) {
+        let palette = self.palette;
         let layout = &self.layout;
         let card = layout.toolbar;
         let middle = (card.left + card.right) / 2;
-        fill(
+        ui::fill(
             self.dc,
             RECT {
                 left: middle,
@@ -1014,12 +1034,12 @@ impl Painter<'_> {
                 right: middle + 1,
                 bottom: card.bottom - self.s(14),
             },
-            DIVIDER,
+            palette.divider,
         );
         for index in 1..BINDINGS.len() {
             let row = layout.rows[index];
             if (index - 1) as i32 % ROWS != 0 {
-                fill(
+                ui::fill(
                     self.dc,
                     RECT {
                         left: row.left + self.s(12),
@@ -1027,28 +1047,27 @@ impl Painter<'_> {
                         right: row.right - self.s(12),
                         bottom: row.top + 1,
                     },
-                    DIVIDER,
+                    palette.divider,
                 );
             }
-            let size = self.s(18);
+            let size = self.s(20);
             let icon = RECT {
                 left: row.left + self.s(12),
                 top: (row.top + row.bottom - size) / 2,
                 right: row.left + self.s(12) + size,
                 bottom: (row.top + row.bottom - size) / 2 + size,
             };
-            icons::paint(self.dc, icon, binding_icon(BINDINGS[index]), ICON);
+            icons::paint(self.dc, icon, binding_icon(BINDINGS[index]), palette.icon);
             let label = RECT {
                 left: icon.right + self.s(10),
                 right: layout.keys[index].left,
                 ..row
             };
-            text(
-                self.dc,
+            self.text(
                 label,
                 BINDINGS[index].label(),
                 self.state.fonts.body,
-                TEXT,
+                palette.text,
                 DT_LEFT | DT_VCENTER,
             );
             self.key_field(index, self.s(24));
@@ -1057,50 +1076,53 @@ impl Painter<'_> {
 
     /// A shortcut drawn as keycaps, right-aligned in its field.
     unsafe fn key_field(&self, index: usize, cap_height: i32) {
+        let palette = self.palette;
         let field = self.layout.keys[index];
         let target = Target::Key(index);
         let recording = self.state.recording == Some(index);
         let duplicate = self.state.draft.duplicate_of(index).is_some();
-        let hover = self.hover(target);
-        let pressed = self.state.pressed == Some(target);
         let Some(graphics) = Graphics::new(self.dc) else {
             return;
         };
-        let bounds = to_f(field);
+        let bounds = ui::to_f(field);
         let radius = self.f(8.0);
         if recording {
             // Breathing outline while waiting for keys.
             let wave = 0.5 - 0.5 * (self.state.pulse * std::f32::consts::TAU).cos();
-            graphics.fill_round(bounds, radius, argb(ACCENT_SOFT, 255));
+            graphics.fill_round(bounds, radius, argb(palette.accent_soft, 255));
             let alpha = (110.0 + 145.0 * wave) as u8;
-            graphics.stroke_round(inset(bounds, 0.75), radius, argb(ACCENT, alpha), 1.5);
+            graphics.stroke_round(ui::inset(bounds, 0.75), radius, argb(palette.accent, alpha), 1.5);
         } else {
-            let base = if duplicate { WARNING_SOFT } else { CARD };
-            let face = if pressed { PRESSED } else { mix(base, HOVER, hover) };
-            if face != CARD {
+            let base = if duplicate { palette.warning_soft } else { palette.card };
+            let face = self.face(target, base);
+            if face != palette.card {
                 graphics.fill_round(bounds, radius, argb(face, 255));
             }
             if duplicate {
-                graphics.stroke_round(inset(bounds, 0.75), radius, argb(WARNING, 200), 1.5);
+                graphics.stroke_round(ui::inset(bounds, 0.75), radius, argb(palette.warning, 200), 1.5);
             }
         }
         drop(graphics);
 
         let parts: Vec<String> = if recording {
-            let held = Shortcut {
-                modifiers: self.state.held,
-                key: 0,
-            };
             if self.state.held == 0 {
                 let rect = RECT {
                     right: field.right - self.s(12),
                     ..field
                 };
-                text(self.dc, rect, "按下组合键…", self.state.fonts.small, ACCENT, DT_RIGHT | DT_VCENTER);
+                self.text(
+                    rect,
+                    "按下组合键…",
+                    self.state.fonts.small,
+                    palette.accent,
+                    DT_RIGHT | DT_VCENTER,
+                );
                 return;
             }
-            let mut parts: Vec<String> =
-                modifier_names(held.modifiers).into_iter().map(String::from).collect();
+            let mut parts: Vec<String> = modifier_names(self.state.held)
+                .into_iter()
+                .map(String::from)
+                .collect();
             parts.push("…".into());
             parts
         } else {
@@ -1117,7 +1139,7 @@ impl Painter<'_> {
         let padding = self.s(9);
         let widths: Vec<i32> = parts
             .iter()
-            .map(|part| (measure(self.dc, part, font) + padding * 2).max(cap_height))
+            .map(|part| (ui::measure(self.dc, part, font) + padding * 2).max(cap_height))
             .collect();
         let mut right = field.right - self.s(8);
         let top = (field.top + field.bottom - cap_height) / 2 - self.s(1);
@@ -1132,37 +1154,43 @@ impl Painter<'_> {
                 right,
                 bottom: top + cap_height,
             };
-            let bounds = to_f(cap);
+            let bounds = ui::to_f(cap);
             let radius = self.f(5.0);
             let depth = self.f(2.0);
             graphics.fill_round(
                 [bounds[0], bounds[1] + depth, bounds[2], bounds[3] + depth],
                 radius,
-                argb(KEY_DEPTH, 255),
+                argb(palette.key_depth, 255),
             );
-            graphics.fill_round(bounds, radius, argb(KEY_FACE, 255));
-            graphics.stroke_round(inset(bounds, 0.5), radius, argb(KEY_BORDER, 255), 1.0);
+            graphics.fill_round(bounds, radius, argb(palette.key_face, 255));
+            graphics.stroke_round(ui::inset(bounds, 0.5), radius, argb(palette.key_border, 255), 1.0);
             caps.push(cap);
             right -= width + gap;
         }
         drop(graphics);
-        let color = if duplicate && !recording { WARNING } else { TEXT };
+        let color = if duplicate && !recording { palette.warning } else { palette.text };
         for (cap, part) in caps.into_iter().rev().zip(&parts) {
-            text(self.dc, cap, part, font, color, DT_CENTER | DT_VCENTER);
+            self.text(cap, part, font, color, DT_CENTER | DT_VCENTER);
         }
     }
 
     unsafe fn general(&self) {
+        let palette = self.palette;
         let card = self.layout.general;
         let row = self.s(GENERAL_ROW);
         let rows = [
-            ("开机自动启动", "登录 Windows 后在托盘待命"),
-            ("贴图透明度步长", "在贴图上 Ctrl+滚轮，每格改变的不透明度"),
+            ("开机自动启动", "登录 Windows 后在托盘待命", self.layout.toggle.left),
+            (
+                "贴图透明度步长",
+                "在贴图上 Ctrl+滚轮，每格改变的不透明度",
+                self.layout.stepper.left,
+            ),
+            ("外观", "截图工具栏、设置和提示窗口的配色", self.layout.themes[0].left),
         ];
-        for (index, (title, description)) in rows.into_iter().enumerate() {
+        for (index, (title, description, control)) in rows.into_iter().enumerate() {
             let top = card.top + row * index as i32;
             if index > 0 {
-                fill(
+                ui::fill(
                     self.dc,
                     RECT {
                         left: card.left + self.s(18),
@@ -1170,43 +1198,53 @@ impl Painter<'_> {
                         right: card.right - self.s(18),
                         bottom: top + 1,
                     },
-                    DIVIDER,
+                    palette.divider,
                 );
             }
             let middle = top + row / 2;
             let left = card.left + self.s(18);
-            let right = self.layout.stepper.left - self.s(12);
-            text(
-                self.dc,
-                RECT { left, top: middle - self.s(21), right, bottom: middle },
+            let right = control - self.s(12);
+            self.text(
+                RECT {
+                    left,
+                    top: middle - self.s(21),
+                    right,
+                    bottom: middle,
+                },
                 title,
                 self.state.fonts.body,
-                TEXT,
-                DT_LEFT | DT_BOTTOM,
+                palette.text,
+                DT_LEFT | DT_BOTTOM | DT_END_ELLIPSIS,
             );
-            text(
-                self.dc,
-                RECT { left, top: middle + self.s(2), right, bottom: middle + self.s(21) },
+            self.text(
+                RECT {
+                    left,
+                    top: middle + self.s(2),
+                    right,
+                    bottom: middle + self.s(21),
+                },
                 description,
                 self.state.fonts.small,
-                SECONDARY,
-                DT_LEFT | DT_TOP,
+                palette.secondary,
+                DT_LEFT | DT_TOP | DT_END_ELLIPSIS,
             );
         }
         self.toggle();
         self.stepper();
+        self.theme_chips();
     }
 
     unsafe fn toggle(&self) {
+        let palette = self.palette;
         let rect = self.layout.toggle;
         let Some(graphics) = Graphics::new(self.dc) else {
             return;
         };
         let t = self.state.toggle;
         let hover = self.hover(Target::Toggle);
-        let off = mix(TRACK_OFF, rgb(0xb5, 0xba, 0xc2), hover);
-        let on = mix(ACCENT, ACCENT_DARK, hover);
-        let bounds = to_f(rect);
+        let off = mix(palette.track_off, palette.secondary, hover * 0.3);
+        let on = mix(palette.accent, palette.accent_hover, hover);
+        let bounds = ui::to_f(rect);
         let height = bounds[3] - bounds[1];
         graphics.fill_round(bounds, height / 2.0, argb(mix(off, on, t), 255));
         let margin = self.f(3.0);
@@ -1216,46 +1254,49 @@ impl Painter<'_> {
         let top = bounds[1] + margin;
         graphics.fill_ellipse(
             [left, top + self.f(0.8), left + knob, top + knob + self.f(0.8)],
-            argb(0, 40),
+            argb(0, 50),
         );
-        graphics.fill_ellipse([left, top, left + knob, top + knob], argb(CARD, 255));
+        graphics.fill_ellipse([left, top, left + knob, top + knob], argb(0x00ff_ffff, 255));
     }
 
     unsafe fn stepper(&self) {
+        let palette = self.palette;
         let layout = &self.layout;
         if let Some(graphics) = Graphics::new(self.dc) {
             let radius = self.f(8.0);
-            graphics.fill_round(to_f(layout.stepper), radius, argb(KEY_FACE, 255));
+            graphics.fill_round(ui::to_f(layout.stepper), radius, argb(palette.key_face, 255));
             for (target, rect) in [(Target::Minus, layout.minus), (Target::Plus, layout.plus)] {
-                let hover = self.hover(target);
-                let face = if self.state.pressed == Some(target) {
-                    PRESSED
-                } else {
-                    mix(KEY_FACE, HOVER, hover)
-                };
-                graphics.fill_round(to_f(inflate(rect, -self.s(2))), self.f(6.0), argb(face, 255));
+                let face = self.face(target, palette.key_face);
+                graphics.fill_round(
+                    ui::to_f(ui::inflate(rect, -self.s(2))),
+                    self.f(6.0),
+                    argb(face, 255),
+                );
             }
             graphics.stroke_round(
-                inset(to_f(layout.stepper), 0.5),
+                ui::inset(ui::to_f(layout.stepper), 0.5),
                 radius,
-                argb(KEY_BORDER, 255),
+                argb(palette.key_border, 255),
                 1.0,
             );
             // Minus and plus glyphs as crisp bars.
             let bar = self.f(10.0);
             let thick = self.f(1.6).max(1.2);
             for (rect, vertical) in [(layout.minus, false), (layout.plus, true)] {
-                let center = center_f(rect);
+                let (cx, cy) = (
+                    (rect.left + rect.right) as f32 / 2.0,
+                    (rect.top + rect.bottom) as f32 / 2.0,
+                );
                 graphics.fill_round(
-                    [center.0 - bar / 2.0, center.1 - thick / 2.0, center.0 + bar / 2.0, center.1 + thick / 2.0],
+                    [cx - bar / 2.0, cy - thick / 2.0, cx + bar / 2.0, cy + thick / 2.0],
                     thick / 2.0,
-                    argb(ICON, 255),
+                    argb(palette.icon, 255),
                 );
                 if vertical {
                     graphics.fill_round(
-                        [center.0 - thick / 2.0, center.1 - bar / 2.0, center.0 + thick / 2.0, center.1 + bar / 2.0],
+                        [cx - thick / 2.0, cy - bar / 2.0, cx + thick / 2.0, cy + bar / 2.0],
                         thick / 2.0,
-                        argb(ICON, 255),
+                        argb(palette.icon, 255),
                     );
                 }
             }
@@ -1265,72 +1306,106 @@ impl Painter<'_> {
             right: layout.plus.left,
             ..layout.stepper
         };
-        text(
-            self.dc,
+        self.text(
             value,
             &format!("{}%", self.state.draft.opacity_step),
             self.state.fonts.key,
-            TEXT,
+            palette.text,
             DT_CENTER | DT_VCENTER,
         );
     }
 
+    /// One chip per theme: a miniature of its card and accent, plus its name.
+    unsafe fn theme_chips(&self) {
+        let palette = self.palette;
+        for (index, theme) in THEMES.into_iter().enumerate() {
+            let rect = self.layout.themes[index];
+            let selected = self.state.draft.theme == theme;
+            let target = Target::Theme(index);
+            let Some(graphics) = Graphics::new(self.dc) else {
+                return;
+            };
+            let bounds = ui::to_f(rect);
+            let radius = self.f(8.0);
+            let face = if selected {
+                palette.accent_soft
+            } else {
+                self.face(target, palette.key_face)
+            };
+            graphics.fill_round(bounds, radius, argb(face, 255));
+            let (border, width) = if selected {
+                (palette.accent, 1.5)
+            } else {
+                (palette.key_border, 1.0)
+            };
+            graphics.stroke_round(ui::inset(bounds, width / 2.0), radius, argb(border, 255), width);
+            // Swatch: the theme's background with its accent dot.
+            let swatch = theme.palette();
+            let size = self.f(16.0);
+            let x = bounds[0] + self.f(9.0);
+            let y = (bounds[1] + bounds[3] - size) / 2.0;
+            graphics.fill_ellipse([x, y, x + size, y + size], argb(swatch.card, 255));
+            graphics.stroke_round([x, y, x + size, y + size], size / 2.0, argb(palette.key_border, 255), 1.0);
+            let dot = self.f(7.0);
+            let (dx, dy) = (x + (size - dot) / 2.0, y + (size - dot) / 2.0);
+            graphics.fill_ellipse([dx, dy, dx + dot, dy + dot], argb(swatch.accent, 255));
+            drop(graphics);
+            let label = RECT {
+                left: rect.left + self.s(30),
+                right: rect.right - self.s(4),
+                ..rect
+            };
+            let color = if selected { palette.accent } else { palette.text };
+            self.text(label, theme.name(), self.state.fonts.small, color, DT_LEFT | DT_VCENTER);
+        }
+    }
+
     unsafe fn footer(&self) {
+        let palette = self.palette;
+        let fonts = &self.state.fonts;
         let layout = &self.layout;
-        fill(
+        ui::fill(
             self.dc,
             RECT {
-                left: 0,
+                left: 1,
                 top: layout.footer,
-                right: layout.width,
+                right: layout.width - 1,
                 bottom: layout.footer + 1,
             },
-            CARD_BORDER,
-        );
-        fill(
-            self.dc,
-            RECT {
-                left: 0,
-                top: layout.footer + 1,
-                right: layout.width,
-                bottom: layout.height,
-            },
-            CARD,
+            palette.card_border,
         );
         let blocked = self.state.draft.first_duplicate();
-        let Some(graphics) = Graphics::new(self.dc) else {
-            return;
-        };
         let radius = self.f(8.0);
-        // Reset: quiet text button.
         let hover = self.hover(Target::Reset);
         if hover > 0.0 || self.state.pressed == Some(Target::Reset) {
-            let face = if self.state.pressed == Some(Target::Reset) { PRESSED } else { mix(CARD, HOVER, hover) };
-            graphics.fill_round(to_f(layout.reset), radius, argb(face, 255));
+            if let Some(graphics) = Graphics::new(self.dc) {
+                let face = self.face(Target::Reset, palette.background);
+                graphics.fill_round(ui::to_f(layout.reset), radius, argb(face, 255));
+            }
         }
-        // Cancel: outlined.
-        let hover = self.hover(Target::Cancel);
-        let face = if self.state.pressed == Some(Target::Cancel) { PRESSED } else { mix(CARD, HOVER, hover) };
-        graphics.fill_round(to_f(layout.cancel), radius, argb(face, 255));
-        graphics.stroke_round(inset(to_f(layout.cancel), 0.5), radius, argb(KEY_BORDER, 255), 1.0);
-        // Save: filled accent, muted while duplicates block it.
-        let hover = self.hover(Target::Save);
-        let face = if blocked.is_some() {
-            ACCENT_MUTED
+        self.text(layout.reset, "恢复默认", fonts.body, palette.secondary, DT_CENTER | DT_VCENTER);
+        ui::button(
+            self.dc,
+            layout.cancel,
+            "取消",
+            fonts.body,
+            palette,
+            false,
+            self.face(Target::Cancel, palette.card),
+            radius,
+        );
+        let save_face = if blocked.is_some() {
+            palette.accent_muted
         } else if self.state.pressed == Some(Target::Save) {
-            mix(ACCENT_DARK, 0, 0.12)
+            mix(palette.accent_hover, 0, 0.12)
         } else {
-            mix(ACCENT, ACCENT_DARK, hover)
+            mix(palette.accent, palette.accent_hover, self.hover(Target::Save))
         };
-        graphics.fill_round(to_f(layout.save), radius, argb(face, 255));
-        drop(graphics);
-        text(self.dc, layout.reset, "恢复默认", self.state.fonts.body, SECONDARY, DT_CENTER | DT_VCENTER);
-        text(self.dc, layout.cancel, "取消", self.state.fonts.body, TEXT, DT_CENTER | DT_VCENTER);
-        text(self.dc, layout.save, "保存", self.state.fonts.heading, CARD, DT_CENTER | DT_VCENTER);
+        ui::button(self.dc, layout.save, "保存", fonts.heading, palette, true, save_face, radius);
 
         let (message, color) = match (&self.state.notice, blocked) {
-            (Notice::Error(error), _) => (error.clone(), ERROR),
-            (Notice::Hint(hint), _) => (hint.clone(), WARNING),
+            (Notice::Error(error), _) => (error.clone(), palette.error),
+            (Notice::Hint(hint), _) => (hint.clone(), palette.warning),
             (Notice::None, Some((first, second))) => (
                 format!(
                     "「{}」和「{}」都是 {}",
@@ -1338,9 +1413,12 @@ impl Painter<'_> {
                     BINDINGS[second].label(),
                     self.state.draft.shortcut(first).label()
                 ),
-                WARNING,
+                palette.warning,
             ),
-            (Notice::None, None) => ("点击按键可以修改 · Enter 保存 · Esc 关闭".into(), TERTIARY),
+            (Notice::None, None) => (
+                "点击按键可以修改 · Enter 保存 · Esc 关闭".into(),
+                palette.tertiary,
+            ),
         };
         let rect = RECT {
             left: layout.reset.right + self.s(10),
@@ -1348,11 +1426,10 @@ impl Painter<'_> {
             right: layout.cancel.left - self.s(12),
             bottom: layout.reset.bottom,
         };
-        text(
-            self.dc,
+        self.text(
             rect,
             &message,
-            self.state.fonts.small,
+            fonts.small,
             color,
             DT_LEFT | DT_VCENTER | DT_END_ELLIPSIS,
         );
@@ -1375,111 +1452,16 @@ fn binding_icon(binding: Binding) -> Icon {
 }
 
 fn modifier_names(modifiers: u32) -> Vec<&'static str> {
-    [(MOD_CONTROL, "Ctrl"), (MOD_ALT, "Alt"), (MOD_SHIFT, "Shift"), (MOD_WIN, "Win")]
-        .into_iter()
-        .filter(|(mask, _)| modifiers & mask != 0)
-        .map(|(_, name)| name)
-        .collect()
-}
-
-/// A round check or exclamation badge.
-unsafe fn status_badge(dc: HDC, rect: RECT, color: u32, good: bool) {
-    let Some(graphics) = Graphics::new(dc) else {
-        return;
-    };
-    let bounds = to_f(rect);
-    graphics.fill_ellipse(bounds, argb(color, 255));
-    let size = bounds[2] - bounds[0];
-    let (cx, cy) = ((bounds[0] + bounds[2]) / 2.0, (bounds[1] + bounds[3]) / 2.0);
-    if good {
-        if let Some(pen) = graphics.pen(CARD, (size * 0.13).max(1.4)) {
-            graphics.lines(
-                &pen,
-                &[
-                    PointF { X: cx - size * 0.24, Y: cy + size * 0.01 },
-                    PointF { X: cx - size * 0.06, Y: cy + size * 0.19 },
-                    PointF { X: cx + size * 0.25, Y: cy - size * 0.17 },
-                ],
-            );
-        }
-    } else {
-        let width = (size * 0.14).max(1.4);
-        graphics.fill_round(
-            [cx - width / 2.0, cy - size * 0.28, cx + width / 2.0, cy + size * 0.07],
-            width / 2.0,
-            argb(CARD, 255),
-        );
-        graphics.fill_ellipse(
-            [cx - width * 0.6, cy + size * 0.16, cx + width * 0.6, cy + size * 0.16 + width * 1.2],
-            argb(CARD, 255),
-        );
-    }
-}
-
-fn to_f(rect: RECT) -> [f32; 4] {
-    [rect.left as f32, rect.top as f32, rect.right as f32, rect.bottom as f32]
-}
-
-fn inset([left, top, right, bottom]: [f32; 4], amount: f32) -> [f32; 4] {
-    [left + amount, top + amount, right - amount, bottom - amount]
-}
-
-fn inflate(rect: RECT, amount: i32) -> RECT {
-    RECT {
-        left: rect.left - amount,
-        top: rect.top - amount,
-        right: rect.right + amount,
-        bottom: rect.bottom + amount,
-    }
-}
-
-fn center_f(rect: RECT) -> (f32, f32) {
-    (
-        (rect.left + rect.right) as f32 / 2.0,
-        (rect.top + rect.bottom) as f32 / 2.0,
-    )
-}
-
-/// COLORREF plus alpha to GDI+ ARGB.
-fn argb(color: u32, alpha: u8) -> u32 {
-    (u32::from(alpha) << 24) | ((color & 0xff) << 16) | (color & 0xff00) | ((color >> 16) & 0xff)
-}
-
-fn mix(from: u32, to: u32, t: f32) -> u32 {
-    let t = t.clamp(0.0, 1.0);
-    [0, 8, 16].into_iter().fold(0, |color, shift| {
-        let a = ((from >> shift) & 0xff) as f32;
-        let b = ((to >> shift) & 0xff) as f32;
-        color | (((a + (b - a) * t).round() as u32) << shift)
-    })
-}
-
-unsafe fn fill(dc: HDC, rect: RECT, color: u32) {
-    SetDCBrushColor(dc, color);
-    FillRect(dc, &rect, GetStockObject(DC_BRUSH));
-}
-
-unsafe fn text(dc: HDC, mut rect: RECT, value: &str, font: HFONT, color: u32, format: u32) {
-    let value = wide(value);
-    SelectObject(dc, font);
-    SetBkMode(dc, TRANSPARENT as i32);
-    SetTextColor(dc, color);
-    DrawTextW(
-        dc,
-        value.as_ptr(),
-        -1,
-        &mut rect,
-        format | DT_SINGLELINE | DT_NOPREFIX,
-    );
-}
-
-unsafe fn measure(dc: HDC, value: &str, font: HFONT) -> i32 {
-    let units: Vec<u16> = value.encode_utf16().collect();
-    let previous = SelectObject(dc, font);
-    let mut size = SIZE::default();
-    GetTextExtentPoint32W(dc, units.as_ptr(), units.len() as i32, &mut size);
-    SelectObject(dc, previous);
-    size.cx
+    [
+        (MOD_CONTROL, "Ctrl"),
+        (MOD_ALT, "Alt"),
+        (MOD_SHIFT, "Shift"),
+        (MOD_WIN, "Win"),
+    ]
+    .into_iter()
+    .filter(|(mask, _)| modifiers & mask != 0)
+    .map(|(_, name)| name)
+    .collect()
 }
 
 #[cfg(test)]
@@ -1487,8 +1469,8 @@ mod tests {
     use super::*;
     use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 
-    /// Renders the window in its main states to `%TEMP%\\snapshot-preview`.
-    /// Run with `cargo test preview -- --ignored`.
+    /// Renders the window in its main states, every theme, and the dialogs to
+    /// `%TEMP%\snapshot-preview`. Run with `<test binary> preview --ignored`.
     #[test]
     #[ignore]
     fn preview() {
@@ -1496,14 +1478,48 @@ mod tests {
         let folder = std::env::temp_dir().join("snapshot-preview");
         std::fs::create_dir_all(&folder).unwrap();
         let mut duplicate = Draft::defaults();
-        duplicate.bindings.set(Binding::Copy, Shortcut::parse("Ctrl+S").unwrap());
-        let cases: [(&str, f32, Draft, CaptureStatus, Option<usize>, u32); 5] = [
-            ("active", 1.0, Draft::defaults(), CaptureStatus::Active, None, 0),
-            ("occupied", 1.0, Draft::defaults(), CaptureStatus::Occupied, None, 0),
-            ("recording", 1.0, Draft::defaults(), CaptureStatus::Active, Some(0), MOD_CONTROL | MOD_SHIFT),
-            ("duplicate", 1.0, duplicate, CaptureStatus::Active, None, 0),
-            ("scale150", 1.5, Draft { start_at_login: false, ..Draft::defaults() }, CaptureStatus::Available, None, 0),
-        ];
+        duplicate
+            .bindings
+            .set(Binding::Copy, Shortcut::parse("Ctrl+S").unwrap());
+        let mut cases: Vec<(String, f32, Draft, CaptureStatus, Option<usize>, u32)> = THEMES
+            .into_iter()
+            .map(|theme| {
+                (
+                    format!("theme-{}", theme.key()),
+                    1.0,
+                    Draft {
+                        theme,
+                        ..Draft::defaults()
+                    },
+                    CaptureStatus::Active,
+                    None,
+                    0,
+                )
+            })
+            .collect();
+        cases.extend([
+            ("occupied".into(), 1.0, Draft::defaults(), CaptureStatus::Occupied, None, 0),
+            (
+                "recording".into(),
+                1.0,
+                Draft::defaults(),
+                CaptureStatus::Active,
+                Some(0),
+                MOD_CONTROL | MOD_ALT,
+            ),
+            ("duplicate".into(), 1.0, duplicate, CaptureStatus::Active, None, 0),
+            (
+                "scale150".into(),
+                1.5,
+                Draft {
+                    start_at_login: false,
+                    ..Draft::defaults()
+                },
+                CaptureStatus::Available,
+                None,
+                0,
+            ),
+        ]);
         unsafe {
             for (name, scale, draft, status, recording, held) in cases {
                 let state = State {
@@ -1524,16 +1540,33 @@ mod tests {
                     animating: false,
                 };
                 let layout = Layout::new(scale);
-                let bounds = RECT { right: layout.width, bottom: layout.height, ..Default::default() };
+                let bounds = RECT {
+                    right: layout.width,
+                    bottom: layout.height,
+                    ..Default::default()
+                };
                 let surface = Surface::new(null_mut(), bounds.right, bounds.bottom).unwrap();
-                Painter { dc: surface.dc, state: &state, layout }.paint(bounds);
+                Painter::new(surface.dc, &state).paint(bounds);
                 GdiFlush();
                 let mut image = Desktop { bounds, surface }.crop(bounds).unwrap();
                 for pixel in image.pixels.chunks_exact_mut(4) {
                     pixel[3] = 255;
                 }
-                image.save_png(&folder.join(format!("settings-{name}.png"))).unwrap();
+                image
+                    .save_png(&folder.join(format!("settings-{name}.png")))
+                    .unwrap();
             }
+            for theme in [Theme::Graphite, Theme::Light] {
+                theme::set(theme);
+                crate::dialog::preview(
+                    crate::dialog::Kind::Error,
+                    "无法注册截图快捷键 Ctrl+Shift+A。\n它可能已被其他程序占用。可以双击托盘图标截图，或者在设置里换一个快捷键。",
+                    1.0,
+                )
+                .save_png(&folder.join(format!("dialog-{}.png", theme.key())))
+                .unwrap();
+            }
+            theme::set(Theme::default());
             for warning in [false, true] {
                 crate::app_icon::render(64, warning)
                     .save_png(&folder.join(format!("icon-{warning}.png")))
@@ -1546,6 +1579,7 @@ mod tests {
     fn draft_resets_to_defaults_and_reports_duplicates() {
         let mut draft = Draft::defaults();
         assert!(draft.start_at_login, "start at login is on by default");
+        assert_eq!(draft.theme, Theme::Graphite, "dark by default");
         assert_eq!(draft.preferences().unwrap(), Preferences::default());
         draft.step_opacity(-10);
         assert_eq!(draft.opacity_step, 1);
@@ -1553,7 +1587,9 @@ mod tests {
         assert_eq!(draft.opacity_step, 100);
         let copy = Binding::Copy as usize;
         let save = Binding::Save as usize;
-        draft.bindings.set(Binding::Copy, Shortcut::parse("Ctrl+S").unwrap());
+        draft
+            .bindings
+            .set(Binding::Copy, Shortcut::parse("Ctrl+S").unwrap());
         assert_eq!(draft.duplicate_of(copy), Some(save));
         assert_eq!(draft.first_duplicate(), Some((copy, save)));
         assert!(draft.preferences().is_err());
@@ -1571,12 +1607,15 @@ mod tests {
                 assert_eq!(layout.hit(center), Some(target), "{target:?} at {scale}");
                 assert!(rect.right <= layout.width && rect.bottom <= layout.height);
             }
-            assert!(layout.height < (720.0 * scale) as i32, "fits a 1080p screen");
+            assert!(
+                layout.height < (720.0 * scale) as i32,
+                "fits a 1080p screen"
+            );
         }
     }
 
     #[test]
-    fn clicking_a_key_records_and_escape_cancels_then_closes() {
+    fn clicking_records_keys_picks_themes_and_escape_closes() {
         unsafe {
             let instance = GetModuleHandleW(null());
             let _ = register(instance);
@@ -1584,7 +1623,7 @@ mod tests {
                 0,
                 CLASS,
                 null(),
-                WS_OVERLAPPED,
+                WS_POPUP,
                 0,
                 0,
                 WIDTH,
@@ -1597,25 +1636,26 @@ mod tests {
             assert!(!window.is_null());
             install(window, null_mut(), Draft::defaults());
             let layout = layout().unwrap();
-            let key = layout.keys[Binding::Copy as usize];
-            let lparam = (((key.top + key.bottom) / 2) << 16 | (key.left + key.right) / 2) as LPARAM;
-            SendMessageW(window, WM_LBUTTONDOWN, 0, lparam);
-            SendMessageW(window, WM_LBUTTONUP, 0, lparam);
-            assert_eq!(
-                STATE.with_borrow(|state| state.as_ref().unwrap().recording),
-                Some(Binding::Copy as usize)
-            );
+            let click = |rect: RECT| {
+                let lparam = (((rect.top + rect.bottom) / 2) << 16 | (rect.left + rect.right) / 2)
+                    as LPARAM;
+                SendMessageW(window, WM_LBUTTONDOWN, 0, lparam);
+                SendMessageW(window, WM_LBUTTONUP, 0, lparam);
+            };
+            let state = |read: fn(&State) -> bool| STATE.with_borrow(|s| s.as_ref().is_some_and(read));
+            click(layout.keys[Binding::Copy as usize]);
+            assert!(state(|s| s.recording == Some(Binding::Copy as usize)));
             // Painting while recording must not panic.
             paint_window(window, GetDC(window));
             SendMessageW(window, WM_KEYDOWN, VK_ESCAPE as usize, 0);
-            assert!(STATE.with_borrow(|state| state.as_ref().unwrap().recording.is_none()));
-            let toggle = layout.toggle;
-            let lparam = (((toggle.top + toggle.bottom) / 2) << 16 | (toggle.left + toggle.right) / 2) as LPARAM;
-            SendMessageW(window, WM_LBUTTONDOWN, 0, lparam);
-            SendMessageW(window, WM_LBUTTONUP, 0, lparam);
-            assert!(!STATE.with_borrow(|state| state.as_ref().unwrap().draft.start_at_login));
+            assert!(state(|s| s.recording.is_none()));
+            click(layout.toggle);
+            assert!(state(|s| !s.draft.start_at_login));
+            click(layout.themes[3]);
+            assert!(state(|s| s.draft.theme == Theme::Light));
+            assert_eq!(theme::current(), Theme::Graphite, "applied only on save");
             SendMessageW(window, WM_KEYDOWN, VK_ESCAPE as usize, 0);
-            assert!(STATE.with_borrow(|state| state.is_none()), "Esc closes when idle");
+            assert!(STATE.with_borrow(|s| s.is_none()), "Esc closes when idle");
         }
     }
 }

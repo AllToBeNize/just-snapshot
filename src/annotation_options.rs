@@ -9,12 +9,14 @@ use windows_sys::{
 use crate::{
     annotation::{Style, Tool, INK},
     selection_geometry::contains,
+    text_render::Graphics,
+    theme::{self, argb},
     toolbar::{paint_panel, SHADOW},
     typography::{self, TextStyle},
     wide,
 };
 
-const HEIGHT: i32 = 36;
+const HEIGHT: i32 = 40;
 const GAP: i32 = 4;
 const PADDING: i32 = 5;
 const FIELD: i32 = 104;
@@ -68,7 +70,7 @@ pub struct Options {
 impl Options {
     pub fn new(tool: Tool, toolbar: RECT, area: RECT, selection: RECT) -> Option<Self> {
         let available = area.right - area.left;
-        let swatch = ((available - FIELD - PADDING * 2) / COLORS.len() as i32).min(22);
+        let swatch = ((available - FIELD - PADDING * 2) / COLORS.len() as i32).min(26);
         let width = match tool {
             Tool::Rectangle => return None,
             Tool::Mosaic => FIELD * 2,
@@ -78,9 +80,10 @@ impl Options {
         if width > available {
             return None;
         }
-        // Snipaste-style: hang under the toolbar, left-aligned with the drawing tools.
-        // When the toolbar sits above or inside the selection, open upward instead.
-        let left = toolbar.left.clamp(area.left, area.right - width);
+        // Hang under the toolbar, centered with it. When the toolbar sits above or
+        // inside the selection, open upward instead so the selection stays visible.
+        let center = (toolbar.left + toolbar.right) / 2;
+        let left = (center - width / 2).clamp(area.left, area.right - width);
         let below = toolbar.bottom + GAP;
         let above = toolbar.top - GAP - HEIGHT;
         let fits_below = below + HEIGHT <= area.bottom;
@@ -150,7 +153,8 @@ impl Options {
         paint_panel(dc, self.bounds);
         SelectObject(dc, typography::font(TextStyle::HintDescription));
         SetBkMode(dc, TRANSPARENT as i32);
-        SetTextColor(dc, 0x0033_3333);
+        let palette = theme::palette();
+        SetTextColor(dc, palette.text);
         let (name, value, color) = match self.tool {
             Tool::Brush => (w!("粗细"), style.brush_width, style.brush_color),
             Tool::Mosaic => (w!("粗细"), style.mosaic_width, 0),
@@ -167,39 +171,39 @@ impl Options {
                 wide(&style.mosaic_block.to_string()).as_ptr(),
             );
         }
-        for (mut rect, choice) in self.buttons() {
+        let graphics = Graphics::new(dc);
+        for (rect, choice) in self.buttons() {
             let hover = hovered == Some(choice);
-            SelectObject(dc, GetStockObject(DC_BRUSH));
-            SelectObject(dc, GetStockObject(DC_PEN));
             match choice {
                 Choice::Color(swatch) => {
-                    InflateRect(&mut rect, -2, -4);
-                    SetDCBrushColor(dc, swatch);
-                    SetDCPenColor(
-                        dc,
-                        if swatch == color || hover {
-                            0x00dd_852b
-                        } else {
-                            0x00d0_d0d0
-                        },
-                    );
-                    RoundRect(dc, rect.left, rect.top, rect.right, rect.bottom, 4, 4);
-                    if swatch == color {
-                        InflateRect(&mut rect, 1, 1);
-                        SetDCBrushColor(dc, 0x00dd_852b);
-                        FrameRect(dc, &rect, GetStockObject(DC_BRUSH));
+                    let Some(graphics) = &graphics else { continue };
+                    let size = (rect.right - rect.left).min(rect.bottom - rect.top) as f32 - 8.0;
+                    let cx = (rect.left + rect.right) as f32 / 2.0;
+                    let cy = (rect.top + rect.bottom) as f32 / 2.0;
+                    let r = size / 2.0;
+                    if swatch == color || hover {
+                        let ring = r + 3.0;
+                        let tone = if swatch == color { palette.accent } else { palette.card_border };
+                        graphics.fill_ellipse([cx - ring, cy - ring, cx + ring, cy + ring], argb(tone, 255));
+                        let gap = r + 1.5;
+                        graphics.fill_ellipse([cx - gap, cy - gap, cx + gap, cy + gap], argb(palette.card, 255));
                     }
+                    graphics.fill_ellipse([cx - r, cy - r, cx + r, cy + r], argb(swatch, 255));
+                    // A hairline keeps white and black swatches visible on any theme.
+                    graphics.stroke_round([cx - r, cy - r, cx + r, cy + r], r, argb(palette.text, 40), 1.0);
                 }
                 Choice::Primary(step) | Choice::Block(step) => {
                     if hover {
-                        SetDCBrushColor(dc, 0x00f0_f0f0);
-                        SetDCPenColor(dc, 0x00f0_f0f0);
-                        RoundRect(dc, rect.left, rect.top, rect.right, rect.bottom, 5, 5);
+                        if let Some(graphics) = &graphics {
+                            let bounds = [rect.left as f32, rect.top as f32, rect.right as f32, rect.bottom as f32];
+                            graphics.fill_round(bounds, 6.0, argb(palette.hover, 255));
+                        }
                     }
                     label(dc, rect, if step < 0 { w!("−") } else { w!("+") });
                 }
             }
         }
+        drop(graphics);
         RestoreDC(dc, saved);
     }
 }

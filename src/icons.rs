@@ -1,4 +1,4 @@
-mod phosphor;
+mod lucide;
 
 use std::{cell::RefCell, collections::HashMap, ptr::null_mut};
 use windows_sys::Win32::{
@@ -9,7 +9,27 @@ use windows_sys::Win32::{
     },
 };
 
-use crate::capture::{Image, Surface};
+use crate::{
+    capture::{Image, Surface},
+    text_render,
+    theme::argb,
+};
+
+/// One segment of a vector icon in a 24×24 grid.
+#[derive(Clone, Copy, Debug)]
+pub enum Seg {
+    M(f32, f32),
+    L(f32, f32),
+    C(f32, f32, f32, f32, f32, f32),
+    Z,
+}
+
+/// Stroked outline plus optional solid fills; `accent` parts use the accent color.
+struct Glyph {
+    stroke: &'static [Seg],
+    fill: &'static [Seg],
+    accent: &'static [Seg],
+}
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Icon {
@@ -173,70 +193,51 @@ pub unsafe fn paint(dc: HDC, bounds: RECT, icon: Icon, color: u32) {
     });
 }
 
-fn tinted_icon(icon: Icon, size: i32, color: u32) -> Image {
-    let native = if size <= 12 { 12 } else { 18 };
-    let index = usize::from(native == 18);
-    let mask = phosphor::mask(icon)[index];
-    let accent = match icon {
-        Icon::MouseLeft => Some(phosphor::MOUSE_LEFT_DOT[index]),
-        Icon::MouseRight => Some(phosphor::MOUSE_RIGHT_DOT[index]),
-        _ => None,
+fn glyph(icon: Icon) -> Glyph {
+    use lucide::*;
+    let (stroke, fill, accent): (&'static [Seg], &'static [Seg], &'static [Seg]) = match icon {
+        Icon::Rectangle => (SQUARE, &[], &[]),
+        Icon::Text => (TYPE, &[], &[]),
+        Icon::Brush => (BRUSH, &[], &[]),
+        Icon::Mosaic => (MOSAIC, MOSAIC_FILL, &[]),
+        Icon::Undo => (UNDO_2, &[], &[]),
+        Icon::Redo => (REDO_2, &[], &[]),
+        Icon::LongCapture => (LONG_CAPTURE, &[], &[]),
+        Icon::Copy => (COPY, &[], &[]),
+        Icon::Save => (SAVE, &[], &[]),
+        Icon::Pin => (PIN, &[], &[]),
+        Icon::Close => (X, &[], &[]),
+        Icon::MouseLeft => (MOUSE_BUTTONS, &[], MOUSE_LEFT_FILL),
+        Icon::MouseRight => (MOUSE_BUTTONS, &[], MOUSE_RIGHT_FILL),
+        Icon::Drag => (SQUARE_DASHED_MOUSE_POINTER, &[], &[]),
+        Icon::Move => (MOVE, &[], &[]),
+        Icon::Resize => (MOVE_DIAGONAL_2, &[], &[]),
     };
-    let mut pixels = Vec::with_capacity((size * size * 4) as usize);
-    for y in 0..size {
-        for x in 0..size {
-            let base = coverage(mask, native, size, x, y);
-            let dot = accent.map_or(0, |mask| coverage(mask, native, size, x, y));
-            let visible_base = (base * (255 - dot) + 127) / 255;
-            for shift in [16, 8, 0] {
-                let ink = ((color >> shift) & 255) as u16;
-                let accent = ((ACCENT >> shift) & 255) as u16;
-                pixels.push(((ink * visible_base + accent * dot + 127) / 255) as u8);
-            }
-            pixels.push((visible_base + dot) as u8);
-        }
-    }
-    Image {
-        width: size,
-        height: size,
-        pixels,
+    Glyph {
+        stroke,
+        fill,
+        accent,
     }
 }
 
-fn coverage(mask: &[u8], native: i32, size: i32, x: i32, y: i32) -> u16 {
-    let sample = |x: i32, y: i32| {
-        let digit = mask[(y * native + x) as usize];
-        let value = if digit <= b'9' {
-            digit - b'0'
-        } else {
-            digit - b'a' + 10
-        };
-        u16::from(value) * 17
+/// Renders the vector icon at exactly `size` pixels, so it stays sharp at any scale.
+fn tinted_icon(icon: Icon, size: i32, color: u32) -> Image {
+    let glyph = glyph(icon);
+    let scale = size as f32 / 24.0;
+    // Lucide strokes are 2 units; keep at least 1.5 px so small icons stay legible.
+    let width = (2.0 * scale).max(1.5);
+    let rendered = unsafe {
+        text_render::rasterize(size, |graphics| {
+            graphics.fill_segments(glyph.fill, scale, argb(color, 255));
+            graphics.fill_segments(glyph.accent, scale, argb(ACCENT, 255));
+            graphics.stroke_segments(glyph.stroke, scale, argb(color, 255), width);
+        })
     };
-    if native == size {
-        return sample(x, y);
-    }
-    let source = |value| {
-        ((value as f32 + 0.5) * native as f32 / size as f32 - 0.5).clamp(0.0, (native - 1) as f32)
-    };
-    let sx = source(x);
-    let sy = source(y);
-    let left = sx as i32;
-    let top = sy as i32;
-    let right = (left + 1).min(native - 1);
-    let bottom = (top + 1).min(native - 1);
-    let mix = |a: f32, b: f32, t: f32| a + (b - a) * t;
-    let upper = mix(
-        f32::from(sample(left, top)),
-        f32::from(sample(right, top)),
-        sx.fract(),
-    );
-    let lower = mix(
-        f32::from(sample(left, bottom)),
-        f32::from(sample(right, bottom)),
-        sx.fract(),
-    );
-    mix(upper, lower, sy.fract()).round() as u16
+    rendered.unwrap_or_else(|| Image {
+        width: size,
+        height: size,
+        pixels: vec![0; (size * size * 4) as usize],
+    })
 }
 
 #[cfg(test)]
@@ -284,12 +285,21 @@ mod tests {
 
     #[test]
     fn mosaic_has_two_dark_diagonal_tiles_and_two_open_tiles() {
-        let image = tinted_icon(Icon::Mosaic, 18, 0);
-        let alpha = |x: usize, y: usize| image.pixels[(y * 18 + x) * 4 + 3];
-        assert_eq!(alpha(5, 5), 255);
-        assert_eq!(alpha(12, 12), 255);
-        assert_eq!(alpha(12, 5), 0);
-        assert_eq!(alpha(5, 12), 0);
+        let image = tinted_icon(Icon::Mosaic, 24, 0);
+        let alpha = |x: usize, y: usize| image.pixels[(y * 24 + x) * 4 + 3];
+        assert_eq!(alpha(8, 8), 255);
+        assert_eq!(alpha(15, 15), 255);
+        assert_eq!(alpha(15, 8), 0);
+        assert_eq!(alpha(8, 15), 0);
+    }
+
+    #[test]
+    fn a_24_pixel_vertical_stroke_is_crisp() {
+        // The "T" stem sits on x = 11..13 at 24 px: fully covered, no blur.
+        let image = tinted_icon(Icon::Text, 24, 0);
+        let alpha = |x: usize, y: usize| image.pixels[(y * 24 + x) * 4 + 3];
+        assert_eq!((alpha(11, 12), alpha(12, 12)), (255, 255));
+        assert_eq!((alpha(10, 12), alpha(13, 12)), (0, 0));
     }
 }
 #[test]

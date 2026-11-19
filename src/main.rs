@@ -4,6 +4,7 @@ mod annotation;
 mod app_icon;
 mod annotation_options;
 mod capture;
+mod dialog;
 mod hotkey;
 mod icons;
 mod mosaic;
@@ -20,8 +21,10 @@ mod startup;
 mod targets;
 mod text_mark;
 mod text_render;
+mod theme;
 mod toolbar;
 mod typography;
+mod ui;
 
 use std::{
     cell::Cell,
@@ -88,6 +91,7 @@ unsafe fn run() -> Result<(), String> {
     let bindings = preferences.bindings;
     hotkey::activate(bindings);
     pinned::set_opacity_step(preferences.opacity_step);
+    theme::set(preferences.theme);
     let instance = GetModuleHandleW(null());
     selection::register(instance).map_err(|error| error.to_string())?;
     scroll_capture::register(instance).map_err(|error| error.to_string())?;
@@ -360,17 +364,14 @@ unsafe fn apply_preferences(
     }
     hotkey::activate(bindings);
     pinned::set_opacity_step(preferences.opacity_step);
+    theme::set(preferences.theme);
     tray_icon(window, NIM_MODIFY);
     Ok(())
 }
 
+/// Errors use the themed dialog; the first line of `message` is its title.
 unsafe fn show_error(window: HWND, message: &str) {
-    MessageBoxW(
-        window,
-        wide(message).as_ptr(),
-        w!("Snapshot"),
-        MB_OK | MB_ICONERROR,
-    );
+    dialog::show(window, dialog::Kind::Error, message);
 }
 
 fn wide(text: &str) -> Vec<u16> {

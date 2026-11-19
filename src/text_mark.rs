@@ -25,7 +25,8 @@ pub enum TextHandle {
 
 const CORNERS: [(i32, i32); 4] = [(-1, -1), (1, -1), (1, 1), (-1, 1)];
 const ROTATE_OFFSET: i32 = 14;
-const ROTATE_RADIUS: i32 = 9;
+const ROTATE_RADIUS: i32 = 8;
+const HANDLE_HALF: f32 = 3.5;
 const MIN_SIZE: i32 = 8;
 const MAX_SIZE: i32 = 128;
 
@@ -354,47 +355,25 @@ impl TextMark {
         RestoreDC(dc, saved);
     }
 
+    /// Snipaste-style chrome: a thin dashed outline, small square corner
+    /// handles, and a slim rotation knob above the top edge.
     pub unsafe fn paint_frame(&self, dc: HDC) {
-        if self.is_rotated() && self.paint_smooth_frame(dc) {
+        if self.paint_smooth_frame(dc) {
             return;
         }
+        // Without GDI+, fall back to a plain dotted outline.
         let saved = SaveDC(dc);
         if saved == 0 {
             return;
         }
-        let pen = CreatePen(PS_SOLID, 2, BORDER_BLUE);
-        if pen.is_null() {
-            SelectObject(dc, GetStockObject(DC_PEN));
-            SetDCPenColor(dc, BORDER_BLUE);
-        } else {
+        let pen = CreatePen(PS_DOT, 1, BORDER_BLUE);
+        if !pen.is_null() {
             SelectObject(dc, pen);
         }
-        SelectObject(dc, GetStockObject(WHITE_BRUSH));
+        SetBkMode(dc, TRANSPARENT as i32);
         let corners = CORNERS.map(|(x, y)| self.corner(x, y));
         let outline = [corners[0], corners[1], corners[2], corners[3], corners[0]];
         Polyline(dc, outline.as_ptr(), outline.len() as i32);
-        let rotation = self.rotation_point();
-        let stem = [self.screen_point(0, self.local_rect().top), rotation];
-        Polyline(dc, stem.as_ptr(), 2);
-        for point in corners {
-            Ellipse(dc, point.x - 4, point.y - 4, point.x + 5, point.y + 5);
-        }
-        let POINT { x, y } = rotation;
-        Ellipse(
-            dc,
-            x - ROTATE_RADIUS,
-            y - ROTATE_RADIUS,
-            x + ROTATE_RADIUS + 1,
-            y + ROTATE_RADIUS + 1,
-        );
-        SetArcDirection(dc, AD_CLOCKWISE);
-        Arc(dc, x - 5, y - 5, x + 6, y + 6, x + 4, y + 3, x + 5, y - 3);
-        let arrow = [
-            POINT { x: x + 5, y: y - 6 },
-            POINT { x: x + 5, y: y - 2 },
-            POINT { x: x + 1, y: y - 2 },
-        ];
-        Polyline(dc, arrow.as_ptr(), arrow.len() as i32);
         RestoreDC(dc, saved);
         if !pen.is_null() {
             DeleteObject(pen);
@@ -405,7 +384,10 @@ impl TextMark {
         let Some(graphics) = Graphics::new(dc) else {
             return false;
         };
-        let Some(pen) = graphics.pen(BORDER_BLUE, 2.0) else {
+        let (Some(dashed), Some(solid)) = (
+            graphics.dashed_pen(BORDER_BLUE, 1.0),
+            graphics.pen(BORDER_BLUE, 1.0),
+        ) else {
             return false;
         };
         let rect = self.local_rect();
@@ -416,16 +398,16 @@ impl TextMark {
             self.precise_point(rect.left, rect.bottom),
         ];
         graphics.lines(
-            &pen,
+            &dashed,
             &[corners[0], corners[1], corners[2], corners[3], corners[0]],
         );
         let rotation = self.precise_point(0, rect.top - ROTATE_OFFSET);
-        graphics.lines(&pen, &[self.precise_point(0, rect.top), rotation]);
+        graphics.lines(&solid, &[self.precise_point(0, rect.top), rotation]);
         for corner in corners {
-            graphics.handle(&pen, corner, 4.0);
+            graphics.square_handle(&solid, corner, HANDLE_HALF);
         }
-        graphics.handle(&pen, rotation, ROTATE_RADIUS as f32);
-        graphics.rotation_arrow(&pen, rotation);
+        graphics.handle(&solid, rotation, ROTATE_RADIUS as f32);
+        graphics.rotation_arrow(&solid, rotation);
         true
     }
 }
@@ -435,6 +417,39 @@ mod tests {
     use super::*;
     use crate::capture::{Desktop, Surface};
     use std::ptr::null_mut;
+
+    /// Renders a plain and a rotated text frame to `%TEMP%\\snapshot-preview`.
+    #[test]
+    #[ignore]
+    fn preview() {
+        let folder = std::env::temp_dir().join("snapshot-preview");
+        std::fs::create_dir_all(&folder).unwrap();
+        unsafe {
+            let bounds = RECT {
+                right: 420,
+                bottom: 170,
+                ..Default::default()
+            };
+            let surface = Surface::new(null_mut(), bounds.right, bounds.bottom).unwrap();
+            FillRect(surface.dc, &bounds, GetStockObject(WHITE_BRUSH));
+            for (frame, angle) in [
+                (RECT { left: 30, top: 50, right: 190, bottom: 100 }, 0.0),
+                (RECT { left: 240, top: 60, right: 380, bottom: 110 }, -0.3),
+            ] {
+                let mut mark = TextMark::new(frame, 24, 0x0045_45ff);
+                mark.text = "Snapshot 文本".encode_utf16().collect();
+                mark.angle = angle;
+                mark.paint(surface.dc);
+                mark.paint_frame(surface.dc);
+            }
+            GdiFlush();
+            let mut image = Desktop { bounds, surface }.crop(bounds).unwrap();
+            for pixel in image.pixels.chunks_exact_mut(4) {
+                pixel[3] = 255;
+            }
+            image.save_png(&folder.join("text-frame.png")).unwrap();
+        }
+    }
 
     #[test]
     fn rotated_frame_edges_blend_into_the_background() {

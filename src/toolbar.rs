@@ -4,6 +4,8 @@ use crate::{
     hotkey::Binding,
     icons::{self, Icon},
     selection_geometry::contains,
+    text_render::Graphics,
+    theme::{self, argb},
     typography::{self, TextStyle},
 };
 use windows_sys::{
@@ -81,14 +83,14 @@ const LABELS: [*const u16; ACTIONS.len()] = [
 ];
 /// Indexes of the first button in every group after the first.
 const GROUP_STARTS: [usize; 2] = [4, 6];
-const OFFSET: i32 = 6;
-const GROUP_GAP: i32 = 9;
-const PADDING: i32 = 3;
-const HEIGHT: i32 = 38;
-const MAX_CELL: i32 = 32;
-const ICON: i32 = 20;
-const DISABLED_ICON: u32 = 0x00b9_b9b9;
-const ACCENT_ICON: u32 = 0x00d0_7a1e;
+const OFFSET: i32 = 8;
+const GROUP_GAP: i32 = 11;
+const PADDING: i32 = 4;
+const HEIGHT: i32 = 46;
+const MAX_CELL: i32 = 38;
+/// Lucide's native size, so strokes land on whole pixels.
+const ICON: i32 = 24;
+const RADIUS: f32 = 10.0;
 /// Height of the panel shadow, included at the bottom of every panel's bounds.
 pub const SHADOW: i32 = 2;
 
@@ -112,20 +114,18 @@ impl Toolbar {
             return None;
         }
         let width = cell * count + spacing;
-        // Below the selection, right-aligned; then above; a full-screen selection keeps it inside.
+        // Centered below the selection; then above; a full-screen selection keeps it inside.
         let below = selection.bottom + OFFSET;
         let above = selection.top - OFFSET - HEIGHT;
-        let (right, top) = if below + HEIGHT <= area.bottom {
-            (selection.right, below)
+        let top = if below + HEIGHT <= area.bottom {
+            below
         } else if above >= area.top {
-            (selection.right, above)
+            above
         } else {
-            (
-                selection.right - OFFSET,
-                (selection.bottom - OFFSET - HEIGHT).clamp(area.top, area.bottom - HEIGHT),
-            )
+            (selection.bottom - OFFSET - HEIGHT).clamp(area.top, area.bottom - HEIGHT)
         };
-        let left = (right - width).clamp(area.left, area.right - width);
+        let center = (selection.left + selection.right) / 2;
+        let left = (center - width / 2).clamp(area.left, area.right - width);
         Some(Self {
             bounds: RECT {
                 left,
@@ -164,14 +164,14 @@ impl Toolbar {
         }
         paint_panel(dc, self.bounds);
 
-        SetDCBrushColor(dc, 0x00e4_e4e4);
+        SetDCBrushColor(dc, theme::palette().divider);
         for start in GROUP_STARTS {
             let divider = self.button(start - 1).right + 1 + GROUP_GAP / 2;
             let line = RECT {
                 left: divider,
                 right: divider + 1,
-                top: self.bounds.top + 9,
-                bottom: self.bounds.bottom - 9,
+                top: self.bounds.top + 12,
+                bottom: self.bounds.bottom - 12 - SHADOW,
             };
             FillRect(dc, &line, GetStockObject(DC_BRUSH));
         }
@@ -196,15 +196,15 @@ impl Toolbar {
     pub fn tooltip(self, action: Action) -> Option<(RECT, *const u16)> {
         let index = ACTIONS.iter().position(|&candidate| candidate == action)?;
         let button = self.button(index);
-        let width = 66;
-        let height = 24;
+        let width = 70;
+        let height = 28;
         let left = ((button.left + button.right - width) / 2)
             .clamp(self.area.left, self.area.right - width);
-        let above = self.bounds.top - height - 4;
+        let above = self.bounds.top - height - 6;
         let top = if above >= self.area.top {
             above
-        } else if self.bounds.bottom + 4 + height <= self.area.bottom {
-            self.bounds.bottom + 4
+        } else if self.bounds.bottom + 6 + height <= self.area.bottom {
+            self.bounds.bottom + 6
         } else {
             return None;
         };
@@ -221,27 +221,30 @@ impl Toolbar {
 }
 
 pub unsafe fn paint_panel(dc: HDC, bounds: RECT) {
-    SelectObject(dc, GetStockObject(DC_BRUSH));
-    SelectObject(dc, GetStockObject(DC_PEN));
-    // A soft two-step shadow inside the bottom of the bounds, so repaints stay in place.
+    let palette = theme::palette();
+    // The shadow sits inside the bottom of the bounds, so repaints stay in place.
     let face = RECT {
         bottom: bounds.bottom - SHADOW,
         ..bounds
     };
-    for (offset, color) in [(SHADOW, 0x00c8_c8c8), (1, 0x00b4_b4b4)] {
-        SetDCBrushColor(dc, color);
-        SetDCPenColor(dc, color);
-        let shadow = RECT {
-            left: face.left + 1,
-            top: face.top + offset,
-            right: face.right - 1,
-            bottom: face.bottom + offset,
-        };
-        rounded(dc, shadow, 8);
+    let Some(graphics) = Graphics::new(dc) else {
+        SelectObject(dc, GetStockObject(DC_BRUSH));
+        SelectObject(dc, GetStockObject(DC_PEN));
+        SetDCBrushColor(dc, palette.card);
+        SetDCPenColor(dc, palette.card_border);
+        rounded(dc, face, RADIUS as i32);
+        return;
+    };
+    let shape = to_f(face);
+    for (offset, alpha) in [(SHADOW as f32, 60), (1.0, 90)] {
+        graphics.fill_round(
+            [shape[0], shape[1] + offset, shape[2], shape[3] + offset],
+            RADIUS,
+            argb(palette.shadow, alpha),
+        );
     }
-    SetDCBrushColor(dc, 0x00ff_ffff);
-    SetDCPenColor(dc, 0x00d4_d4d4);
-    rounded(dc, face, 8);
+    graphics.fill_round(shape, RADIUS, argb(palette.card, 255));
+    graphics.stroke_round(inset(shape, 0.5), RADIUS, argb(palette.card_border, 255), 1.0);
 }
 
 pub unsafe fn paint_button(
@@ -252,18 +255,24 @@ pub unsafe fn paint_button(
     selected: bool,
     hovered: bool,
 ) {
+    let palette = theme::palette();
     let (background, foreground) = match (enabled, selected, hovered) {
-        (false, _, _) => (None, DISABLED_ICON),
-        (true, true, _) => (Some(0x00fc_eee4), 0x008b_4c22),
-        (true, false, true) => (Some(0x00f8_f1eb), 0x0044_3328),
-        (true, false, false) if action == Action::Copy => (None, ACCENT_ICON),
-        (true, false, false) => (None, 0x0050_4945),
+        (false, _, _) => (None, palette.disabled),
+        (true, true, _) => (Some(palette.accent_soft), palette.accent),
+        (true, false, true) => (Some(palette.hover), palette.text),
+        (true, false, false) if action == Action::Copy => (None, palette.accent),
+        (true, false, false) => (None, palette.icon),
     };
     if let Some(background) = background {
-        SelectObject(dc, GetStockObject(DC_BRUSH));
-        SelectObject(dc, GetStockObject(NULL_PEN));
-        SetDCBrushColor(dc, background);
-        rounded(dc, rect, 6);
+        match Graphics::new(dc) {
+            Some(graphics) => graphics.fill_round(to_f(rect), 8.0, argb(background, 255)),
+            None => {
+                SelectObject(dc, GetStockObject(DC_BRUSH));
+                SelectObject(dc, GetStockObject(NULL_PEN));
+                SetDCBrushColor(dc, background);
+                rounded(dc, rect, 8);
+            }
+        }
     }
     let size = (rect.right - rect.left - 4).min(ICON);
     let left = (rect.left + rect.right - size) / 2;
@@ -282,25 +291,34 @@ pub unsafe fn paint_button(
 }
 
 pub unsafe fn paint_tooltip(dc: HDC, bounds: RECT, label: *const u16) {
-    paint_label(dc, bounds, label, 0x0034_302d, true);
+    let palette = theme::palette();
+    paint_label(dc, bounds, label, palette.tooltip, palette.tooltip_text, true);
 }
 
 pub unsafe fn paint_size_badge(dc: HDC, bounds: RECT, label: *const u16) {
-    paint_label(dc, bounds, label, 0, false);
+    paint_label(dc, bounds, label, 0, 0x00ff_ffff, false);
 }
 
-unsafe fn paint_label(dc: HDC, mut bounds: RECT, label: *const u16, fill: u32, pill: bool) {
+unsafe fn paint_label(
+    dc: HDC,
+    mut bounds: RECT,
+    label: *const u16,
+    fill: u32,
+    text: u32,
+    pill: bool,
+) {
+    if pill {
+        if let Some(graphics) = Graphics::new(dc) {
+            graphics.fill_round(to_f(bounds), 7.0, argb(fill, 240));
+        }
+    }
     let saved = SaveDC(dc);
     if saved == 0 {
         return;
     }
     let brush = GetStockObject(DC_BRUSH);
     SetDCBrushColor(dc, fill);
-    if pill {
-        SelectObject(dc, brush);
-        SelectObject(dc, GetStockObject(NULL_PEN));
-        rounded(dc, bounds, 7);
-    } else {
+    if !pill {
         FillRect(dc, &bounds, brush);
     }
     let style = if pill {
@@ -310,7 +328,7 @@ unsafe fn paint_label(dc: HDC, mut bounds: RECT, label: *const u16, fill: u32, p
     };
     SelectObject(dc, typography::font(style));
     SetBkMode(dc, TRANSPARENT as i32);
-    SetTextColor(dc, 0x00ff_ffff);
+    SetTextColor(dc, text);
     DrawTextW(
         dc,
         label,
@@ -337,6 +355,19 @@ fn action_icon(action: Action) -> Icon {
     }
 }
 
+fn to_f(rect: RECT) -> [f32; 4] {
+    [
+        rect.left as f32,
+        rect.top as f32,
+        rect.right as f32,
+        rect.bottom as f32,
+    ]
+}
+
+fn inset([left, top, right, bottom]: [f32; 4], amount: f32) -> [f32; 4] {
+    [left + amount, top + amount, right - amount, bottom - amount]
+}
+
 unsafe fn rounded(dc: HDC, rect: RECT, diameter: i32) {
     RoundRect(
         dc,
@@ -356,7 +387,7 @@ mod tests {
     use std::ptr::null_mut;
 
     #[test]
-    fn panel_is_right_aligned_and_highlights_only_the_hovered_button() {
+    fn panel_is_centered_and_highlights_only_the_hovered_button() {
         let area = RECT {
             right: 900,
             bottom: 600,
@@ -369,11 +400,13 @@ mod tests {
             bottom: 390,
         };
         let toolbar = Toolbar::new(selection, area).unwrap();
-        assert_eq!(toolbar.bounds.right, selection.right);
+        let center = |rect: RECT| (rect.left + rect.right) / 2;
+        assert!((center(toolbar.bounds) - center(selection)).abs() <= 1, "centered");
         assert_eq!(toolbar.bounds.top, selection.bottom + OFFSET);
         let first = toolbar.button(0);
+        // The inner margin of the button, clear of its icon.
         let point = POINT {
-            x: first.left + 9,
+            x: first.left + 3,
             y: first.top + 3,
         };
         let hovered = toolbar.hit(point);
@@ -388,15 +421,82 @@ mod tests {
         unsafe {
             let surface = Surface::new(null_mut(), area.right, area.bottom).unwrap();
             toolbar.paint(surface.dc, &History::default(), hovered);
-            assert_eq!(GetPixel(surface.dc, point.x, point.y), 0x00f8_f1eb);
+            let palette = theme::palette();
+            assert_eq!(GetPixel(surface.dc, point.x, point.y + 6), palette.hover);
             assert_eq!(
-                GetPixel(surface.dc, point.x + toolbar.cell, point.y),
-                0x00ff_ffff
+                GetPixel(surface.dc, point.x + toolbar.cell, point.y + 6),
+                palette.card
             );
             assert_eq!(
-                GetPixel(surface.dc, divider, toolbar.bounds.top + 12),
-                0x00e4_e4e4
+                GetPixel(surface.dc, divider, toolbar.bounds.top + 20),
+                palette.divider
             );
+        }
+    }
+
+    /// Renders the toolbar and brush options in every theme over a fake
+    /// screenshot to `%TEMP%\\snapshot-preview`. Run with `preview --ignored`.
+    #[test]
+    #[ignore]
+    fn preview() {
+        use crate::{annotation::Style, capture::Desktop, theme::THEMES};
+        let folder = std::env::temp_dir().join("snapshot-preview");
+        std::fs::create_dir_all(&folder).unwrap();
+        let area = RECT {
+            right: 620,
+            bottom: 210,
+            ..Default::default()
+        };
+        let selection = RECT {
+            left: 40,
+            top: 10,
+            right: 580,
+            bottom: 90,
+        };
+        unsafe {
+            for theme in THEMES {
+                theme::set(theme);
+                let surface = Surface::new(null_mut(), area.right, area.bottom).unwrap();
+                // A light "screenshot" outside, the selection on top of it.
+                for y in 0..area.bottom {
+                    let shade = 0x00d8_d8d8 + ((y as u32 / 6) % 2) * 0x0006_0606;
+                    SetDCBrushColor(surface.dc, shade);
+                    FillRect(
+                        surface.dc,
+                        &RECT {
+                            top: y,
+                            bottom: y + 1,
+                            ..area
+                        },
+                        GetStockObject(DC_BRUSH),
+                    );
+                }
+                SetDCBrushColor(surface.dc, 0x00ff_ffff);
+                FillRect(surface.dc, &selection, GetStockObject(DC_BRUSH));
+                let toolbar = Toolbar::new(selection, area).unwrap();
+                let mut history = History::default();
+                history.tool = Some(Tool::Brush);
+                toolbar.paint(surface.dc, &history, Some(Action::Save));
+                if let Some((bounds, label)) = toolbar.tooltip(Action::Save) {
+                    paint_tooltip(surface.dc, bounds, label);
+                }
+                let options = toolbar.options(Tool::Brush, selection).unwrap();
+                options.paint(surface.dc, Style::default(), None);
+                GdiFlush();
+                let mut image = Desktop {
+                    bounds: area,
+                    surface,
+                }
+                .crop(area)
+                .unwrap();
+                for pixel in image.pixels.chunks_exact_mut(4) {
+                    pixel[3] = 255;
+                }
+                image
+                    .save_png(&folder.join(format!("toolbar-{}.png", theme.key())))
+                    .unwrap();
+            }
+            theme::set(theme::Theme::default());
         }
     }
 
@@ -415,10 +515,9 @@ mod tests {
         };
         let toolbar = Toolbar::new(low, area).unwrap();
         assert_eq!(toolbar.bounds.bottom, low.top - OFFSET);
-        assert_eq!(toolbar.bounds.right, low.right);
         let toolbar = Toolbar::new(area, area).unwrap();
         assert_eq!(toolbar.bounds.bottom, area.bottom - OFFSET);
-        assert_eq!(toolbar.bounds.right, area.right - OFFSET);
+        assert!(toolbar.bounds.left > area.left && toolbar.bounds.right < area.right);
     }
 
     #[test]
