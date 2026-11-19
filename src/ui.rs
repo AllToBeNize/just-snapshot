@@ -13,7 +13,7 @@ use windows_sys::{
 };
 
 use crate::{
-    text_render::Graphics,
+    gdiplus::Graphics,
     theme::{argb, Palette},
     wide,
 };

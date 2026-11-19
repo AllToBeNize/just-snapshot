@@ -32,7 +32,7 @@ use crate::{
     pinned, retry_hotkey,
     selection_geometry::{contains, mouse_point},
     startup,
-    text_render::Graphics,
+    gdiplus::Graphics,
     theme::{self, argb, mix, Palette, Theme, THEMES},
     ui::{self, Badge, Fonts},
 };

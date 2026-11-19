@@ -25,7 +25,7 @@ use windows_sys::{
 use crate::{
     overlay_ui::monitor_info,
     selection_geometry::{contains, mouse_point},
-    text_render::Graphics,
+    gdiplus::Graphics,
     theme::{self, argb, mix},
     ui::{self, Badge, Fonts},
 };

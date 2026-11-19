@@ -5,6 +5,7 @@ mod app_icon;
 mod annotation_options;
 mod capture;
 mod dialog;
+mod gdiplus;
 mod hotkey;
 mod icons;
 mod mosaic;

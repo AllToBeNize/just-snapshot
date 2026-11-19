@@ -3,7 +3,7 @@ use windows_sys::Win32::{
     Graphics::{Gdi::*, GdiPlus::PointF},
 };
 
-use crate::{capture::Image, selection_geometry::BORDER_BLUE, text_render::Graphics, typography};
+use crate::{capture::Image, selection_geometry::BORDER_BLUE, gdiplus::Graphics, typography};
 
 #[derive(Clone, PartialEq)]
 pub struct TextMark {

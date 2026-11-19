@@ -11,7 +11,7 @@ use windows_sys::Win32::{
 
 use crate::{
     capture::{Image, Surface},
-    text_render,
+    gdiplus,
     theme::argb,
 };
 
@@ -227,7 +227,7 @@ fn tinted_icon(icon: Icon, size: i32, color: u32) -> Image {
     // Lucide strokes are 2 units; keep at least 1.5 px so small icons stay legible.
     let width = (2.0 * scale).max(1.5);
     let rendered = unsafe {
-        text_render::rasterize(size, |graphics| {
+        gdiplus::rasterize(size, |graphics| {
             graphics.fill_segments(glyph.fill, scale, argb(color, 255));
             graphics.fill_segments(glyph.accent, scale, argb(ACCENT, 255));
             graphics.stroke_segments(glyph.stroke, scale, argb(color, 255), width);

@@ -40,12 +40,15 @@ Build and test on Windows only. `snapshot.ps1` locates Cargo and the Visual Stud
 | `settings.rs` | Settings window: frameless and custom-drawn (GDI + GDI+), DPI-scaled, key recording, live hotkey probe, theme picker |
 | `app_icon.rs` | Tray icon drawn in code, with an amber warning badge variant |
 | `startup.rs` | Start-at-login value under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\Snapshot` |
-| `capture.rs` | Desktop grab and the `Surface` bitmap helper |
-| `selection.rs` | The capture session window: selection, dragging, annotation input, toolbar commands, output |
+| `capture.rs` | Desktop grab, cropping, the `Surface` bitmap helper and PNG encoding |
+| `output.rs` | The only exit for captures: `deliver` copies (opaque bottom-up DIB + PNG), saves or pins. Normal and long captures both use it |
+| `selection/mod.rs` | The capture session: state, window creation and message dispatch |
+| `selection/chrome.rs`, `annotate.rs`, `text.rs`, `pointer.rs`, `paint.rs`, `export.rs` | Toolbar/option/hint state and commands; strokes; text editing; dragging, snapping, loupe and cursors; painting; leaving the overlay |
 | `selection_geometry.rs`, `targets.rs`, `panel_edges.rs` | Rect math, window/UIA target snapping, content-column edge detection |
 | `toolbar.rs` | Main toolbar layout, painting, hit testing; shared `paint_panel` / `paint_button` |
 | `annotation_options.rs` | Secondary option bar (width, font size, colors) |
-| `annotation.rs`, `text_mark.rs`, `text_render.rs`, `mosaic.rs` | Annotation model and history, text boxes, text rendering, mosaic |
+| `annotation.rs`, `text_mark.rs`, `text_render.rs`, `mosaic.rs` | Annotation model and history, text boxes, capturing the hidden text editor, mosaic |
+| `gdiplus.rs` | GDI+ wrapper: anti-aliased shapes, vector icon rasterizing, image drawing |
 | `overlay_ui.rs`, `typography.rs` | Hint panel, fonts |
 | `icons.rs`, `icons/lucide.rs` | Vector icons rendered at the exact target size. `icons/lucide.rs` is generated: edit SVGs in `tools/icons/` and run `python tools/svg2rust.py tools/icons <lucide version> <names...> > src/icons/lucide.rs` |
 | `theme.rs` | Color themes (Graphite default, Midnight, Forest, Light) and color helpers |
@@ -62,7 +65,8 @@ The overlay follows Snipaste's layout:
 - The secondary option bar is centered under the toolbar. It opens downward when the toolbar is below the selection, otherwise upward, so it never covers the selection. It does not follow the text box.
 - Panels take their colors from `theme::palette()` and are drawn anti-aliased with GDI+, with a 2 px shadow inside their bounds (`toolbar::SHADOW`). Never hard-code colors in UI code; add a palette field instead.
 - Text boxes use Snipaste-style chrome: a 1 px dashed outline, small square corner handles and a rotation knob. Anything painted must stay within the rect that gets invalidated, or it leaves trails.
-- Layout changes need matching updates to the unit tests in `toolbar.rs`, `annotation_options.rs`, and `selection::text_interaction_tests`.
+- Layout changes need matching updates to the unit tests in `toolbar.rs`, `annotation_options.rs`, and `selection/tests/text.rs`.
+- Clipboard behavior has an on-demand test against the real clipboard; run it in a desktop session after touching `output.rs`: `<test binary> clipboard --ignored --test-threads=1`.
 
 ## Defaults and Local State
 

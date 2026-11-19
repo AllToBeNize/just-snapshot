@@ -4,7 +4,7 @@ use crate::{
     hotkey::Binding,
     icons::{self, Icon},
     selection_geometry::contains,
-    text_render::Graphics,
+    gdiplus::Graphics,
     theme::{self, argb},
     typography::{self, TextStyle},
     ui::{inset, to_f},

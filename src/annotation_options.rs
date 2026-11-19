@@ -9,7 +9,7 @@ use windows_sys::{
 use crate::{
     annotation::{Style, Tool, INK},
     selection_geometry::contains,
-    text_render::Graphics,
+    gdiplus::Graphics,
     theme::{self, argb},
     toolbar::{paint_panel, SHADOW},
     ui::to_f,
