@@ -576,28 +576,7 @@ unsafe fn refresh_options(window: HWND) {
             .toolbar
             .filter(|_| !rotating)
             .zip(selection.annotations.tool)
-            .and_then(|(toolbar, tool)| {
-                let options = toolbar.options(tool, selection.rect)?;
-                if tool == Tool::Text {
-                    if let Some(frame) = selection.text_frame() {
-                        let frame = frame.bounds();
-                        let desktop = selection.desktop.bounds;
-                        let point = POINT {
-                            x: frame.left + (frame.right - frame.left) / 2 + desktop.left,
-                            y: frame.top + (frame.bottom - frame.top) / 2 + desktop.top,
-                        };
-                        let area = monitor_info(point)
-                            .and_then(|info| overlay_rect(info.rcMonitor, desktop))
-                            .unwrap_or(selection.canvas);
-                        return Some(
-                            options
-                                .near_text(frame, toolbar.bounds, area)
-                                .unwrap_or(options),
-                        );
-                    }
-                }
-                Some(options)
-            });
+            .and_then(|(toolbar, tool)| toolbar.options(tool, selection.rect));
         selection.options_hover = None;
         let tip = selection
             .toolbar
@@ -776,6 +755,10 @@ unsafe fn command(window: HWND, action: Action) {
     }
     if matches!(action, Action::Copy | Action::Save | Action::Pin) {
         output(window, action);
+        return;
+    }
+    if action == Action::Cancel {
+        DestroyWindow(window);
         return;
     }
     let changed = SESSION.with_borrow_mut(|session| {
@@ -2410,18 +2393,18 @@ mod text_interaction_tests {
                     );
                 }
             });
-            let (frame, input, options) = SESSION.with_borrow(|s| {
+            let (frame, input, options, toolbar) = SESSION.with_borrow(|s| {
                 let selection = s.as_ref().unwrap();
                 let editor = selection.editor.as_ref().unwrap();
                 (
                     editor.frame().into_owned(),
                     editor_input_rect(editor.rect),
                     selection.options.unwrap().bounds,
+                    selection.toolbar.unwrap().bounds,
                 )
             });
-            assert!(
-                options.top >= frame.bounds().bottom && options.top <= frame.bounds().bottom + 8
-            );
+            assert_eq!(options.left, toolbar.left, "text settings hang under the toolbar");
+            assert!(options.top >= toolbar.bottom || options.bottom <= toolbar.top);
             let composed = surface();
             FillRect(composed.dc, &canvas, GetStockObject(WHITE_BRUSH));
             frame.paint_frame(composed.dc);
@@ -2466,7 +2449,8 @@ mod text_interaction_tests {
                     .as_ref()
                     .expect("blank editor stays open while resizing");
                 assert!(editor.text.size > initial_size);
-                assert!(s.as_ref().unwrap().options.unwrap().bounds.left < options.left);
+                let moved = s.as_ref().unwrap().options.unwrap().bounds;
+                assert_ne!(EqualRect(&moved, &options), 0, "settings stay with the toolbar");
                 editor.window
             });
             SetWindowTextW(editor, w!("Snapshot"));

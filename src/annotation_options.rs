@@ -8,13 +8,13 @@ use windows_sys::{
 
 use crate::{
     annotation::{Style, Tool, INK},
-    selection_geometry::{contains, intersect},
-    toolbar::paint_panel,
+    selection_geometry::contains,
+    toolbar::{paint_panel, SHADOW},
     typography::{self, TextStyle},
     wide,
 };
 
-const HEIGHT: i32 = 32;
+const HEIGHT: i32 = 36;
 const GAP: i32 = 4;
 const PADDING: i32 = 5;
 const FIELD: i32 = 104;
@@ -78,15 +78,18 @@ impl Options {
         if width > available {
             return None;
         }
-        let left = (toolbar.right - width).clamp(area.left, area.right - width);
+        // Snipaste-style: hang under the toolbar, left-aligned with the drawing tools.
+        // When the toolbar sits above or inside the selection, open upward instead.
+        let left = toolbar.left.clamp(area.left, area.right - width);
         let below = toolbar.bottom + GAP;
         let above = toolbar.top - GAP - HEIGHT;
-        let top = if toolbar.bottom <= selection.top && above >= area.top {
-            above
-        } else if below + HEIGHT <= area.bottom {
+        let fits_below = below + HEIGHT <= area.bottom;
+        let top = if toolbar.top >= selection.bottom && fits_below {
             below
         } else if above >= area.top {
             above
+        } else if fits_below {
+            below
         } else {
             return None;
         };
@@ -102,44 +105,13 @@ impl Options {
         })
     }
 
-    pub fn near_text(mut self, frame: RECT, toolbar: RECT, area: RECT) -> Option<Self> {
-        let width = self.bounds.right - self.bounds.left;
-        if area.right - area.left < width || area.bottom - area.top < HEIGHT {
-            return None;
-        }
-        let left = frame.left.clamp(area.left, area.right - width);
-        let top = frame.top.clamp(area.top, area.bottom - HEIGHT);
-        let candidates = [
-            (left, frame.bottom + GAP),
-            (left, frame.top - GAP - HEIGHT),
-            (frame.right + GAP, top),
-            (frame.left - GAP - width, top),
-        ];
-        self.bounds = candidates
-            .into_iter()
-            .map(|(left, top)| RECT {
-                left,
-                top,
-                right: left + width,
-                bottom: top + HEIGHT,
-            })
-            .find(|bounds| {
-                bounds.left >= area.left
-                    && bounds.top >= area.top
-                    && bounds.right <= area.right
-                    && bounds.bottom <= area.bottom
-                    && intersect(*bounds, toolbar).is_none()
-            })?;
-        Some(self)
-    }
-
     fn cell(self, left: i32, width: i32) -> RECT {
         let left = self.bounds.left + PADDING + left;
         RECT {
             left,
-            top: self.bounds.top + 4,
+            top: self.bounds.top + 5,
             right: left + width,
-            bottom: self.bounds.bottom - 4,
+            bottom: self.bounds.bottom - 5 - SHADOW,
         }
     }
 

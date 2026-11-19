@@ -1,5 +1,82 @@
 # Repository Rules
 
+Guide for AI coding agents working on Snapshot. The user-facing feature overview lives in `README.md`; the architecture rationale lives in `docs/technical-plan.md`.
+
+## Project Overview
+
+Snapshot is a Windows 10/11 x64 screenshot tool written in Rust on raw Win32 (`windows` / `windows-sys` crates, GDI drawing, no UI framework). It idles in the tray with a blocking message loop; every capture buffer, GPU resource, and helper thread is created per capture session and released afterwards. Keep idle CPU, wake-ups, and memory at zero growth.
+
+UI strings, error messages, and user-facing docs are Simplified Chinese. Code, identifiers, and comments are English.
+
+## Build and Test
+
+Build and test on Windows only. `snapshot.ps1` locates Cargo and the Visual Studio developer environment itself.
+
+| Command | Purpose |
+| --- | --- |
+| `.\snapshot.ps1 build` | Release build: `target/x86_64-pc-windows-msvc/release/snapshot.exe` |
+| `.\snapshot.ps1 test` | Run all unit tests |
+| `.\snapshot.ps1 package` | Test, build, then write `dist/snapshot-v<version>-windows-x64.zip` and `.sha256` |
+| `.\snapshot.ps1 release -Tag vX.Y.Z` | Package and create a draft GitHub Release (needs `gh auth login`) |
+
+- The script writes rustup progress to stderr. In a remote or non-interactive PowerShell session that is turned into a terminating error; run it from `cmd` instead (`powershell -NoProfile -ExecutionPolicy Bypass -File snapshot.ps1 test > log 2>&1`).
+- Run `.\snapshot.ps1 test` before reporting a change as done. The build must stay warning-free.
+- A running `snapshot.exe` locks the release binary; exit it from the tray before rebuilding.
+- UI previews without a desktop session: run the test binary in `target/x86_64-pc-windows-msvc/release/deps/snapshot-*.exe` with `preview --ignored`. It renders the settings window in its main states and the tray icons to `%TEMP%\snapshot-preview\*.png`. Look at them after any settings or icon change.
+
+## Release Flow
+
+1. Bump `version` in `Cargo.toml`, run `.\snapshot.ps1 build` to sync `Cargo.lock`, and commit.
+2. `git tag vX.Y.Z`, `git push origin HEAD`, `git push origin vX.Y.Z`.
+3. `.\snapshot.ps1 release -Tag vX.Y.Z` creates a **draft** with the ZIP, SHA256, and generated notes. It refuses to run on a dirty tree, when the remote tag is not at `HEAD`, or when a release for the tag already exists.
+4. A human reviews and publishes the draft on GitHub. Do not tag, push, or publish unless asked.
+
+## Code Map
+
+| Module | Responsibility |
+| --- | --- |
+| `main.rs` | Tray icon and menu, global hotkey registration, first-run setup, applying settings |
+| `hotkey.rs` | Binding list, defaults (capture `Ctrl+Alt+A`), parsing, `shortcuts.txt` load/save, `first_run()` |
+| `settings.rs` | Settings window: custom-drawn (GDI + GDI+), DPI-scaled, key recording, live hotkey probe |
+| `app_icon.rs` | Tray icon drawn in code, with an amber warning badge variant |
+| `startup.rs` | Start-at-login value under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\Snapshot` |
+| `capture.rs` | Desktop grab and the `Surface` bitmap helper |
+| `selection.rs` | The capture session window: selection, dragging, annotation input, toolbar commands, output |
+| `selection_geometry.rs`, `targets.rs`, `panel_edges.rs` | Rect math, window/UIA target snapping, content-column edge detection |
+| `toolbar.rs` | Main toolbar layout, painting, hit testing; shared `paint_panel` / `paint_button` |
+| `annotation_options.rs` | Secondary option bar (width, font size, colors) |
+| `annotation.rs`, `text_mark.rs`, `text_render.rs`, `mosaic.rs` | Annotation model and history, text boxes, text rendering, mosaic |
+| `overlay_ui.rs`, `typography.rs`, `icons.rs`, `icons/phosphor.rs` | Hint panel, fonts, icon drawing |
+| `scroll_capture.rs`, `scroll_input.rs`, `scroll_stitch.rs` | Long capture session, wheel forwarding, frame stitching |
+| `pinned.rs` | Pinned image windows |
+
+## UI Conventions
+
+The overlay follows Snipaste's layout:
+
+- The main toolbar sits directly below the selection, right-aligned with it. If it does not fit, it goes above; if neither fits (a full-screen selection), it goes inside the selection's bottom-right corner.
+- Toolbar groups: drawing tools | undo, redo | long capture, pin, save, exit, copy. `GROUP_STARTS` in `toolbar.rs` defines the dividers.
+- The secondary option bar is left-aligned with the toolbar. It opens downward when the toolbar is below the selection, otherwise upward, so it never covers the selection. It does not follow the text box.
+- Panels are white rounded rectangles with a 2 px shadow drawn inside their bounds (`toolbar::SHADOW`). Anything painted must stay within the rect that gets invalidated, or it leaves trails.
+- Layout changes need matching updates to the unit tests in `toolbar.rs`, `annotation_options.rs`, and `selection::text_interaction_tests`.
+
+## Defaults and Local State
+
+| Location | Content |
+| --- | --- |
+| `%LOCALAPPDATA%\Snapshot\shortcuts.txt` | Shortcuts and pin opacity step. Its absence (together with no legacy `hotkey.txt`) marks the first run, which enables start at login |
+| `%LOCALAPPDATA%\Snapshot\hotkey.txt` | Legacy capture shortcut, migrated on first run |
+| `HKCU\...\Run\Snapshot` | Start-at-login command, pointing at the running executable |
+
+A capture hotkey conflict must never stop the app or open a modal dialog. The tray icon switches to the warning badge, the tooltip names the conflict, one non-modal notification is shown (clicking it opens settings), and the tray menu gets a "change shortcut" item. Registration is retried whenever the tray menu or settings opens. Saving an occupied shortcut is allowed; the settings window shows the conflict live before saving.
+
+## Settings Window
+
+- Everything is painted in `Painter`; `Layout` owns every rect so painting and hit testing agree. Add new controls to `Layout::targets`.
+- Sizes are 96-DPI constants multiplied by the window's DPI scale; fonts are recreated on `WM_DPICHANGED`.
+- Animations run on one 15 ms timer that stops when everything settles. Do not add idle timers.
+- Colors: accent blue for primary actions, amber for warnings (conflicts, duplicates), red only for save errors.
+
 ## Text Editing and Change Visibility
 
 - Use `apply_patch` for ordinary text and source-code edits. Preserve the original encoding and line endings. If `apply_patch` cannot safely preserve them, use a narrowly scoped alternative and explain why.

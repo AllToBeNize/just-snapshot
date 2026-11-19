@@ -5,7 +5,7 @@ use windows_sys::Win32::{
     Foundation::RECT,
     Graphics::Gdi::*,
     UI::WindowsAndMessaging::{
-        CreateIconIndirect, DestroyCursor, GetCursor, SetCursor, HCURSOR, ICONINFO,
+        CreateIconIndirect, DestroyCursor, GetCursor, SetCursor, HCURSOR, HICON, ICONINFO,
     },
 };
 
@@ -83,25 +83,35 @@ impl Cursor {
     }
 
     fn new(image: Image, x: u32, y: u32) -> Option<Self> {
-        unsafe {
-            let (surface, width, height) = image.into_surface().ok()?;
-            let mask_stride = (width as usize).div_ceil(16) * 2;
-            let mask_bits = vec![0_u8; mask_stride * height as usize];
-            let mask = CreateBitmap(width, height, 1, 1, mask_bits.as_ptr().cast());
-            if mask.is_null() {
-                return None;
-            }
-            let cursor = CreateIconIndirect(&ICONINFO {
-                fIcon: 0,
-                xHotspot: x,
-                yHotspot: y,
-                hbmMask: mask,
-                hbmColor: surface.bitmap(),
-            });
-            DeleteObject(mask);
-            (!cursor.is_null()).then_some(Self(cursor))
-        }
+        let cursor = unsafe { indirect(image, false, x, y) };
+        (!cursor.is_null()).then_some(Self(cursor))
     }
+}
+
+/// Builds an icon from premultiplied BGRA pixels. Returns null on failure.
+pub fn create_icon(image: Image) -> HICON {
+    unsafe { indirect(image, true, 0, 0) }
+}
+
+unsafe fn indirect(image: Image, icon: bool, x: u32, y: u32) -> HICON {
+    let Ok((surface, width, height)) = image.into_surface() else {
+        return null_mut();
+    };
+    let mask_stride = (width as usize).div_ceil(16) * 2;
+    let mask_bits = vec![0_u8; mask_stride * height as usize];
+    let mask = CreateBitmap(width, height, 1, 1, mask_bits.as_ptr().cast());
+    if mask.is_null() {
+        return null_mut();
+    }
+    let handle = CreateIconIndirect(&ICONINFO {
+        fIcon: i32::from(icon),
+        xHotspot: x,
+        yHotspot: y,
+        hbmMask: mask,
+        hbmColor: surface.bitmap(),
+    });
+    DeleteObject(mask);
+    handle
 }
 
 impl Drop for Cursor {

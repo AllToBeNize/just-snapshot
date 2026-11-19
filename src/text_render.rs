@@ -172,6 +172,59 @@ impl Graphics {
     }
 }
 
+impl Graphics {
+    /// Fills an anti-aliased rounded rectangle. `argb` is 0xAARRGGBB.
+    pub unsafe fn fill_round(&self, bounds: [f32; 4], radius: f32, argb: u32) {
+        let Some(path) = round_path(bounds, radius) else {
+            return;
+        };
+        let mut brush = null_mut();
+        if GdipCreateSolidFill(argb, &mut brush) == Ok {
+            GdipFillPath(self.0, brush.cast(), path);
+            GdipDeleteBrush(brush.cast());
+        }
+        GdipDeletePath(path);
+    }
+
+    pub unsafe fn stroke_round(&self, bounds: [f32; 4], radius: f32, argb: u32, width: f32) {
+        let Some(path) = round_path(bounds, radius) else {
+            return;
+        };
+        let mut pen = null_mut();
+        if GdipCreatePen1(argb, width, UnitPixel, &mut pen) == Ok {
+            GdipDrawPath(self.0, pen, path);
+            GdipDeletePen(pen);
+        }
+        GdipDeletePath(path);
+    }
+
+    pub unsafe fn fill_ellipse(&self, [left, top, right, bottom]: [f32; 4], argb: u32) {
+        let mut brush = null_mut();
+        if GdipCreateSolidFill(argb, &mut brush) == Ok {
+            GdipFillEllipse(self.0, brush.cast(), left, top, right - left, bottom - top);
+            GdipDeleteBrush(brush.cast());
+        }
+    }
+}
+
+unsafe fn round_path([left, top, right, bottom]: [f32; 4], radius: f32) -> Option<*mut GpPath> {
+    let mut path = null_mut();
+    if GdipCreatePath(FillModeAlternate, &mut path) != Ok {
+        return None;
+    }
+    let diameter = (radius * 2.0).min(right - left).min(bottom - top).max(0.0);
+    if diameter <= 0.0 {
+        GdipAddPathRectangle(path, left, top, right - left, bottom - top);
+    } else {
+        GdipAddPathArc(path, left, top, diameter, diameter, 180.0, 90.0);
+        GdipAddPathArc(path, right - diameter, top, diameter, diameter, 270.0, 90.0);
+        GdipAddPathArc(path, right - diameter, bottom - diameter, diameter, diameter, 0.0, 90.0);
+        GdipAddPathArc(path, left, bottom - diameter, diameter, diameter, 90.0, 90.0);
+        GdipClosePathFigure(path);
+    }
+    Some(path)
+}
+
 impl Drop for Graphics {
     fn drop(&mut self) {
         unsafe { GdipDeleteGraphics(self.0) };

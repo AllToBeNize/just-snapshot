@@ -105,7 +105,10 @@ const fn ctrl(key: u8) -> Shortcut {
 }
 
 pub const DEFAULT: Bindings = Bindings([
-    ctrl(b'9'),
+    Shortcut {
+        modifiers: MOD_CONTROL | MOD_ALT,
+        key: b'A' as u32,
+    },
     ctrl(b'1'),
     ctrl(b'2'),
     ctrl(b'3'),
@@ -264,6 +267,11 @@ pub fn path() -> Result<PathBuf, String> {
         .join("shortcuts.txt"))
 }
 
+/// No settings file and no legacy hotkey file means Snapshot has never run here.
+pub fn first_run() -> bool {
+    path().is_ok_and(|path| !path.exists() && !path.with_file_name("hotkey.txt").exists())
+}
+
 pub fn load() -> Result<Preferences, String> {
     load_from(&path()?)
 }
@@ -361,7 +369,7 @@ mod tests {
     #[test]
     fn parses_bindings_and_rejects_reserved_or_ambiguous_values() {
         assert_eq!(
-            Shortcut::parse("Ctrl+9"),
+            Shortcut::parse("Ctrl+Alt+A"),
             Some(DEFAULT.get(Binding::Capture))
         );
         assert_eq!(

@@ -1,6 +1,7 @@
 #![windows_subsystem = "windows"]
 
 mod annotation;
+mod app_icon;
 mod annotation_options;
 mod capture;
 mod hotkey;
@@ -38,7 +39,8 @@ use windows_sys::{
             HiDpi::{SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2},
             Input::KeyboardAndMouse::{RegisterHotKey, UnregisterHotKey, MOD_NOREPEAT},
             Shell::{
-                Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY,
+                Shell_NotifyIconW, NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_TIP, NIIF_NOSOUND,
+                NIIF_WARNING, NIM_ADD, NIM_DELETE, NIM_MODIFY, NIN_BALLOONUSERCLICK,
                 NOTIFYICONDATAW,
             },
             WindowsAndMessaging::*,
@@ -50,9 +52,12 @@ const TRAY_MESSAGE: u32 = WM_APP + 1;
 const MENU_CAPTURE: usize = 1;
 const MENU_CONFIG: usize = 2;
 const MENU_EXIT: usize = 3;
+const MENU_CONFLICT: usize = 4;
 static TASKBAR_CREATED: OnceLock<u32> = OnceLock::new();
 thread_local! {
     static HOTKEY_ID: Cell<i32> = const { Cell::new(1) };
+    static HOTKEY_REGISTERED: Cell<bool> = const { Cell::new(false) };
+    static TRAY_ICONS: Cell<[HICON; 2]> = const { Cell::new([null_mut(); 2]) };
 }
 
 fn main() {
@@ -69,7 +74,17 @@ unsafe fn run() -> Result<(), String> {
             io::Error::last_os_error()
         ));
     }
+    let first_run = hotkey::first_run();
     let preferences = hotkey::load()?;
+    if first_run {
+        // Start at login by default; the settings file marks the choice as made.
+        if let Err(error) = startup::save_with(true, || hotkey::save(preferences)) {
+            show_error(
+                null_mut(),
+                &format!("无法设置开机自动启动，可在托盘「设置」中重试。\n{error}"),
+            );
+        }
+    }
     let bindings = preferences.bindings;
     hotkey::activate(bindings);
     pinned::set_opacity_step(preferences.opacity_step);
@@ -107,23 +122,20 @@ unsafe fn run() -> Result<(), String> {
     }
 
     let capture = bindings.get(hotkey::Binding::Capture);
-    if RegisterHotKey(
+    let registered = RegisterHotKey(
         window,
         HOTKEY_ID.get(),
         capture.modifiers | MOD_NOREPEAT,
         capture.key,
-    ) == 0
-    {
-        let error = io::Error::last_os_error();
-        DestroyWindow(window);
-        return Err(format!(
-            "无法注册快捷键 {}。请关闭占用该快捷键的程序，或检查快捷键配置。\n{error}",
-            capture.label(),
-        ));
-    }
+    ) != 0;
+    HOTKEY_REGISTERED.set(registered);
     if !tray_icon(window, NIM_ADD) {
         DestroyWindow(window);
         return Err("无法创建 Snapshot 托盘图标。".into());
+    }
+    // A conflict is not fatal: the tray shows a warning badge and stays usable.
+    if !registered {
+        notify_conflict(window);
     }
 
     let mut message = MSG::default();
@@ -136,10 +148,8 @@ unsafe fn run() -> Result<(), String> {
             }
             0 => return Ok(()),
             _ => {
-                if !settings::dialog_message(&mut message) {
-                    TranslateMessage(&message);
-                    DispatchMessageW(&message);
-                }
+                TranslateMessage(&message);
+                DispatchMessageW(&message);
             }
         }
     }
@@ -156,6 +166,7 @@ unsafe extern "system" fn tray_proc(
         TRAY_MESSAGE => match lparam as u32 {
             WM_RBUTTONUP => tray_menu(window),
             WM_LBUTTONDBLCLK => begin_capture(window),
+            NIN_BALLOONUSERCLICK => open_settings(window),
             _ => {}
         },
         WM_CLOSE => {
@@ -163,7 +174,9 @@ unsafe extern "system" fn tray_proc(
         }
         WM_DESTROY => {
             tray_icon(window, NIM_DELETE);
-            UnregisterHotKey(window, HOTKEY_ID.get());
+            if HOTKEY_REGISTERED.get() {
+                UnregisterHotKey(window, HOTKEY_ID.get());
+            }
             PostQuitMessage(0);
         }
         taskbar_created if TASKBAR_CREATED.get() == Some(&taskbar_created) => {
@@ -175,29 +188,99 @@ unsafe extern "system" fn tray_proc(
 }
 
 unsafe fn tray_icon(window: HWND, message: u32) -> bool {
+    let registered = HOTKEY_REGISTERED.get();
     let mut icon = NOTIFYICONDATAW {
         cbSize: size_of::<NOTIFYICONDATAW>() as u32,
         hWnd: window,
         uID: 1,
         uFlags: NIF_MESSAGE | NIF_ICON | NIF_TIP,
         uCallbackMessage: TRAY_MESSAGE,
-        hIcon: LoadIconW(null_mut(), IDI_APPLICATION),
+        hIcon: tray_icon_handle(!registered),
         ..Default::default()
     };
-    let label = format!(
-        "Snapshot ({})",
-        hotkey::current().get(hotkey::Binding::Capture).label()
-    );
-    for (unit, value) in icon.szTip.iter_mut().take(127).zip(label.encode_utf16()) {
-        *unit = value;
-    }
+    let capture = hotkey::current().get(hotkey::Binding::Capture).label();
+    let label = if registered {
+        format!("Snapshot · {capture}")
+    } else {
+        format!("Snapshot · {capture} 被其他程序占用\n双击截图，右键换快捷键")
+    };
+    copy_text(&mut icon.szTip, &label);
     Shell_NotifyIconW(message, &icon) != 0
 }
 
+/// The app icon, or the same icon with an amber warning badge.
+unsafe fn tray_icon_handle(warning: bool) -> HICON {
+    let mut icons = TRAY_ICONS.get();
+    let index = usize::from(warning);
+    if icons[index].is_null() {
+        icons[index] = app_icon::create(GetSystemMetrics(SM_CXSMICON).max(16), warning);
+        TRAY_ICONS.set(icons);
+    }
+    if icons[index].is_null() {
+        LoadIconW(null_mut(), IDI_APPLICATION)
+    } else {
+        icons[index]
+    }
+}
+
+/// A one-off, non-modal notification; clicking it opens the settings.
+unsafe fn notify_conflict(window: HWND) {
+    let mut icon = NOTIFYICONDATAW {
+        cbSize: size_of::<NOTIFYICONDATAW>() as u32,
+        hWnd: window,
+        uID: 1,
+        uFlags: NIF_INFO,
+        dwInfoFlags: NIIF_WARNING | NIIF_NOSOUND,
+        ..Default::default()
+    };
+    let capture = hotkey::current().get(hotkey::Binding::Capture).label();
+    copy_text(&mut icon.szInfoTitle, "截图快捷键被占用");
+    copy_text(
+        &mut icon.szInfo,
+        &format!("{capture} 已被其他程序占用。点这里换一个快捷键，或者双击托盘图标截图。"),
+    );
+    Shell_NotifyIconW(NIM_MODIFY, &icon);
+}
+
+fn copy_text(target: &mut [u16], text: &str) {
+    let limit = target.len() - 1;
+    for (unit, value) in target.iter_mut().take(limit).zip(text.encode_utf16()) {
+        *unit = value;
+    }
+}
+
+/// The live capture shortcut, if Snapshot currently holds it.
+pub fn active_hotkey() -> Option<hotkey::Shortcut> {
+    HOTKEY_REGISTERED
+        .get()
+        .then(|| hotkey::current().get(hotkey::Binding::Capture))
+}
+
+/// Tries again to take a shortcut that another program held earlier.
+pub unsafe fn retry_hotkey(window: HWND) {
+    if HOTKEY_REGISTERED.get() {
+        return;
+    }
+    let capture = hotkey::current().get(hotkey::Binding::Capture);
+    if RegisterHotKey(window, HOTKEY_ID.get(), capture.modifiers | MOD_NOREPEAT, capture.key) != 0 {
+        HOTKEY_REGISTERED.set(true);
+        tray_icon(window, NIM_MODIFY);
+    }
+}
+
 unsafe fn tray_menu(window: HWND) {
+    retry_hotkey(window);
     let menu = CreatePopupMenu();
     if menu.is_null() {
         return;
+    }
+    if !HOTKEY_REGISTERED.get() {
+        let conflict = wide(&format!(
+            "⚠ {} 被占用，换一个快捷键…",
+            hotkey::current().get(hotkey::Binding::Capture).label()
+        ));
+        AppendMenuW(menu, MF_STRING, MENU_CONFLICT, conflict.as_ptr());
+        AppendMenuW(menu, MF_SEPARATOR, 0, null());
     }
     let capture = wide(&format!(
         "截图 ({})",
@@ -223,15 +306,17 @@ unsafe fn tray_menu(window: HWND) {
     DestroyMenu(menu);
     match command as usize {
         MENU_CAPTURE => begin_capture(window),
-        MENU_CONFIG => {
-            if let Err(error) = settings::open(window, GetModuleHandleW(null())) {
-                show_error(window, &format!("无法打开设置。\n{error}"));
-            }
-        }
+        MENU_CONFIG | MENU_CONFLICT => open_settings(window),
         MENU_EXIT => {
             DestroyWindow(window);
         }
         _ => {}
+    }
+}
+
+unsafe fn open_settings(window: HWND) {
+    if let Err(error) = settings::open(window, GetModuleHandleW(null())) {
+        show_error(window, &format!("无法打开设置。\n{error}"));
     }
 }
 
@@ -253,23 +338,25 @@ unsafe fn apply_preferences(
     let bindings = preferences.bindings.validate()?;
     let capture = bindings.get(hotkey::Binding::Capture);
     let previous = HOTKEY_ID.get();
-    let changed = capture != hotkey::current().get(hotkey::Binding::Capture);
+    let was_registered = HOTKEY_REGISTERED.get();
+    let changed =
+        !was_registered || capture != hotkey::current().get(hotkey::Binding::Capture);
     let next = 3 - previous;
-    if changed && RegisterHotKey(window, next, capture.modifiers | MOD_NOREPEAT, capture.key) == 0 {
-        return Err(format!(
-            "无法注册 {}，它可能已被其他程序占用。",
-            capture.label()
-        ));
-    }
+    // An occupied shortcut is still saved; the tray badge reports the conflict.
+    let registered = !changed
+        || RegisterHotKey(window, next, capture.modifiers | MOD_NOREPEAT, capture.key) != 0;
     if let Err(error) = startup::save_with(start_at_login, || hotkey::save(preferences)) {
-        if changed {
+        if changed && registered {
             UnregisterHotKey(window, next);
         }
         return Err(error);
     }
     if changed {
-        UnregisterHotKey(window, previous);
+        if was_registered {
+            UnregisterHotKey(window, previous);
+        }
         HOTKEY_ID.set(next);
+        HOTKEY_REGISTERED.set(registered);
     }
     hotkey::activate(bindings);
     pinned::set_opacity_step(preferences.opacity_step);

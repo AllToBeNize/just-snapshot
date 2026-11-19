@@ -52,7 +52,8 @@ impl Action {
     }
 }
 
-pub const ACTIONS: [Action; 10] = [
+// Snipaste-style order: drawing tools | history | output, ending with exit and copy.
+pub const ACTIONS: [Action; 11] = [
     Action::Tool(Tool::Rectangle),
     Action::Tool(Tool::Text),
     Action::Tool(Tool::Brush),
@@ -60,9 +61,10 @@ pub const ACTIONS: [Action; 10] = [
     Action::Undo,
     Action::Redo,
     Action::ScrollCapture,
-    Action::Copy,
-    Action::Save,
     Action::Pin,
+    Action::Save,
+    Action::Cancel,
+    Action::Copy,
 ];
 const LABELS: [*const u16; ACTIONS.len()] = [
     w!("矩形"),
@@ -72,15 +74,23 @@ const LABELS: [*const u16; ACTIONS.len()] = [
     w!("撤回"),
     w!("重做"),
     w!("长截图"),
-    w!("复制"),
-    w!("保存"),
     w!("贴图"),
+    w!("保存"),
+    w!("退出"),
+    w!("复制"),
 ];
-const OFFSET: i32 = 5;
-const GROUP_GAP: i32 = 7;
+/// Indexes of the first button in every group after the first.
+const GROUP_STARTS: [usize; 2] = [4, 6];
+const OFFSET: i32 = 6;
+const GROUP_GAP: i32 = 9;
 const PADDING: i32 = 3;
-const HEIGHT: i32 = 30;
+const HEIGHT: i32 = 38;
+const MAX_CELL: i32 = 32;
+const ICON: i32 = 20;
 const DISABLED_ICON: u32 = 0x00b9_b9b9;
+const ACCENT_ICON: u32 = 0x00d0_7a1e;
+/// Height of the panel shadow, included at the bottom of every panel's bounds.
+pub const SHADOW: i32 = 2;
 
 #[derive(Clone, Copy)]
 pub struct Toolbar {
@@ -95,20 +105,27 @@ impl Toolbar {
     }
 
     pub fn new(selection: RECT, area: RECT) -> Option<Self> {
-        let spacing = GROUP_GAP + PADDING * 2;
+        let spacing = GROUP_GAP * GROUP_STARTS.len() as i32 + PADDING * 2;
         let count = ACTIONS.len() as i32;
-        let cell = ((area.right - area.left - spacing) / count).min(28);
+        let cell = ((area.right - area.left - spacing) / count).min(MAX_CELL);
         if cell < 12 || area.bottom - area.top < HEIGHT {
             return None;
         }
         let width = cell * count + spacing;
-        let left = (selection.right - width).clamp(area.left, area.right - width);
+        // Below the selection, right-aligned; then above; a full-screen selection keeps it inside.
         let below = selection.bottom + OFFSET;
-        let top = if below + HEIGHT <= area.bottom {
-            below
+        let above = selection.top - OFFSET - HEIGHT;
+        let (right, top) = if below + HEIGHT <= area.bottom {
+            (selection.right, below)
+        } else if above >= area.top {
+            (selection.right, above)
         } else {
-            (selection.top - OFFSET - HEIGHT).clamp(area.top, area.bottom - HEIGHT)
+            (
+                selection.right - OFFSET,
+                (selection.bottom - OFFSET - HEIGHT).clamp(area.top, area.bottom - HEIGHT),
+            )
         };
+        let left = (right - width).clamp(area.left, area.right - width);
         Some(Self {
             bounds: RECT {
                 left,
@@ -122,15 +139,13 @@ impl Toolbar {
     }
 
     fn button(self, index: usize) -> RECT {
-        let left = self.bounds.left
-            + PADDING
-            + index as i32 * self.cell
-            + if index >= 6 { GROUP_GAP } else { 0 };
+        let groups = GROUP_STARTS.iter().filter(|&&start| index >= start).count() as i32;
+        let left = self.bounds.left + PADDING + index as i32 * self.cell + groups * GROUP_GAP;
         RECT {
             left,
             right: left + self.cell - 1,
             top: self.bounds.top + PADDING,
-            bottom: self.bounds.bottom - PADDING,
+            bottom: self.bounds.bottom - PADDING - SHADOW,
         }
     }
 
@@ -149,15 +164,17 @@ impl Toolbar {
         }
         paint_panel(dc, self.bounds);
 
-        let divider = self.bounds.left + PADDING + self.cell * 6 + GROUP_GAP / 2;
-        let line = RECT {
-            left: divider,
-            right: divider + 1,
-            top: self.bounds.top + 7,
-            bottom: self.bounds.bottom - 7,
-        };
-        SetDCBrushColor(dc, 0x00e9_e9e9);
-        FillRect(dc, &line, GetStockObject(DC_BRUSH));
+        SetDCBrushColor(dc, 0x00e4_e4e4);
+        for start in GROUP_STARTS {
+            let divider = self.button(start - 1).right + 1 + GROUP_GAP / 2;
+            let line = RECT {
+                left: divider,
+                right: divider + 1,
+                top: self.bounds.top + 9,
+                bottom: self.bounds.bottom - 9,
+            };
+            FillRect(dc, &line, GetStockObject(DC_BRUSH));
+        }
 
         for (index, action) in ACTIONS.iter().enumerate() {
             let rect = self.button(index);
@@ -206,9 +223,25 @@ impl Toolbar {
 pub unsafe fn paint_panel(dc: HDC, bounds: RECT) {
     SelectObject(dc, GetStockObject(DC_BRUSH));
     SelectObject(dc, GetStockObject(DC_PEN));
+    // A soft two-step shadow inside the bottom of the bounds, so repaints stay in place.
+    let face = RECT {
+        bottom: bounds.bottom - SHADOW,
+        ..bounds
+    };
+    for (offset, color) in [(SHADOW, 0x00c8_c8c8), (1, 0x00b4_b4b4)] {
+        SetDCBrushColor(dc, color);
+        SetDCPenColor(dc, color);
+        let shadow = RECT {
+            left: face.left + 1,
+            top: face.top + offset,
+            right: face.right - 1,
+            bottom: face.bottom + offset,
+        };
+        rounded(dc, shadow, 8);
+    }
     SetDCBrushColor(dc, 0x00ff_ffff);
-    SetDCPenColor(dc, 0x00d9_d9d9);
-    rounded(dc, bounds, 6);
+    SetDCPenColor(dc, 0x00d4_d4d4);
+    rounded(dc, face, 8);
 }
 
 pub unsafe fn paint_button(
@@ -223,15 +256,16 @@ pub unsafe fn paint_button(
         (false, _, _) => (None, DISABLED_ICON),
         (true, true, _) => (Some(0x00fc_eee4), 0x008b_4c22),
         (true, false, true) => (Some(0x00f8_f1eb), 0x0044_3328),
+        (true, false, false) if action == Action::Copy => (None, ACCENT_ICON),
         (true, false, false) => (None, 0x0050_4945),
     };
     if let Some(background) = background {
         SelectObject(dc, GetStockObject(DC_BRUSH));
         SelectObject(dc, GetStockObject(NULL_PEN));
         SetDCBrushColor(dc, background);
-        rounded(dc, rect, 5);
+        rounded(dc, rect, 6);
     }
-    let size = (rect.right - rect.left - 2).min(18);
+    let size = (rect.right - rect.left - 4).min(ICON);
     let left = (rect.left + rect.right - size) / 2;
     let top = (rect.top + rect.bottom - size) / 2;
     icons::paint(
@@ -344,7 +378,7 @@ mod tests {
         };
         let hovered = toolbar.hit(point);
         assert_eq!(hovered.map(|action| action == ACTIONS[0]), Some(true));
-        let divider = toolbar.button(5).right + 1 + GROUP_GAP / 2;
+        let divider = toolbar.button(GROUP_STARTS[0] - 1).right + 1 + GROUP_GAP / 2;
         assert!(toolbar
             .hit(POINT {
                 x: divider,
@@ -361,9 +395,30 @@ mod tests {
             );
             assert_eq!(
                 GetPixel(surface.dc, divider, toolbar.bounds.top + 12),
-                0x00e9_e9e9
+                0x00e4_e4e4
             );
         }
+    }
+
+    #[test]
+    fn panel_flips_above_and_falls_back_inside_a_full_screen_selection() {
+        let area = RECT {
+            right: 900,
+            bottom: 600,
+            ..Default::default()
+        };
+        let low = RECT {
+            left: 100,
+            top: 200,
+            right: 800,
+            bottom: 590,
+        };
+        let toolbar = Toolbar::new(low, area).unwrap();
+        assert_eq!(toolbar.bounds.bottom, low.top - OFFSET);
+        assert_eq!(toolbar.bounds.right, low.right);
+        let toolbar = Toolbar::new(area, area).unwrap();
+        assert_eq!(toolbar.bounds.bottom, area.bottom - OFFSET);
+        assert_eq!(toolbar.bounds.right, area.right - OFFSET);
     }
 
     #[test]
