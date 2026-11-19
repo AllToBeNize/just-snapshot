@@ -35,7 +35,8 @@ Build and test on Windows only. `snapshot.ps1` locates Cargo and the Visual Stud
 
 | Module | Responsibility |
 | --- | --- |
-| `main.rs` | Tray icon and menu, global hotkey registration, first-run setup, applying settings |
+| `main.rs` | Tray icon and menu, first-run setup, applying settings |
+| `global_hotkey.rs` | The global capture shortcuts (main + optional second) registered on the tray window, with conflict tracking and retry |
 | `hotkey.rs` | Binding list, defaults (capture `Ctrl+Alt+A`), parsing, `shortcuts.txt` load/save, `first_run()` |
 | `settings.rs` | Settings window: frameless and custom-drawn (GDI + GDI+), DPI-scaled, key recording, live hotkey probe, theme picker |
 | `app_icon.rs` | Tray icon drawn in code, with an amber warning badge variant |
@@ -72,7 +73,7 @@ The overlay follows Snipaste's layout:
 
 | Location | Content |
 | --- | --- |
-| `%LOCALAPPDATA%\Snapshot\shortcuts.txt` | Shortcuts and pin opacity step. Its absence (together with no legacy `hotkey.txt`) marks the first run, which enables start at login |
+| `%LOCALAPPDATA%\Snapshot\shortcuts.txt` | Shortcuts (`capture_secondary=` is the optional second capture key, empty when unset), pin opacity step and theme. Its absence (together with no legacy `hotkey.txt`) marks the first run, which enables start at login |
 | `%LOCALAPPDATA%\Snapshot\hotkey.txt` | Legacy capture shortcut, migrated on first run |
 | `HKCU\...\Run\Snapshot` | Start-at-login command, pointing at the running executable |
 

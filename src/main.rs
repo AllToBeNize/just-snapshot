@@ -6,6 +6,7 @@ mod annotation_options;
 mod capture;
 mod dialog;
 mod gdiplus;
+mod global_hotkey;
 mod hotkey;
 mod icons;
 mod mosaic;
@@ -42,7 +43,6 @@ use windows_sys::{
         System::LibraryLoader::GetModuleHandleW,
         UI::{
             HiDpi::{SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2},
-            Input::KeyboardAndMouse::{RegisterHotKey, UnregisterHotKey, MOD_NOREPEAT},
             Shell::{
                 Shell_NotifyIconW, NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_TIP, NIIF_NOSOUND,
                 NIIF_WARNING, NIM_ADD, NIM_DELETE, NIM_MODIFY, NIN_BALLOONUSERCLICK,
@@ -60,8 +60,6 @@ const MENU_EXIT: usize = 3;
 const MENU_CONFLICT: usize = 4;
 static TASKBAR_CREATED: OnceLock<u32> = OnceLock::new();
 thread_local! {
-    static HOTKEY_ID: Cell<i32> = const { Cell::new(1) };
-    static HOTKEY_REGISTERED: Cell<bool> = const { Cell::new(false) };
     static TRAY_ICONS: Cell<[HICON; 2]> = const { Cell::new([null_mut(); 2]) };
 }
 
@@ -127,20 +125,13 @@ unsafe fn run() -> Result<(), String> {
         return Err(io::Error::last_os_error().to_string());
     }
 
-    let capture = bindings.get(hotkey::Binding::Capture);
-    let registered = RegisterHotKey(
-        window,
-        HOTKEY_ID.get(),
-        capture.modifiers | MOD_NOREPEAT,
-        capture.key,
-    ) != 0;
-    HOTKEY_REGISTERED.set(registered);
+    let conflicts = global_hotkey::set(window, &preferences.captures());
     if !tray_icon(window, NIM_ADD) {
         DestroyWindow(window);
         return Err("无法创建 Snapshot 托盘图标。".into());
     }
     // A conflict is not fatal: the tray shows a warning badge and stays usable.
-    if !registered {
+    if !conflicts.is_empty() {
         notify_conflict(window);
     }
 
@@ -168,7 +159,7 @@ unsafe extern "system" fn tray_proc(
     lparam: LPARAM,
 ) -> LRESULT {
     match message {
-        WM_HOTKEY if wparam == HOTKEY_ID.get() as usize => begin_capture(window),
+        WM_HOTKEY if global_hotkey::is_capture(wparam) => begin_capture(window),
         TRAY_MESSAGE => match lparam as u32 {
             WM_RBUTTONUP => tray_menu(window),
             WM_LBUTTONDBLCLK => begin_capture(window),
@@ -180,9 +171,7 @@ unsafe extern "system" fn tray_proc(
         }
         WM_DESTROY => {
             tray_icon(window, NIM_DELETE);
-            if HOTKEY_REGISTERED.get() {
-                UnregisterHotKey(window, HOTKEY_ID.get());
-            }
+            global_hotkey::unregister_all(window);
             PostQuitMessage(0);
         }
         taskbar_created if TASKBAR_CREATED.get() == Some(&taskbar_created) => {
@@ -194,21 +183,19 @@ unsafe extern "system" fn tray_proc(
 }
 
 unsafe fn tray_icon(window: HWND, message: u32) -> bool {
-    let registered = HOTKEY_REGISTERED.get();
+    let conflicts = conflict_label();
     let mut icon = NOTIFYICONDATAW {
         cbSize: size_of::<NOTIFYICONDATAW>() as u32,
         hWnd: window,
         uID: 1,
         uFlags: NIF_MESSAGE | NIF_ICON | NIF_TIP,
         uCallbackMessage: TRAY_MESSAGE,
-        hIcon: tray_icon_handle(!registered),
+        hIcon: tray_icon_handle(conflicts.is_some()),
         ..Default::default()
     };
-    let capture = hotkey::current().get(hotkey::Binding::Capture).label();
-    let label = if registered {
-        format!("Snapshot · {capture}")
-    } else {
-        format!("Snapshot · {capture} 被其他程序占用\n双击截图，右键换快捷键")
+    let label = match conflicts {
+        None => format!("Snapshot · {}", global_hotkey::label()),
+        Some(taken) => format!("Snapshot · {taken} 被其他程序占用\n双击截图，右键换快捷键"),
     };
     copy_text(&mut icon.szTip, &label);
     Shell_NotifyIconW(message, &icon) != 0
@@ -239,11 +226,11 @@ unsafe fn notify_conflict(window: HWND) {
         dwInfoFlags: NIIF_WARNING | NIIF_NOSOUND,
         ..Default::default()
     };
-    let capture = hotkey::current().get(hotkey::Binding::Capture).label();
+    let taken = conflict_label().unwrap_or_default();
     copy_text(&mut icon.szInfoTitle, "截图快捷键被占用");
     copy_text(
         &mut icon.szInfo,
-        &format!("{capture} 已被其他程序占用。点这里换一个快捷键，或者双击托盘图标截图。"),
+        &format!("{taken} 已被其他程序占用。点这里换一个快捷键，或者双击托盘图标截图。"),
     );
     Shell_NotifyIconW(NIM_MODIFY, &icon);
 }
@@ -255,21 +242,21 @@ fn copy_text(target: &mut [u16], text: &str) {
     }
 }
 
-/// The live capture shortcut, if Snapshot currently holds it.
-pub fn active_hotkey() -> Option<hotkey::Shortcut> {
-    HOTKEY_REGISTERED
-        .get()
-        .then(|| hotkey::current().get(hotkey::Binding::Capture))
+/// "Ctrl+Alt+A / F1" for the capture shortcuts another program holds.
+fn conflict_label() -> Option<String> {
+    let taken = global_hotkey::conflicts();
+    (!taken.is_empty()).then(|| {
+        taken
+            .iter()
+            .map(|shortcut| shortcut.label())
+            .collect::<Vec<_>>()
+            .join(" / ")
+    })
 }
 
-/// Tries again to take a shortcut that another program held earlier.
+/// Tries again to take shortcuts that another program held earlier.
 pub unsafe fn retry_hotkey(window: HWND) {
-    if HOTKEY_REGISTERED.get() {
-        return;
-    }
-    let capture = hotkey::current().get(hotkey::Binding::Capture);
-    if RegisterHotKey(window, HOTKEY_ID.get(), capture.modifiers | MOD_NOREPEAT, capture.key) != 0 {
-        HOTKEY_REGISTERED.set(true);
+    if global_hotkey::retry(window) {
         tray_icon(window, NIM_MODIFY);
     }
 }
@@ -280,18 +267,12 @@ unsafe fn tray_menu(window: HWND) {
     if menu.is_null() {
         return;
     }
-    if !HOTKEY_REGISTERED.get() {
-        let conflict = wide(&format!(
-            "⚠ {} 被占用，换一个快捷键…",
-            hotkey::current().get(hotkey::Binding::Capture).label()
-        ));
+    if let Some(taken) = conflict_label() {
+        let conflict = wide(&format!("⚠ {taken} 被占用，换一个快捷键…"));
         AppendMenuW(menu, MF_STRING, MENU_CONFLICT, conflict.as_ptr());
         AppendMenuW(menu, MF_SEPARATOR, 0, null());
     }
-    let capture = wide(&format!(
-        "截图 ({})",
-        hotkey::current().get(hotkey::Binding::Capture).label()
-    ));
+    let capture = wide(&format!("截图 ({})", global_hotkey::label()));
     AppendMenuW(menu, MF_STRING, MENU_CAPTURE, capture.as_ptr());
     AppendMenuW(menu, MF_STRING, MENU_CONFIG, w!("设置"));
     AppendMenuW(menu, MF_SEPARATOR, 0, null());
@@ -342,28 +323,10 @@ unsafe fn apply_preferences(
     start_at_login: bool,
 ) -> Result<(), String> {
     let bindings = preferences.bindings.validate()?;
-    let capture = bindings.get(hotkey::Binding::Capture);
-    let previous = HOTKEY_ID.get();
-    let was_registered = HOTKEY_REGISTERED.get();
-    let changed =
-        !was_registered || capture != hotkey::current().get(hotkey::Binding::Capture);
-    let next = 3 - previous;
+    preferences.validate()?;
+    startup::save_with(start_at_login, || hotkey::save(preferences))?;
     // An occupied shortcut is still saved; the tray badge reports the conflict.
-    let registered = !changed
-        || RegisterHotKey(window, next, capture.modifiers | MOD_NOREPEAT, capture.key) != 0;
-    if let Err(error) = startup::save_with(start_at_login, || hotkey::save(preferences)) {
-        if changed && registered {
-            UnregisterHotKey(window, next);
-        }
-        return Err(error);
-    }
-    if changed {
-        if was_registered {
-            UnregisterHotKey(window, previous);
-        }
-        HOTKEY_ID.set(next);
-        HOTKEY_REGISTERED.set(registered);
-    }
+    global_hotkey::set(window, &preferences.captures());
     hotkey::activate(bindings);
     pinned::set_opacity_step(preferences.opacity_step);
     theme::set(preferences.theme);

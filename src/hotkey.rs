@@ -75,12 +75,15 @@ pub struct Bindings([Shortcut; BINDINGS.len()]);
 pub const DEFAULT_OPACITY_STEP: u8 = 5;
 const OPACITY_STEP_KEY: &str = "pin_opacity_step";
 const THEME_KEY: &str = "theme";
+const SECONDARY_KEY: &str = "capture_secondary";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Preferences {
     pub bindings: Bindings,
     pub opacity_step: u8,
     pub theme: Theme,
+    /// Optional second global capture shortcut, active alongside the main one.
+    pub capture_secondary: Option<Shortcut>,
 }
 
 impl Default for Preferences {
@@ -89,6 +92,7 @@ impl Default for Preferences {
             bindings: DEFAULT,
             opacity_step: DEFAULT_OPACITY_STEP,
             theme: Theme::default(),
+            capture_secondary: None,
         }
     }
 }
@@ -285,6 +289,7 @@ fn load_from(path: &Path) -> Result<Preferences, String> {
     let mut bindings = DEFAULT;
     let mut opacity_step = DEFAULT_OPACITY_STEP;
     let mut theme = Theme::default();
+    let mut capture_secondary = None;
     match fs::read_to_string(path) {
         Ok(contents) => {
             for line in contents
@@ -298,6 +303,16 @@ fn load_from(path: &Path) -> Result<Preferences, String> {
                 let name = name.trim();
                 if name == OPACITY_STEP_KEY {
                     opacity_step = parse_opacity_step(value)?;
+                } else if name == SECONDARY_KEY {
+                    let value = value.trim();
+                    capture_secondary = if value.is_empty() {
+                        None
+                    } else {
+                        Some(
+                            Shortcut::parse(value)
+                                .ok_or_else(|| format!("快捷键格式有误：{line}"))?,
+                        )
+                    };
                 } else if name == THEME_KEY {
                     // An unknown theme falls back to the default instead of failing startup.
                     theme = Theme::parse(value).unwrap_or_default();
@@ -335,11 +350,41 @@ fn load_from(path: &Path) -> Result<Preferences, String> {
         }
         Err(error) => return Err(format!("无法读取 {}。\n{error}", path.display())),
     }
-    Ok(Preferences {
+    let preferences = Preferences {
         bindings: bindings.validate()?,
         opacity_step,
         theme,
-    })
+        capture_secondary,
+    };
+    preferences.validate()?;
+    Ok(preferences)
+}
+
+impl Preferences {
+    /// The global capture shortcuts: the main one, then the optional second one.
+    pub fn captures(&self) -> Vec<Shortcut> {
+        std::iter::once(self.bindings.get(Binding::Capture))
+            .chain(self.capture_secondary)
+            .collect()
+    }
+
+    /// The second capture shortcut must not collide with any other binding.
+    pub fn validate(&self) -> Result<(), String> {
+        let Some(secondary) = self.capture_secondary else {
+            return Ok(());
+        };
+        if let Some(binding) = BINDINGS
+            .into_iter()
+            .find(|&binding| self.bindings.get(binding) == secondary)
+        {
+            return Err(format!(
+                "副截图键和「{}」都绑定了 {}。",
+                binding.label(),
+                secondary.label()
+            ));
+        }
+        Ok(())
+    }
 }
 
 pub fn save(preferences: Preferences) -> Result<(), String> {
@@ -359,7 +404,11 @@ fn save_to(path: &Path, preferences: Preferences) -> Result<(), String> {
         })
         .collect();
     contents.push_str(&format!(
-        "{OPACITY_STEP_KEY}={}\r\n{THEME_KEY}={}\r\n",
+        "{SECONDARY_KEY}={}\r\n{OPACITY_STEP_KEY}={}\r\n{THEME_KEY}={}\r\n",
+        preferences
+            .capture_secondary
+            .map(Shortcut::label)
+            .unwrap_or_default(),
         preferences.opacity_step,
         preferences.theme.key()
     ));
@@ -429,6 +478,8 @@ mod tests {
             .set(Binding::Copy, Shortcut::parse("Ctrl+Shift+C").unwrap());
         preferences.opacity_step = 10;
         preferences.theme = Theme::Midnight;
+        preferences.capture_secondary = Shortcut::parse("F1");
+        assert_eq!(preferences.captures().len(), 2);
         save_to(&file, preferences).unwrap();
         assert_eq!(load_from(&file).unwrap(), preferences);
         save_to(&file, Preferences::default()).unwrap();

@@ -25,7 +25,7 @@ use windows_sys::{
 };
 
 use crate::{
-    apply_preferences, hotkey,
+    apply_preferences, global_hotkey, hotkey,
     hotkey::{Binding, Bindings, Preferences, Shortcut, BINDINGS, DEFAULT_OPACITY_STEP},
     icons::{self, Icon},
     overlay_ui::monitor_info,
@@ -48,20 +48,23 @@ const PULSE_MS: f32 = 1100.0;
 // Layout in 96-DPI pixels.
 const WIDTH: i32 = 620;
 const PAD: i32 = 24;
-const HEADER: i32 = 56;
+const HEADER: i32 = 52;
 const LABEL: i32 = 22;
 const SECTION_GAP: i32 = 14;
-const HERO: i32 = 82;
-const ROW: i32 = 42;
+const HERO: i32 = 124;
+const ROW: i32 = 38;
 const ROWS: i32 = 5;
 const CARD_INSET: i32 = 6;
-const GENERAL_ROW: i32 = 56;
+const GENERAL_ROW: i32 = 52;
 const GENERAL_ROWS: i32 = 3;
 const FOOTER: i32 = 60;
 const HERO_KEYS: i32 = 220;
 const ROW_KEYS: i32 = 136;
 const CHIP: i32 = 78;
 const CHIP_GAP: i32 = 6;
+/// Field index of the optional second capture shortcut, after every binding.
+const SECONDARY: usize = BINDINGS.len();
+const FIELDS: usize = BINDINGS.len() + 1;
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 enum Target {
@@ -70,6 +73,7 @@ enum Target {
     Minus,
     Plus,
     Theme(usize),
+    ClearSecondary,
     Close,
     Reset,
     Cancel,
@@ -78,6 +82,7 @@ enum Target {
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum CaptureStatus {
+    Unset,
     Active,
     Available,
     Occupied,
@@ -98,6 +103,7 @@ struct Draft {
     opacity_step: u8,
     start_at_login: bool,
     theme: Theme,
+    secondary: Option<Shortcut>,
 }
 
 impl Draft {
@@ -107,20 +113,34 @@ impl Draft {
             opacity_step: DEFAULT_OPACITY_STEP,
             start_at_login: true,
             theme: Theme::default(),
+            secondary: None,
         }
     }
 
-    fn shortcut(&self, index: usize) -> Shortcut {
-        self.bindings.get(BINDINGS[index])
+    /// The shortcut in field `index`: a binding, or the optional second capture key.
+    fn slot(&self, index: usize) -> Option<Shortcut> {
+        if index == SECONDARY {
+            self.secondary
+        } else {
+            Some(self.bindings.get(BINDINGS[index]))
+        }
+    }
+
+    fn set_slot(&mut self, index: usize, shortcut: Shortcut) {
+        if index == SECONDARY {
+            self.secondary = Some(shortcut);
+        } else {
+            self.bindings.set(BINDINGS[index], shortcut);
+        }
     }
 
     fn duplicate_of(&self, index: usize) -> Option<usize> {
-        let shortcut = self.shortcut(index);
-        (0..BINDINGS.len()).find(|&other| other != index && self.shortcut(other) == shortcut)
+        let shortcut = self.slot(index)?;
+        (0..FIELDS).find(|&other| other != index && self.slot(other) == Some(shortcut))
     }
 
     fn first_duplicate(&self) -> Option<(usize, usize)> {
-        (0..BINDINGS.len()).find_map(|index| {
+        (0..FIELDS).find_map(|index| {
             self.duplicate_of(index)
                 .filter(|&other| other > index)
                 .map(|other| (index, other))
@@ -132,18 +152,22 @@ impl Draft {
     }
 
     fn preferences(&self) -> Result<Preferences, String> {
-        Ok(Preferences {
+        let preferences = Preferences {
             bindings: self.bindings.validate()?,
             opacity_step: self.opacity_step,
             theme: self.theme,
-        })
+            capture_secondary: self.secondary,
+        };
+        preferences.validate()?;
+        Ok(preferences)
     }
 }
 
 struct State {
     owner: HWND,
     draft: Draft,
-    capture_status: CaptureStatus,
+    /// Status of the main and the second capture shortcut.
+    capture_status: [CaptureStatus; 2],
     recording: Option<usize>,
     held: u32,
     hovered: Option<Target>,
@@ -178,8 +202,9 @@ struct Layout {
     general_label: RECT,
     general: RECT,
     footer: i32,
-    keys: [RECT; BINDINGS.len()],
+    keys: [RECT; FIELDS],
     rows: [RECT; BINDINGS.len()],
+    clear: RECT,
     toggle: RECT,
     stepper: RECT,
     minus: RECT,
@@ -221,7 +246,7 @@ impl Layout {
         let footer = s(y);
         let height = s(y + FOOTER);
 
-        let mut keys = [RECT::default(); BINDINGS.len()];
+        let mut keys = [RECT::default(); FIELDS];
         let mut rows = [RECT::default(); BINDINGS.len()];
         rows[0] = hero;
         keys[0] = rect(
@@ -230,6 +255,15 @@ impl Layout {
             WIDTH - PAD - 16,
             hero_top + 12 + 34,
         );
+        // The second capture key sits on its own row below the main one.
+        keys[SECONDARY] = rect(
+            WIDTH - PAD - 16 - HERO_KEYS,
+            hero_top + 78,
+            WIDTH - PAD - 16,
+            hero_top + 78 + 34,
+        );
+        let clear_left = WIDTH - PAD - 16 - HERO_KEYS - 6 - 28;
+        let clear = rect(clear_left, hero_top + 81, clear_left + 28, hero_top + 81 + 28);
         let column = (WIDTH - PAD * 2 - CARD_INSET * 2) / 2;
         for index in 1..BINDINGS.len() {
             let slot = (index - 1) as i32;
@@ -280,6 +314,7 @@ impl Layout {
             footer,
             keys,
             rows,
+            clear,
             toggle,
             stepper,
             minus,
@@ -296,8 +331,9 @@ impl Layout {
     }
 
     fn targets(&self) -> impl Iterator<Item = (Target, RECT)> + '_ {
-        (0..BINDINGS.len())
+        (0..FIELDS)
             .map(|index| (Target::Key(index), self.keys[index]))
+            .chain([(Target::ClearSecondary, self.clear)])
             .chain((0..THEMES.len()).map(|index| (Target::Theme(index), self.themes[index])))
             .chain([
                 (Target::Toggle, self.toggle),
@@ -368,6 +404,7 @@ pub unsafe fn open(owner: HWND, instance: HINSTANCE) -> io::Result<()> {
         opacity_step: pinned::opacity_step(),
         start_at_login,
         theme: theme::current(),
+        secondary: global_hotkey::shortcuts().get(1).copied(),
     };
     install(window, owner, draft);
     WINDOW.set(window);
@@ -387,7 +424,7 @@ unsafe fn install(window: HWND, owner: HWND, draft: Draft) {
     STATE.set(Some(State {
         owner,
         draft,
-        capture_status: CaptureStatus::Active,
+        capture_status: [CaptureStatus::Active, CaptureStatus::Unset],
         recording: None,
         held: 0,
         hovered: None,
@@ -428,22 +465,24 @@ unsafe fn place(window: HWND, suggested: Option<RECT>) {
     SetWindowPos(window, null_mut(), x, y, width, height, SWP_NOZORDER | SWP_NOACTIVATE);
 }
 
-/// Whether the edited capture shortcut works: it is either Snapshot's live
-/// hotkey, or free to register right now.
+/// Whether each edited capture shortcut works: Snapshot already holds it as
+/// a capture key, or it is free to register right now.
 unsafe fn refresh_capture_status(window: HWND) {
     let draft = STATE.with_borrow(|state| state.as_ref().map(|state| state.draft));
     let Some(draft) = draft else { return };
-    let status = if let Some(other) = draft.duplicate_of(0) {
-        CaptureStatus::Duplicate(other)
-    } else {
-        let capture = draft.shortcut(0);
-        if crate::active_hotkey() == Some(capture) {
+    let status = [0, SECONDARY].map(|index| {
+        let Some(shortcut) = draft.slot(index) else {
+            return CaptureStatus::Unset;
+        };
+        if let Some(other) = draft.duplicate_of(index) {
+            CaptureStatus::Duplicate(other)
+        } else if global_hotkey::holds(shortcut) {
             CaptureStatus::Active
         } else if RegisterHotKey(
             window,
             PROBE_HOTKEY,
-            capture.modifiers | MOD_NOREPEAT,
-            capture.key,
+            shortcut.modifiers | MOD_NOREPEAT,
+            shortcut.key,
         ) != 0
         {
             UnregisterHotKey(window, PROBE_HOTKEY);
@@ -451,7 +490,7 @@ unsafe fn refresh_capture_status(window: HWND) {
         } else {
             CaptureStatus::Occupied
         }
-    };
+    });
     with_state(|state| state.capture_status = status);
 }
 
@@ -545,6 +584,16 @@ unsafe fn activate(window: HWND, target: Target) {
             with_state(|state| state.draft.step_opacity(delta));
             redraw(window);
         }
+        Target::ClearSecondary => {
+            with_state(|state| {
+                state.draft.secondary = None;
+                if state.recording == Some(SECONDARY) {
+                    state.recording = None;
+                }
+            });
+            refresh_capture_status(window);
+            redraw(window);
+        }
         Target::Theme(index) => {
             // Previewed live in this window; applied everywhere on save.
             with_state(|state| state.draft.theme = THEMES[index]);
@@ -607,7 +656,7 @@ unsafe fn record_key(window: HWND, key: u32) -> bool {
         });
     } else if let Some(shortcut) = Shortcut::from_key(modifiers, key) {
         with_state(|state| {
-            state.draft.bindings.set(BINDINGS[index], shortcut);
+            state.draft.set_slot(index, shortcut);
             state.recording = None;
             state.notice = Notice::None;
         });
@@ -936,53 +985,96 @@ impl<'a> Painter<'a> {
         let palette = self.palette;
         let fonts = &self.state.fonts;
         let card = self.layout.hero;
+        let main = self.layout.keys[0];
+        let second = self.layout.keys[SECONDARY];
+        // Row 1: icon, title and the main shortcut with its status below it.
         let tile_size = self.s(40);
+        let row_middle = main.top + self.s(29);
         let tile = RECT {
             left: card.left + self.s(18),
-            top: (card.top + card.bottom - tile_size) / 2,
+            top: row_middle - tile_size / 2,
             right: card.left + self.s(18) + tile_size,
-            bottom: (card.top + card.bottom + tile_size) / 2,
+            bottom: row_middle + tile_size / 2,
         };
         if let Some(graphics) = Graphics::new(self.dc) {
             graphics.fill_round(ui::to_f(tile), self.f(10.0), argb(palette.accent_soft, 255));
         }
         icons::paint(self.dc, ui::inflate(tile, -self.s(8)), Icon::Rectangle, palette.accent);
-
         let left = tile.right + self.s(14);
-        let middle = (card.top + card.bottom) / 2;
         let title = RECT {
             left,
-            top: middle - self.s(22),
-            right: self.layout.keys[0].left,
-            bottom: middle,
+            top: row_middle - self.s(22),
+            right: main.left,
+            bottom: row_middle,
         };
         self.text(title, "开始截图", fonts.heading, palette.text, DT_LEFT | DT_BOTTOM);
-        let description = RECT {
-            top: middle + self.s(3),
-            bottom: middle + self.s(23),
-            ..title
-        };
         self.text(
-            description,
+            RECT {
+                top: row_middle + self.s(3),
+                bottom: row_middle + self.s(23),
+                ..title
+            },
             "全局快捷键，在任何程序里按下都能截图",
             fonts.small,
             palette.secondary,
             DT_LEFT | DT_TOP,
         );
-
         self.key_field(0, self.s(28));
-
-        let keys = self.layout.keys[0];
         let status = RECT {
-            left: keys.left - self.s(80),
-            top: keys.bottom + self.s(4),
-            right: keys.right - self.s(6),
-            bottom: keys.bottom + self.s(24),
+            left: main.left - self.s(80),
+            top: main.bottom + self.s(4),
+            right: main.right - self.s(6),
+            bottom: main.bottom + self.s(24),
         };
-        let (color, label, badge) = if self.state.recording == Some(0) {
+        self.status_line(status, 0, DT_RIGHT);
+
+        // Row 2: the optional second shortcut; its description is its status.
+        let divider = card.top + self.s(70);
+        ui::fill(
+            self.dc,
+            RECT {
+                left: card.left + self.s(18),
+                top: divider,
+                right: card.right - self.s(18),
+                bottom: divider + 1,
+            },
+            palette.divider,
+        );
+        let middle = (second.top + second.bottom) / 2;
+        let label = RECT {
+            left,
+            top: middle - self.s(21),
+            right: self.layout.clear.left - self.s(8),
+            bottom: middle,
+        };
+        self.text(label, "副键位", fonts.body, palette.text, DT_LEFT | DT_BOTTOM);
+        let status = RECT {
+            top: middle + self.s(2),
+            bottom: middle + self.s(21),
+            ..label
+        };
+        self.status_line(status, SECONDARY, DT_LEFT);
+        if self.state.draft.secondary.is_some() {
+            self.clear_button();
+        }
+        self.key_field(SECONDARY, self.s(28));
+    }
+
+    /// The live status of capture field `index` (0 or SECONDARY), drawn as a
+    /// badge plus text aligned to the `align` edge of `rect`.
+    unsafe fn status_line(&self, rect: RECT, index: usize, align: u32) {
+        let palette = self.palette;
+        let fonts = &self.state.fonts;
+        let which = usize::from(index == SECONDARY);
+        let (color, label, badge) = if self.state.recording == Some(index) {
             (palette.tertiary, "按下新的组合键，Esc 取消".to_string(), None)
         } else {
-            match self.state.capture_status {
+            match self.state.capture_status[which] {
+                CaptureStatus::Unset => (
+                    palette.secondary,
+                    "可选，和主键位同时生效".to_string(),
+                    None,
+                ),
                 CaptureStatus::Active => (palette.success, "已生效".into(), Some(Badge::Check)),
                 CaptureStatus::Available => {
                     (palette.success, "可以使用，保存后生效".into(), Some(Badge::Check))
@@ -994,26 +1086,50 @@ impl<'a> Painter<'a> {
                 ),
                 CaptureStatus::Duplicate(other) => (
                     palette.warning,
-                    format!("和「{}」重复", BINDINGS[other].label()),
+                    format!("和「{}」重复", field_label(other)),
                     Some(Badge::Exclamation),
                 ),
             }
         };
+        let size = self.s(14);
+        let gap = self.s(5);
         let width = ui::measure(self.dc, &label, fonts.small);
-        let mut label_rect = status;
-        label_rect.left = label_rect.right - width;
-        self.text(label_rect, &label, fonts.small, color, DT_LEFT | DT_VCENTER);
+        let badge_width = if badge.is_some() { size + gap } else { 0 };
+        let left = if align == DT_RIGHT {
+            rect.right - width - badge_width
+        } else {
+            rect.left
+        };
+        let center_y = (rect.top + rect.bottom) / 2;
         if let Some(badge) = badge {
-            let size = self.s(14);
-            let center_y = (status.top + status.bottom) / 2;
-            let rect = RECT {
-                left: label_rect.left - self.s(5) - size,
+            let bounds = RECT {
+                left,
                 top: center_y - size / 2,
-                right: label_rect.left - self.s(5),
+                right: left + size,
                 bottom: center_y - size / 2 + size,
             };
-            ui::badge(self.dc, rect, color, badge, palette.card);
+            ui::badge(self.dc, bounds, color, badge, palette.card);
         }
+        let text = RECT {
+            left: left + badge_width,
+            right: rect.right.max(left + badge_width + width),
+            ..rect
+        };
+        self.text(text, &label, fonts.small, color, DT_LEFT | DT_VCENTER | DT_END_ELLIPSIS);
+    }
+
+    unsafe fn clear_button(&self) {
+        let rect = self.layout.clear;
+        let hover = self.hover(Target::ClearSecondary);
+        if hover > 0.0 || self.state.pressed == Some(Target::ClearSecondary) {
+            if let Some(graphics) = Graphics::new(self.dc) {
+                let face = self.face(Target::ClearSecondary, self.palette.card);
+                graphics.fill_round(ui::to_f(rect), self.f(6.0), argb(face, 255));
+            }
+        }
+        let icon = ui::inflate(rect, -self.s(6));
+        let color = mix(self.palette.tertiary, self.palette.text, hover);
+        icons::paint(self.dc, icon, Icon::Close, color);
     }
 
     unsafe fn toolbar_rows(&self) {
@@ -1120,14 +1236,21 @@ impl<'a> Painter<'a> {
                 .collect();
             parts.push("…".into());
             parts
+        } else if let Some(shortcut) = self.state.draft.slot(index) {
+            shortcut.label().split('+').map(String::from).collect()
         } else {
-            self.state
-                .draft
-                .shortcut(index)
-                .label()
-                .split('+')
-                .map(String::from)
-                .collect()
+            let rect = RECT {
+                right: field.right - self.s(12),
+                ..field
+            };
+            self.text(
+                rect,
+                "点击设置",
+                self.state.fonts.small,
+                palette.tertiary,
+                DT_RIGHT | DT_VCENTER,
+            );
+            return;
         };
         let font = self.state.fonts.key;
         let gap = self.s(4);
@@ -1404,9 +1527,9 @@ impl<'a> Painter<'a> {
             (Notice::None, Some((first, second))) => (
                 format!(
                     "「{}」和「{}」都是 {}",
-                    BINDINGS[first].label(),
-                    BINDINGS[second].label(),
-                    self.state.draft.shortcut(first).label()
+                    field_label(first),
+                    field_label(second),
+                    self.state.draft.slot(first).map(Shortcut::label).unwrap_or_default()
                 ),
                 palette.warning,
             ),
@@ -1428,6 +1551,14 @@ impl<'a> Painter<'a> {
             color,
             DT_LEFT | DT_VCENTER | DT_END_ELLIPSIS,
         );
+    }
+}
+
+fn field_label(index: usize) -> &'static str {
+    if index == SECONDARY {
+        "副截图键"
+    } else {
+        BINDINGS[index].label()
     }
 }
 
@@ -1504,6 +1635,17 @@ mod tests {
             ),
             ("duplicate".into(), 1.0, duplicate, CaptureStatus::Active, None, 0),
             (
+                "secondary".into(),
+                1.0,
+                Draft {
+                    secondary: Shortcut::parse("Ctrl+Shift+A"),
+                    ..Draft::defaults()
+                },
+                CaptureStatus::Active,
+                None,
+                0,
+            ),
+            (
                 "scale150".into(),
                 1.5,
                 Draft {
@@ -1520,7 +1662,14 @@ mod tests {
                 let state = State {
                     owner: null_mut(),
                     draft,
-                    capture_status: status,
+                    capture_status: [
+                        status,
+                        if draft.secondary.is_some() {
+                            CaptureStatus::Occupied
+                        } else {
+                            CaptureStatus::Unset
+                        },
+                    ],
                     recording,
                     held,
                     hovered: None,
@@ -1588,6 +1737,16 @@ mod tests {
         assert_eq!(draft.duplicate_of(copy), Some(save));
         assert_eq!(draft.first_duplicate(), Some((copy, save)));
         assert!(draft.preferences().is_err());
+
+        let mut draft = Draft::defaults();
+        assert_eq!(draft.slot(SECONDARY), None, "no second capture key by default");
+        draft.set_slot(SECONDARY, Shortcut::parse("Ctrl+C").unwrap());
+        assert_eq!(draft.duplicate_of(SECONDARY), Some(copy));
+        assert!(draft.preferences().is_err(), "second key may not reuse a binding");
+        draft.set_slot(SECONDARY, Shortcut::parse("F1").unwrap());
+        assert!(draft.first_duplicate().is_none());
+        let preferences = draft.preferences().unwrap();
+        assert_eq!(preferences.captures().len(), 2);
     }
 
     #[test]
