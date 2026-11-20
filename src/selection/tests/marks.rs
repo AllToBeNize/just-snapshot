@@ -139,7 +139,7 @@ fn the_last_capture_comes_back_with_its_annotations() {
         mouse(window, WM_LBUTTONUP, 200, 100);
         DestroyWindow(window);
         assert!(has_last());
-        let last = LAST.take().unwrap();
+        let last = LAST.take().unwrap().unpack().unwrap();
         open_selection(instance, Start::Last(last)).unwrap();
         let (rect, automatic, marked, window) = SESSION.with_borrow(|s| {
             let selection = s.as_ref().unwrap();
@@ -148,6 +148,9 @@ fn the_last_capture_comes_back_with_its_annotations() {
         assert_eq!(rect, (60, 40, 560, 260));
         assert!(!automatic && marked && window, "locked, annotated, with the toolbar");
         assert!(SESSION.with_borrow(|s| s.as_ref().unwrap().annotations.can_undo()), "undo history comes back too");
+        // The screen comes back pixel for pixel after the PNG round trip.
+        let restored = SESSION.with_borrow(|s| GetPixel(s.as_ref().unwrap().desktop.surface.dc, 5, 5));
+        assert_eq!(restored, 0x0040_8020);
         let overlay = FindWindowW(CLASS, null());
         DestroyWindow(overlay);
         assert!(has_last(), "closing it again keeps it");

@@ -100,3 +100,37 @@ fn side_buttons_step_through_layers_until_the_mouse_moves() {
         DestroyWindow(window);
     }
 }
+
+/// Paint cost of dimming on the fly versus copying a dimmed copy, at the
+/// size of a 2560 + 1920 px desktop. Run with `<test binary> dim_cost --ignored --nocapture`.
+#[test]
+#[ignore]
+fn dim_cost() {
+    unsafe {
+        let (width, height) = (4480, 1440);
+        let source = Surface::new(null_mut(), width, height).unwrap();
+        let dimmed = Surface::new(null_mut(), width, height).unwrap();
+        let target = Surface::new(null_mut(), width, height).unwrap();
+        let row = Surface::new(null_mut(), width, 1).unwrap();
+        let canvas = RECT { right: width, bottom: height, ..Default::default() };
+        FillRect(row.dc, &RECT { right: width, bottom: 1, ..Default::default() }, GetStockObject(BLACK_BRUSH));
+        let blend = BLENDFUNCTION { SourceConstantAlpha: 153, ..Default::default() };
+        let time = |label: &str, paint: &dyn Fn()| {
+            paint();
+            let start = std::time::Instant::now();
+            for _ in 0..10 {
+                paint();
+                GdiFlush();
+            }
+            println!("{label}: {:.1} ms per full-screen paint", start.elapsed().as_secs_f64() * 100.0);
+        };
+        let _ = canvas;
+        time("copy dimmed", &|| {
+            BitBlt(target.dc, 0, 0, width, height, dimmed.dc, 0, 0, SRCCOPY);
+        });
+        time("copy + blend black row", &|| {
+            BitBlt(target.dc, 0, 0, width, height, source.dc, 0, 0, SRCCOPY);
+            AlphaBlend(target.dc, 0, 0, width, height, row.dc, 0, 0, width, 1, blend);
+        });
+    }
+}

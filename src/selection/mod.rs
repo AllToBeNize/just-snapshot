@@ -87,7 +87,7 @@ const TEXT_CARET_TIMER: usize = 3;
 thread_local! {
     static SESSION: RefCell<Option<Selection>> = const { RefCell::new(None) };
     /// The last locked capture, kept so it can be brought back.
-    static LAST: RefCell<Option<Last>> = const { RefCell::new(None) };
+    static LAST: RefCell<Option<Kept>> = const { RefCell::new(None) };
 }
 
 /// What "找回上次截图" restores: the frozen screen, the selection and the
@@ -97,6 +97,45 @@ struct Last {
     rect: RECT,
     annotations: History,
     style: Style,
+}
+
+/// The last capture while it waits: the frozen screen is squeezed into a
+/// PNG in the background, a few MB instead of a full-size bitmap.
+struct Kept {
+    bounds: RECT,
+    /// The background thread compressing the screen; joining it hands the result over.
+    frozen: std::thread::JoinHandle<Packed>,
+    rect: RECT,
+    annotations: History,
+    style: Style,
+}
+
+enum Packed {
+    Png(Vec<u8>),
+    /// Encoding failed; the pixels are kept as they are.
+    Raw(Image),
+}
+
+impl Kept {
+    /// The screen back as a bitmap, ready to show again.
+    unsafe fn unpack(self) -> io::Result<Last> {
+        let packed = self.frozen.join().map_err(|_| io::Error::other("上次的截图没能保存下来。"))?;
+        let mut image = match packed {
+            Packed::Raw(image) => image,
+            Packed::Png(bytes) => crate::app_icon::decode(&bytes).ok_or_else(|| io::Error::other("上次的截图没能读回来。"))?,
+        };
+        // GDI captures carry no alpha; keep the bitmap exactly as captured.
+        for pixel in image.pixels.chunks_exact_mut(4) {
+            pixel[3] = 0;
+        }
+        let (surface, _, _) = image.into_surface()?;
+        Ok(Last {
+            desktop: Desktop { bounds: self.bounds, surface },
+            rect: self.rect,
+            annotations: self.annotations,
+            style: self.style,
+        })
+    }
 }
 
 enum Start {
@@ -273,7 +312,7 @@ pub unsafe fn restore_last(instance: HINSTANCE) -> Result<bool, String> {
     if SESSION.with_borrow(Option::is_some) || scroll_capture::is_open() {
         return Ok(true);
     }
-    let Some(last) = LAST.take() else {
+    let Some(kept) = LAST.take() else {
         return Ok(false);
     };
     let current = RECT {
@@ -282,9 +321,10 @@ pub unsafe fn restore_last(instance: HINSTANCE) -> Result<bool, String> {
         right: GetSystemMetrics(SM_XVIRTUALSCREEN) + GetSystemMetrics(SM_CXVIRTUALSCREEN),
         bottom: GetSystemMetrics(SM_YVIRTUALSCREEN) + GetSystemMetrics(SM_CYVIRTUALSCREEN),
     };
-    if EqualRect(&current, &last.desktop.bounds) == 0 {
+    if EqualRect(&current, &kept.bounds) == 0 {
         return Err("屏幕的排列或分辨率变了，上次的截图对不上现在的屏幕。".into());
     }
+    let last = kept.unpack().map_err(|error| error.to_string())?;
     open_selection(instance, Start::Last(last)).map(|()| true).map_err(|error| error.to_string())
 }
 
@@ -699,6 +739,8 @@ unsafe extern "system" fn window_proc(
             if let Some(selection) = SESSION.take() {
                 remember(selection);
             }
+            // The capture's full-screen buffers are gone; give their pages back.
+            crate::capture::release_memory();
         }
         _ => return DefWindowProcW(window, message, wparam, lparam),
     }
@@ -710,11 +752,30 @@ fn remember(selection: Selection) {
     if selection.automatic || outline_empty(selection.rect) {
         return;
     }
+    let bounds = selection.desktop.bounds;
+    let full = RECT { right: bounds.right - bounds.left, bottom: bounds.bottom - bounds.top, ..Default::default() };
+    // Copy the pixels out so the full-size bitmap is freed right away.
+    let Ok(pixels) = selection.desktop.crop(full) else {
+        return;
+    };
     let mut annotations = selection.annotations;
     annotations.tool = None;
     annotations.draft = None;
-    LAST.set(Some(Last {
-        desktop: selection.desktop,
+    let worker = std::thread::Builder::new().name("snapshot-keep-last".into()).spawn(move || {
+        let mut png = Vec::new();
+        let packed = match pixels.write_png(&mut png) {
+            Ok(()) => Packed::Png(png),
+            Err(_) => Packed::Raw(pixels),
+        };
+        crate::capture::release_memory();
+        packed
+    });
+    let Ok(worker) = worker else {
+        return;
+    };
+    LAST.set(Some(Kept {
+        bounds,
+        frozen: worker,
         rect: selection.rect,
         annotations,
         style: selection.style,

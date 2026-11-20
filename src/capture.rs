@@ -382,6 +382,19 @@ impl Image {
     }
 }
 
+/// Hands freed memory back to Windows after a capture, so the idle tray
+/// app shows its real size again in Task Manager.
+pub fn release_memory() {
+    use windows_sys::Win32::System::{
+        Memory::{GetProcessHeap, HeapCompact},
+        Threading::{GetCurrentProcess, SetProcessWorkingSetSize},
+    };
+    unsafe {
+        HeapCompact(GetProcessHeap(), 0);
+        SetProcessWorkingSetSize(GetCurrentProcess(), usize::MAX, usize::MAX);
+    }
+}
+
 pub(crate) fn bitmap_header(width: i32, height: i32) -> BITMAPINFOHEADER {
     BITMAPINFOHEADER {
         biSize: size_of::<BITMAPINFOHEADER>() as u32,
