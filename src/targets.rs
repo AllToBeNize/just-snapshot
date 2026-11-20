@@ -1,7 +1,7 @@
 use std::{
     cell::OnceCell,
     collections::HashSet,
-    ptr::null_mut,
+    ptr::{null, null_mut},
     sync::{mpsc, Arc, Mutex},
     thread,
     time::{Duration, Instant},
@@ -25,15 +25,18 @@ use windows::{
         },
     },
 };
-use windows_sys::Win32::{
-    Foundation::{HWND, LPARAM, POINT, RECT},
-    Graphics::{
-        Dwm::{DwmGetWindowAttribute, DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS},
-        Gdi::ScreenToClient,
-    },
-    UI::{
-        Controls::{STATE_SYSTEM_INVISIBLE, STATE_SYSTEM_OFFSCREEN},
-        WindowsAndMessaging::*,
+use windows_sys::{
+    core::w,
+    Win32::{
+        Foundation::{HWND, LPARAM, POINT, RECT},
+        Graphics::{
+            Dwm::{DwmGetWindowAttribute, DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS},
+            Gdi::{EnumDisplayMonitors, ScreenToClient, HDC, HMONITOR},
+        },
+        UI::{
+            Controls::{STATE_SYSTEM_INVISIBLE, STATE_SYSTEM_OFFSCREEN},
+            WindowsAndMessaging::*,
+        },
     },
 };
 
@@ -59,17 +62,29 @@ pub unsafe fn windows_at_capture() -> Vec<WindowTarget> {
 unsafe extern "system" fn collect_window(window: HWND, context: LPARAM) -> i32 {
     if IsWindowVisible(window) == 0
         || IsIconic(window) != 0
-        || window == GetShellWindow()
         || GetWindowLongW(window, GWL_EXSTYLE) as u32 & WS_EX_TRANSPARENT != 0
     {
         return 1;
     }
+    let windows = &mut *(context as *mut Vec<WindowTarget>);
     let mut class = [0u16; 32];
     let length = GetClassNameW(window, class.as_mut_ptr(), class.len() as i32) as usize;
-    if ["WorkerW", "Progman"]
-        .iter()
-        .any(|name| class[..length].iter().copied().eq(name.encode_utf16()))
+    if window == GetShellWindow()
+        || ["WorkerW", "Progman"]
+            .iter()
+            .any(|name| class[..length].iter().copied().eq(name.encode_utf16()))
     {
+        // The desktop spans every monitor. The window hosting the icons becomes
+        // one target per monitor, so hovering the desktop selects the screen
+        // under the pointer and the element probe can still find icons.
+        let hosts_icons =
+            !FindWindowExW(window, null_mut(), w!("SHELLDLL_DefView"), null()).is_null();
+        if hosts_icons {
+            windows.extend(monitors().into_iter().map(|rect| WindowTarget {
+                id: window as usize,
+                rect,
+            }));
+        }
         return 1;
     }
     let mut cloaked = 0u32;
@@ -91,13 +106,28 @@ unsafe extern "system" fn collect_window(window: HWND, context: LPARAM) -> i32 {
         size_of::<RECT>() as u32,
     );
     if status >= 0 || GetWindowRect(window, &mut rect) != 0 {
-        let windows = &mut *(context as *mut Vec<WindowTarget>);
         windows.push(WindowTarget {
             id: window as usize,
             rect,
         });
     }
     1
+}
+
+/// Every monitor's rectangle in screen coordinates.
+pub unsafe fn monitors() -> Vec<RECT> {
+    unsafe extern "system" fn collect(_: HMONITOR, _: HDC, rect: *mut RECT, context: LPARAM) -> i32 {
+        (*(context as *mut Vec<RECT>)).push(*rect);
+        1
+    }
+    let mut rects = Vec::new();
+    EnumDisplayMonitors(
+        null_mut(),
+        null(),
+        Some(collect),
+        (&mut rects as *mut Vec<RECT>) as LPARAM,
+    );
+    rects
 }
 
 #[derive(Clone, Copy)]
@@ -422,4 +452,35 @@ impl Automation {
 
 fn area(rect: RECT) -> i64 {
     i64::from(rect.right - rect.left) * i64::from(rect.bottom - rect.top)
+}
+
+#[cfg(test)]
+mod desktop_tests {
+    use super::*;
+
+    /// Needs a real desktop session: `<test binary> desktop --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn the_desktop_is_one_target_per_monitor() {
+        unsafe {
+            let monitors = monitors();
+            let targets = windows_at_capture();
+            let desktop: Vec<_> = targets
+                .iter()
+                .filter(|target| {
+                    monitors.iter().any(|monitor| {
+                        (target.rect.left, target.rect.top, target.rect.right, target.rect.bottom)
+                            == (monitor.left, monitor.top, monitor.right, monitor.bottom)
+                    })
+                })
+                .collect();
+            println!(
+                "monitors: {}, targets: {}, monitor-sized targets: {}",
+                monitors.len(),
+                targets.len(),
+                desktop.len()
+            );
+            assert!(desktop.len() >= monitors.len(), "desktop must cover every monitor");
+        }
+    }
 }

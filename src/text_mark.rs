@@ -1,6 +1,9 @@
 use windows_sys::Win32::{
     Foundation::{POINT, RECT},
     Graphics::{Gdi::*, GdiPlus::PointF},
+    UI::WindowsAndMessaging::{
+        IDC_HAND, IDC_SIZEALL, IDC_SIZENESW, IDC_SIZENS, IDC_SIZENWSE, IDC_SIZEWE,
+    },
 };
 
 use crate::{capture::Image, selection_geometry::BORDER_BLUE, gdiplus::Graphics, typography};
@@ -24,6 +27,25 @@ pub enum TextHandle {
 }
 
 const CORNERS: [(i32, i32); 4] = [(-1, -1), (1, -1), (1, 1), (-1, 1)];
+const RESIZE_CURSORS: [*const u16; 4] = [IDC_SIZEWE, IDC_SIZENWSE, IDC_SIZENS, IDC_SIZENESW];
+
+/// The system cursor for a frame handle on a box rotated by `angle` radians.
+/// Corner handles point along their rotated diagonal, snapped to the nearest
+/// of the four resize cursors.
+pub fn handle_cursor(handle: TextHandle, angle: f64) -> *const u16 {
+    match handle {
+        TextHandle::Move => IDC_SIZEALL,
+        TextHandle::Rotate => IDC_HAND,
+        TextHandle::Scale(x, y) => {
+            let (sin, cos) = angle.sin_cos();
+            let (x, y) = (f64::from(x), f64::from(y));
+            let (dx, dy) = (x * cos - y * sin, x * sin + y * cos);
+            // Screen y points down, so 45° is the "\\" diagonal (NW-SE).
+            let degrees = dy.atan2(dx).to_degrees().rem_euclid(180.0);
+            RESIZE_CURSORS[((degrees + 22.5) / 45.0) as usize % 4]
+        }
+    }
+}
 const ROTATE_OFFSET: i32 = 14;
 const ROTATE_RADIUS: i32 = 8;
 const HANDLE_HALF: f32 = 3.5;
@@ -79,6 +101,10 @@ impl TextMark {
             right: left + width,
             bottom: top + height,
         }
+    }
+
+    pub fn angle(&self) -> f64 {
+        self.angle
     }
 
     pub fn is_rotated(&self) -> bool {
@@ -449,6 +475,22 @@ mod tests {
             }
             image.save_png(&folder.join("text-frame.png")).unwrap();
         }
+    }
+
+    #[test]
+    fn corner_cursors_follow_the_rotation() {
+        use std::f64::consts::FRAC_PI_4;
+        let top_left = TextHandle::Scale(-1, -1);
+        let top_right = TextHandle::Scale(1, -1);
+        assert_eq!(handle_cursor(top_left, 0.0), IDC_SIZENWSE);
+        assert_eq!(handle_cursor(top_right, 0.0), IDC_SIZENESW);
+        // A quarter turn swaps the diagonals.
+        assert_eq!(handle_cursor(top_left, 2.0 * FRAC_PI_4), IDC_SIZENESW);
+        assert_eq!(handle_cursor(top_right, 2.0 * FRAC_PI_4), IDC_SIZENWSE);
+        // An eighth turn lines the corners up with the axes.
+        assert_eq!(handle_cursor(top_left, FRAC_PI_4), IDC_SIZENS);
+        assert_eq!(handle_cursor(top_right, FRAC_PI_4), IDC_SIZEWE);
+        assert_eq!(handle_cursor(TextHandle::Move, 1.0), IDC_SIZEALL);
     }
 
     #[test]

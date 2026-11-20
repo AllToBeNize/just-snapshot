@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>Snapshot 自动选框是怎么工作的</title>
+<style>
+  :root {
+    --bg: #1c1d20; --card: #26272b; --border: #36383d; --text: #ecedef;
+    --muted: #a4a8af; --faint: #70757d; --accent: #5e8bf0; --soft: #2b354e;
+    --ok: #5cbf83; --warn: #e2a23b; --bad: #e5675f;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 15px/1.75 "Microsoft YaHei UI", "PingFang SC", "Segoe UI", sans-serif;
+  }
+  main { max-width: 920px; margin: 0 auto; padding: 48px 28px 80px; }
+  h1 { font-size: 28px; margin: 0 0 6px; }
+  h2 { font-size: 20px; margin: 44px 0 12px; padding-top: 8px; }
+  h3 { font-size: 16px; margin: 24px 0 8px; color: var(--muted); }
+  p { margin: 10px 0; }
+  .lead { color: var(--muted); margin-bottom: 28px; }
+  code { font-family: "Cascadia Mono", Consolas, monospace; font-size: 13px;
+         background: #303237; padding: 1px 6px; border-radius: 5px; }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 12px;
+          padding: 18px 22px; margin: 16px 0; }
+  .callout { border-left: 3px solid var(--warn); }
+  .callout.ok { border-left-color: var(--ok); }
+  table { width: 100%; border-collapse: collapse; margin: 12px 0; font-size: 14px; }
+  th, td { text-align: left; padding: 9px 12px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; }
+  .tag { display: inline-block; font-size: 12px; padding: 1px 8px; border-radius: 999px;
+         background: var(--soft); color: var(--accent); margin-right: 4px; }
+  .tag.warn { background: #3b3122; color: var(--warn); }
+  .tag.ok { background: #20372b; color: var(--ok); }
+  /* flow */
+  .flow { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin: 18px 0; }
+  .step { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 14px 16px; position: relative; }
+  .step b { display: block; font-size: 14px; margin-bottom: 4px; }
+  .step .n { position: absolute; top: -10px; left: 14px; background: var(--accent); color: #fff;
+             font-size: 12px; font-weight: 700; border-radius: 999px; padding: 0 9px; }
+  .step small { color: var(--muted); font-size: 13px; line-height: 1.6; display: block; }
+  .step.async { border-style: dashed; }
+  .compare { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  svg text { font-family: "Microsoft YaHei UI", "Segoe UI", sans-serif; }
+  ol li, ul li { margin: 4px 0; }
+  .faint { color: var(--faint); font-size: 13px; }
+</style>
+</head>
+<body>
+<main>
+
+<h1>Snapshot 自动选框是怎么工作的</h1>
+<p class="lead">
+  按下截图键后，鼠标移到哪里，蓝框就“吸”到哪里：窗口、按钮、网页里的一栏内容。这份文档把这条链路从头讲一遍，
+  顺带说明这次“桌面上选不到任何区域”的原因和改法。代码都在 <code>src/targets.rs</code>、
+  <code>src/selection/pointer.rs</code> 和 <code>src/panel_edges.rs</code>。
+</p>
+
+<h2>一、整体流程</h2>
+<p>整个过程分四步。前两步在截图开始的一瞬间做完，第三步跟着鼠标走，第四步在后台线程里异步跑，跑完再回来把框修得更准。</p>
+
+<div class="flow">
+  <div class="step"><span class="n">1</span><b>冻结画面</b>
+    <small>先抓整个虚拟桌面的像素，再显示遮罩，避免把遮罩自己截进去。</small></div>
+  <div class="step"><span class="n">2</span><b>记下所有窗口</b>
+    <small>按 Z 序（从最上层到最下层）枚举顶层窗口，记下每个窗口的矩形，作为“候选”。</small></div>
+  <div class="step"><span class="n">3</span><b>鼠标命中</b>
+    <small>鼠标每动一下，找最上层包含指针的候选，用它的矩形做预选框，再用像素边缘细分一次。</small></div>
+  <div class="step async"><span class="n">4</span><b>控件精修（异步）</b>
+    <small>后台线程用无障碍接口找指针下更小的控件，结果回来后替换预选框。</small></div>
+</div>
+
+<p class="faint">虚线框表示异步：它不阻塞鼠标移动，100 毫秒内没结果就放弃，框保持第 3 步的样子。</p>
+
+<h2>二、第 2 步：哪些窗口能当候选</h2>
+<p>
+  候选在截图开始时一次性拍下来（<code>targets::windows_at_capture</code>），之后不再刷新。
+  我用 <code>EnumWindows</code> 枚举，它天然按 Z 序从上往下返回，所以第 3 步只要“找第一个包含指针的”，就等于“找最上层的窗口”。
+  枚举时会过滤掉这些窗口：
+</p>
+<table>
+  <tr><th>过滤条件</th><th>为什么</th></tr>
+  <tr><td>不可见、最小化</td><td>看不见的窗口不该被框到。</td></tr>
+  <tr><td>带 <code>WS_EX_TRANSPARENT</code></td><td>鼠标穿透的悬浮层（水印、录屏边框之类），框它没意义。</td></tr>
+  <tr><td>被 DWM “隐藏”（cloaked）</td><td>其他虚拟桌面上的窗口、挂起的 UWP 应用，系统报告可见但其实不显示。</td></tr>
+  <tr><td>桌面窗口（<code>Progman</code> / <code>WorkerW</code>）</td><td><b>这次的问题就在这里</b>，见下一节。</td></tr>
+</table>
+<p>
+  窗口矩形优先取 DWM 的 <code>DWMWA_EXTENDED_FRAME_BOUNDS</code>，它是“眼睛看到的边框”，
+  不含 Windows 10/11 窗口外围那圈看不见的阴影；取不到再退回 <code>GetWindowRect</code>。
+</p>
+
+<h2>三、为什么桌面上选不到任何区域</h2>
+<div class="card callout">
+  <p><b>原因：</b>旧代码把桌面窗口整个排除了，但排除之后没有任何兜底。</p>
+  <p>
+    Windows 的桌面其实也是窗口：<code>Progman</code>（以及开了壁纸切换后多出来的 <code>WorkerW</code>），
+    它的矩形覆盖<b>所有显示器拼起来的整个虚拟桌面</b>。如果直接把它当候选，鼠标在桌面上时会一下选中两块屏幕的总和，
+    而且它会盖住其他所有判断，所以当初写的时候把它排除了。
+  </p>
+  <p>
+    排除本身没错，问题是第 3 步找不到候选时，代码直接把选框设成空矩形。结果就是：
+    鼠标在窗口上一切正常，一移到桌面，什么都选不到。
+  </p>
+</div>
+
+<div class="compare">
+  <div class="card">
+    <h3 style="margin-top:0">改之前</h3>
+    <svg viewBox="0 0 360 170" width="100%">
+      <rect x="10" y="20" width="165" height="110" rx="6" fill="#30323a" stroke="#46494f"/>
+      <rect x="185" y="20" width="165" height="110" rx="6" fill="#30323a" stroke="#46494f"/>
+      <text x="92" y="15" fill="#a4a8af" font-size="11" text-anchor="middle">显示器 1</text>
+      <text x="267" y="15" fill="#a4a8af" font-size="11" text-anchor="middle">显示器 2</text>
+      <rect x="30" y="40" width="80" height="55" rx="4" fill="#3b3d43" stroke="#5a5e66"/>
+      <text x="70" y="72" fill="#cbced3" font-size="10" text-anchor="middle">某个窗口</text>
+      <circle cx="140" cy="105" r="5" fill="#e5675f"/>
+      <text x="92" y="152" fill="#e5675f" font-size="12" text-anchor="middle">指针在桌面 → 没有候选 → 空框</text>
+    </svg>
+  </div>
+  <div class="card">
+    <h3 style="margin-top:0">改之后</h3>
+    <svg viewBox="0 0 360 170" width="100%">
+      <rect x="10" y="20" width="165" height="110" rx="6" fill="#2b354e" stroke="#5e8bf0" stroke-width="2"/>
+      <rect x="185" y="20" width="165" height="110" rx="6" fill="#30323a" stroke="#46494f"/>
+      <text x="92" y="15" fill="#a4a8af" font-size="11" text-anchor="middle">显示器 1</text>
+      <text x="267" y="15" fill="#a4a8af" font-size="11" text-anchor="middle">显示器 2</text>
+      <rect x="30" y="40" width="80" height="55" rx="4" fill="#3b3d43" stroke="#5a5e66"/>
+      <text x="70" y="72" fill="#cbced3" font-size="10" text-anchor="middle">某个窗口</text>
+      <circle cx="140" cy="105" r="5" fill="#5cbf83"/>
+      <rect x="240" y="40" width="26" height="30" rx="3" fill="none" stroke="#5e8bf0" stroke-width="1.5"/>
+      <text x="253" y="85" fill="#a4a8af" font-size="10" text-anchor="middle">图标</text>
+      <text x="180" y="152" fill="#5cbf83" font-size="12" text-anchor="middle">桌面 → 选中当前这块屏幕；悬停图标 → 吸到图标</text>
+    </svg>
+  </div>
+</div>
+
+<div class="card callout ok">
+  <p><b>改法：</b></p>
+  <ol>
+    <li><b>桌面按显示器拆开当候选。</b>枚举到桌面窗口时，只留下真正承载桌面图标的那一个（它下面有 <code>SHELLDLL_DefView</code> 子窗口），
+      然后给<b>每块显示器各加一个候选</b>：窗口还是同一个，矩形换成那块显示器的范围。因为桌面在 Z 序最底层，
+      只有指针下面没有任何普通窗口时才会命中它，正好就是“鼠标在桌面上”。</li>
+    <li><b>桌面图标照样能吸附。</b>候选里带着桌面窗口的句柄，第 4 步的控件精修会去它里面找图标，找到就把框缩到图标上。</li>
+    <li><b>再加一层兜底。</b>万一某些系统上找不到桌面窗口（比如装了改桌面的工具），指针下面没有任何候选时，直接选中指针所在的整块显示器，不会再出现空框。</li>
+  </ol>
+</div>
+
+<h2>四、第 3 步：鼠标命中和像素细分</h2>
+<p>鼠标每移动一次，<code>pointer::hover</code> 做三件事：</p>
+<ol>
+  <li>在候选列表里找<b>第一个</b>包含指针的（也就是最上层的窗口），把它的矩形裁到遮罩范围内，作为初始框。</li>
+  <li>在这个窗口里做一次<b>像素边缘检测</b>（<code>panel_edges::find_panel</code>）：从指针向左右各找一条“竖直分隔线”，
+    再向上下找“水平分隔线”。判断标准是沿着这条线均匀取 24 个采样点，至少 19 个点两侧颜色差异 ≥ 4，才算一条分隔线。
+    这样能把网页、聊天软件里的“一栏内容”单独框出来，哪怕它们没有暴露成控件。宽度不到 132、高度不到 100 的结果不要。</li>
+  <li>把候选的句柄和指针位置发给后台线程，请它做第 4 步。</li>
+</ol>
+<p class="faint">为了省 CPU：指针还在上次检测出的区域里就直接复用；离上次检测点不到 24 像素时也不重新检测。</p>
+
+<h2>五、第 4 步：控件精修</h2>
+<p>
+  后台线程收到请求后，在 100 毫秒的时间预算里依次尝试三种办法，越往后越慢、越通用：
+</p>
+<table>
+  <tr><th>顺序</th><th>办法</th><th>擅长什么</th></tr>
+  <tr><td>1</td><td>子窗口 <code>ChildWindowFromPointEx</code></td><td>传统 Win32 程序，每个控件就是一个子窗口，最快。</td></tr>
+  <tr><td>2</td><td>MSAA <code>IAccessible::accHitTest</code></td><td>老式无障碍接口，很多自绘控件也支持。</td></tr>
+  <tr><td>3</td><td>UI Automation 逐层找子元素</td><td>浏览器、现代应用（包括桌面图标）。最多下探 32 层、每层最多 384 个子元素。</td></tr>
+</table>
+<p>
+  每个结果会被标成<span class="tag">强</span>或<span class="tag warn">弱</span>：
+  面积达到整个窗口 90% 以上的（基本等于整个窗口，没意义），或者是纯文本元素（框一行字通常不是想要的），算“弱”。
+  有强结果就用强的，没有才退回弱的。
+</p>
+<p>结果回到主线程后（<code>pointer::refine_target</code>），最终框这样决定：</p>
+<ul>
+  <li>如果第 3 步的像素细分结果<b>完全落在</b>控件框里面，并且比控件框小 20% 以上，用像素细分的结果（更贴合内容）。</li>
+  <li>如果控件结果是“弱”的，也优先用像素细分结果。</li>
+  <li>否则用控件框。</li>
+  <li>结果回来时如果鼠标已经移到别的窗口上，这个结果直接丢掉，不会把框拉回去。</li>
+</ul>
+
+<h2>六、选框锁定之后</h2>
+<table>
+  <tr><th>操作</th><th>效果</th></tr>
+  <tr><td>左键单击</td><td>锁定当前预选框，出现工具栏。</td></tr>
+  <tr><td>左键拖动</td><td>不管预选框，拖出一个自由矩形。</td></tr>
+  <tr><td><code>Ctrl+A</code></td><td>直接选中指针所在的整块显示器并锁定。</td></tr>
+  <tr><td>拖动框内 / 边线 / 四角</td><td>移动或缩放，每次拖动都进撤回历史，<code>Ctrl+Z</code> / <code>Ctrl+Y</code> 可以撤回重做。</td></tr>
+  <tr><td>右键</td><td>清掉选框，回到自动预选；再按一次右键退出。</td></tr>
+</table>
+
+<h2>七、我怎么验证</h2>
+<ul>
+  <li>候选枚举加了一个只在桌面会话里手动跑的检查：枚举出来的候选里，必须有和每块显示器大小完全一致的项（也就是桌面）。</li>
+  <li>选框移动的撤回重做、<code>Ctrl+A</code> 选中整屏都有自动测试。</li>
+  <li><span class="tag warn">待验证</span>悬停桌面图标是否能吸附，要在真实桌面上看一眼：不同 Windows 版本桌面图标的无障碍树不一样。</li>
+</ul>
+
+</main>
+</body>
+</html>

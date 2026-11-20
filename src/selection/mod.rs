@@ -43,7 +43,7 @@ use crate::{
     },
     show_error,
     targets::{self, ElementProbe, Request, WindowTarget, ELEMENT_READY},
-    text_mark::{TextHandle, TextMark},
+    text_mark::{handle_cursor, TextHandle, TextMark},
     text_render::{self, PRINT_BACKGROUND},
     toolbar::{paint_size_badge, paint_tooltip, Action, Toolbar},
     typography,

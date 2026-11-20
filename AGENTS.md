@@ -77,6 +77,8 @@ The overlay follows Snipaste's layout:
 | `%LOCALAPPDATA%\Snapshot\hotkey.txt` | Legacy capture shortcut, migrated on first run |
 | `HKCU\...\Run\Snapshot` | Start-at-login command, pointing at the running executable |
 
+Launch Snapshot for testing through the shell (`explorer.exe <path to snapshot.exe>`), never as a direct child of a packaged (MSIX) app such as the Codex desktop app. A child of a packaged app inherits its package identity, so its `%LOCALAPPDATA%` and `HKCU` writes go into the package's private store (`%LOCALAPPDATA%\Packages\<package>\LocalCache\...`): the settings it saves are invisible to a normal launch and the start-at-login entry never reaches the real `Run` key.
+
 A capture hotkey conflict must never stop the app or open a modal dialog. The tray icon switches to the warning badge, the tooltip names the conflict, one non-modal notification is shown (clicking it opens settings), and the tray menu gets a "change shortcut" item. Registration is retried whenever the tray menu or settings opens. Saving an occupied shortcut is allowed; the settings window shows the conflict live before saving.
 
 ## Settings Window

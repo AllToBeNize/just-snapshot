@@ -65,6 +65,7 @@ pub(super) unsafe fn begin_editor_drag(window: HWND, point: POINT) -> bool {
         return false;
     };
     let bounds = frame.bounds();
+    let frame_angle = frame.angle();
     suppress_native_caret(editor);
     let value = read_editor_text(editor);
     let (preview, caret) = if matches!(handle, TextHandle::Rotate) {
@@ -105,7 +106,7 @@ pub(super) unsafe fn begin_editor_drag(window: HWND, point: POINT) -> bool {
     SetFocus(window);
     InvalidateRect(window, &bounds, 0);
     refresh_options(window);
-    SetCursor(LoadCursorW(null_mut(), text_handle_cursor(handle)));
+    SetCursor(LoadCursorW(null_mut(), handle_cursor(handle, frame_angle)));
     true
 }
 
@@ -504,16 +505,16 @@ pub(super) unsafe extern "system" fn text_proc(
     };
     if message == WM_SETCURSOR {
         let mut point = POINT::default();
-        let handle = if GetCursorPos(&mut point) != 0 && ScreenToClient(parent, &mut point) != 0 {
-            SESSION
-                .with_borrow(|session| session.as_ref()?.editor.as_ref()?.frame().hit_chrome(point))
+        let cursor = if GetCursorPos(&mut point) != 0 && ScreenToClient(parent, &mut point) != 0 {
+            SESSION.with_borrow(|session| {
+                let frame = session.as_ref()?.editor.as_ref()?.frame();
+                let handle = frame.hit_chrome(point)?;
+                Some(handle_cursor(handle, frame.angle()))
+            })
         } else {
             None
         };
-        SetCursor(LoadCursorW(
-            null_mut(),
-            handle.map_or(IDC_IBEAM, text_handle_cursor),
-        ));
+        SetCursor(LoadCursorW(null_mut(), cursor.unwrap_or(IDC_IBEAM)));
         return 1;
     }
     if !from_overlay

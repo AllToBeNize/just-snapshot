@@ -76,6 +76,11 @@ pub(super) unsafe fn hover(window: HWND, point: POINT) {
             selection.rect = target
                 .and_then(|target| overlay_rect(target.rect, desktop))
                 .map(|bounds| visual_region(selection, bounds, point).unwrap_or(bounds))
+                // Nothing under the pointer: fall back to its whole monitor.
+                .or_else(|| {
+                    monitor_info(screen_point)
+                        .and_then(|info| overlay_rect(info.rcMonitor, desktop))
+                })
                 .unwrap_or_default();
         }
         selection.target = id;
@@ -315,16 +320,18 @@ pub(super) unsafe fn update_cursor(point: POINT) {
         let text_handle = selection
             .text_drag
             .as_ref()
-            .map(|drag| drag.handle)
+            .map(|drag| (drag.handle, drag.original.angle()))
             .or_else(|| {
                 if let Some(editor) = &selection.editor {
-                    editor.frame().hit_chrome(point)
+                    let frame = editor.frame();
+                    frame.hit_chrome(point).map(|handle| (handle, frame.angle()))
                 } else {
-                    selection.selected_text().and_then(|text| text.hit(point))
+                    let text = selection.selected_text()?;
+                    text.hit(point).map(|handle| (handle, text.angle()))
                 }
             });
-        if let Some(handle) = text_handle {
-            return system(text_handle_cursor(handle));
+        if let Some((handle, angle)) = text_handle {
+            return system(handle_cursor(handle, angle));
         }
         if selection
             .editor
@@ -393,15 +400,6 @@ pub(super) unsafe fn update_cursor(point: POINT) {
         })
     });
     SetCursor(cursor);
-}
-
-pub(super) fn text_handle_cursor(handle: TextHandle) -> *const u16 {
-    match handle {
-        TextHandle::Move => IDC_SIZEALL,
-        TextHandle::Scale(x, y) if x == y => IDC_SIZENWSE,
-        TextHandle::Scale(..) => IDC_SIZENESW,
-        TextHandle::Rotate => IDC_HAND,
-    }
 }
 
 pub(super) unsafe fn update_cursor_at_pointer(window: HWND) {
