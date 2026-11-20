@@ -531,6 +531,8 @@ unsafe extern "system" fn window_proc(
                 if lparam & (1 << 30) == 0 {
                     command(window, action);
                 }
+            } else if modifiers == 0 && key == u32::from(b'C') {
+                copy_color(window);
             } else if modifiers == MOD_CONTROL && key == u32::from(b'A') {
                 // Fixed shortcut, used only when no binding claims Ctrl+A.
                 select_screen(window);

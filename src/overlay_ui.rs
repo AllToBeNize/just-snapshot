@@ -30,7 +30,9 @@ const SAMPLE_WIDTH: i32 = 33;
 const SAMPLE_HEIGHT: i32 = 25;
 const BORDER: i32 = 2;
 const LOUPE_WIDTH: i32 = SAMPLE_WIDTH * ZOOM + BORDER * 2;
-const LOUPE_HEIGHT: i32 = SAMPLE_HEIGHT * ZOOM + BORDER * 2;
+/// The strip under the magnified pixels with the color under the pointer.
+const COLOR_STRIP: i32 = 24;
+const LOUPE_HEIGHT: i32 = SAMPLE_HEIGHT * ZOOM + BORDER * 2 + COLOR_STRIP;
 const POINTER_GAP: i32 = 18;
 
 pub unsafe fn monitor_info(cursor: POINT) -> Option<MONITORINFO> {
@@ -120,6 +122,24 @@ impl HintMode {
                     &[
                         (Mouse(Icon::Drag), w!("涂抹马赛克")),
                         (Bound(Binding::Mosaic), w!("退出马赛克工具")),
+                        (Bound(Binding::Undo), w!("撤回标注")),
+                    ]
+                }
+            }
+            Self::Annotate(Tool::Arrow) => {
+                const {
+                    &[
+                        (Mouse(Icon::Drag), w!("从起点拖到箭头指向")),
+                        (Bound(Binding::Arrow), w!("退出箭头工具")),
+                        (Bound(Binding::Undo), w!("撤回标注")),
+                    ]
+                }
+            }
+            Self::Annotate(Tool::Number) => {
+                const {
+                    &[
+                        (Mouse(Icon::MouseLeft), w!("放下下一个序号")),
+                        (Bound(Binding::Number), w!("退出序号工具")),
                         (Bound(Binding::Undo), w!("撤回标注")),
                     ]
                 }
@@ -406,6 +426,13 @@ impl HintPanel {
 pub struct Loupe {
     pub bounds: RECT,
     pub point: POINT,
+    /// The color was just copied with C.
+    pub copied: bool,
+}
+
+/// `#RRGGBB` for a GDI `COLORREF`.
+pub fn hex(color: u32) -> String {
+    format!("#{:02X}{:02X}{:02X}", color & 0xff, (color >> 8) & 0xff, (color >> 16) & 0xff)
 }
 
 impl Loupe {
@@ -432,7 +459,46 @@ impl Loupe {
                 bottom: top + LOUPE_HEIGHT,
             },
             point,
+            copied: false,
         })
+    }
+
+    /// Swatch, hex value and the C shortcut under the magnified pixels.
+    unsafe fn paint_color(self, dc: HDC, color: u32) {
+        let strip = RECT {
+            left: self.bounds.left + BORDER,
+            top: self.bounds.bottom - BORDER - COLOR_STRIP,
+            right: self.bounds.right - BORDER,
+            bottom: self.bounds.bottom - BORDER,
+        };
+        let palette = theme::palette();
+        SetDCBrushColor(dc, palette.tooltip);
+        FillRect(dc, &strip, GetStockObject(DC_BRUSH));
+        let swatch = RECT {
+            left: strip.left + 5,
+            top: strip.top + 5,
+            right: strip.left + 5 + COLOR_STRIP - 10,
+            bottom: strip.bottom - 5,
+        };
+        SetDCBrushColor(dc, color);
+        FillRect(dc, &swatch, GetStockObject(DC_BRUSH));
+        FrameRect(dc, &swatch, GetStockObject(WHITE_BRUSH));
+        let previous = SelectObject(dc, typography::font(TextStyle::HintDescription));
+        SetBkMode(dc, TRANSPARENT as i32);
+        let mut value = RECT { left: swatch.right + 6, ..strip };
+        SetTextColor(dc, palette.tooltip_text);
+        let text: Vec<u16> = hex(color).encode_utf16().chain([0]).collect();
+        DrawTextW(dc, text.as_ptr(), -1, &mut value, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+        let mut hint = RECT { right: strip.right - 6, ..strip };
+        SetTextColor(dc, if self.copied { palette.success } else { mix(palette.tooltip, palette.tooltip_text, 0.6) });
+        DrawTextW(
+            dc,
+            if self.copied { w!("已复制") } else { w!("C 复制") },
+            -1,
+            &mut hint,
+            DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
+        );
+        SelectObject(dc, previous);
     }
 
     pub unsafe fn paint(self, dc: HDC, source: HDC, canvas: RECT) {
@@ -448,6 +514,7 @@ impl Loupe {
         };
         let left = self.bounds.left + BORDER;
         let top = self.bounds.top + BORDER;
+        let color = GetPixel(source, self.point.x, self.point.y);
         if let Some(visible) = intersect(sample, canvas) {
             SetStretchBltMode(dc, COLORONCOLOR);
             StretchBlt(
@@ -520,6 +587,7 @@ impl Loupe {
             },
             white,
         );
+        self.paint_color(dc, color);
     }
 }
 
@@ -581,11 +649,25 @@ mod tests {
             let loupe = Loupe::new(POINT { x: 100, y: 100 }, canvas).unwrap();
             loupe.paint(rendered.dc, source.dc, canvas);
             let x = loupe.bounds.left + LOUPE_WIDTH / 2;
-            let y = loupe.bounds.top + LOUPE_HEIGHT / 2;
+            let y = loupe.bounds.top + (LOUPE_HEIGHT - COLOR_STRIP) / 2;
             assert_eq!(GetPixel(rendered.dc, x - 20, y), 0x00ff_ffff);
             assert_eq!(GetPixel(rendered.dc, x, y - 20), 0x00ff_ffff);
             assert_eq!(GetPixel(rendered.dc, x - 20, y - 1), 0);
             assert_eq!(GetPixel(rendered.dc, x, y), source_color);
+            // The strip below shows the picked color as a swatch and in hex.
+            let strip = loupe.bounds.bottom - BORDER - COLOR_STRIP / 2;
+            assert_eq!(GetPixel(rendered.dc, loupe.bounds.left + BORDER + 12, strip), source_color);
+            assert_eq!(hex(source_color), "#F5C85A");
+            if std::env::var_os("SNAPSHOT_PREVIEW").is_some() {
+                let bounds = loupe.bounds;
+                let mut image = crate::capture::Desktop { bounds: canvas, surface: rendered }.crop(bounds).unwrap();
+                for pixel in image.pixels.chunks_exact_mut(4) {
+                    pixel[3] = 255;
+                }
+                let folder = std::env::temp_dir().join("snapshot-preview");
+                std::fs::create_dir_all(&folder).unwrap();
+                image.save_png(&folder.join("loupe.png")).unwrap();
+            }
         }
     }
 

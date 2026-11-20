@@ -53,9 +53,12 @@ pub(super) unsafe fn update_annotation(window: HWND, point: POINT, end: bool) ->
                 None,
                 TextMark::new(draft.text_rect(clip), style.text_size, style.text_color),
             );
-        } else if let Some(mark) = draft.finish() {
+        } else {
             SESSION.with_borrow_mut(|session| {
-                session.as_mut().unwrap().annotations.push(mark);
+                let annotations = &mut session.as_mut().unwrap().annotations;
+                if let Some(mark) = draft.finish(annotations.next_number()) {
+                    annotations.push(mark);
+                }
             });
         }
         invalidate_toolbar(window);

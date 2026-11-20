@@ -54,7 +54,15 @@ impl Choice {
             (Tool::Text, Self::Primary(step)) => {
                 style.text_size = (style.text_size + step * 2).clamp(8, 128)
             }
+            (Tool::Arrow, Self::Primary(step)) => {
+                style.arrow_width = (style.arrow_width + step).clamp(1, 32)
+            }
+            (Tool::Number, Self::Primary(step)) => {
+                style.number_size = (style.number_size + step * 4).clamp(16, 96)
+            }
             (Tool::Text, Self::Color(color)) => style.text_color = color,
+            (Tool::Arrow, Self::Color(color)) => style.arrow_color = color,
+            (Tool::Number, Self::Color(color)) => style.number_color = color,
             (Tool::Brush, Self::Color(color)) => style.brush_color = color,
             _ => {}
         }
@@ -160,6 +168,8 @@ impl Options {
             Tool::Brush => (w!("粗细"), style.brush_width, style.brush_color),
             Tool::Mosaic => (w!("粗细"), style.mosaic_width, 0),
             Tool::Text => (w!("字号"), style.text_size, style.text_color),
+            Tool::Arrow => (w!("粗细"), style.arrow_width, style.arrow_color),
+            Tool::Number => (w!("大小"), style.number_size, style.number_color),
             Tool::Rectangle => unreachable!(),
         };
         label(dc, self.cell(0, 31), name);

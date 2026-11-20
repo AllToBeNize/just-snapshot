@@ -4,7 +4,7 @@ use windows_sys::Win32::{
     Graphics::Gdi::*,
 };
 
-use crate::{capture::Desktop, mosaic::Mosaic, text_mark::TextMark};
+use crate::{capture::Desktop, gdiplus::Graphics, icons::Seg, mosaic::Mosaic, text_mark::TextMark, theme::argb, wide};
 
 pub const INK: u32 = 0x0038_46ff;
 
@@ -14,6 +14,9 @@ pub enum Tool {
     Text,
     Brush,
     Mosaic,
+    Arrow,
+    /// Numbered circles that count up: ①②③.
+    Number,
 }
 
 #[derive(Clone, Copy)]
@@ -24,6 +27,11 @@ pub struct Style {
     pub mosaic_block: i32,
     pub text_size: i32,
     pub text_color: u32,
+    pub arrow_width: i32,
+    pub arrow_color: u32,
+    /// Diameter of a step number.
+    pub number_size: i32,
+    pub number_color: u32,
 }
 
 impl Default for Style {
@@ -35,6 +43,10 @@ impl Default for Style {
             mosaic_block: 12,
             text_size: 20,
             text_color: INK,
+            arrow_width: 4,
+            arrow_color: INK,
+            number_size: 28,
+            number_color: INK,
         }
     }
 }
@@ -53,6 +65,18 @@ pub enum Mark {
     Text(TextMark),
     Brush(Vec<POINT>, i32, u32),
     Mosaic(Mosaic),
+    Arrow {
+        from: POINT,
+        to: POINT,
+        width: i32,
+        color: u32,
+    },
+    Number {
+        center: POINT,
+        value: u32,
+        size: i32,
+        color: u32,
+    },
 }
 
 enum Edit {
@@ -98,6 +122,19 @@ impl History {
     pub fn record_region(&mut self, previous: RECT) {
         self.redo.clear();
         self.undo.push(Edit::Region(previous));
+    }
+
+    /// The value the next step number gets: one more than the largest so far.
+    pub fn next_number(&self) -> u32 {
+        self.marks
+            .iter()
+            .filter_map(|mark| match mark {
+                Mark::Number { value, .. } => Some(*value),
+                _ => None,
+            })
+            .max()
+            .unwrap_or(0)
+            + 1
     }
 
     pub fn push(&mut self, mark: Mark) -> usize {
@@ -204,6 +241,8 @@ impl History {
                     draft.style.brush_color,
                 ),
                 Tool::Mosaic => draft.mosaic.paint(dc),
+                Tool::Arrow => arrow(dc, draft.start, draft.end, draft.style.arrow_width, draft.style.arrow_color),
+                Tool::Number => number(dc, draft.end, self.next_number(), draft.style.number_size, draft.style.number_color),
                 _ => outline(dc, draft.rect()),
             }
         }
@@ -258,6 +297,9 @@ impl Draft {
         }
         match self.tool {
             Tool::Brush | Tool::Mosaic => self.stroke_bounds(previous, point),
+            // The number follows the pointer until release.
+            Tool::Number => join(self.stroke_bounds(previous, previous), self.stroke_bounds(point, point)),
+            Tool::Arrow => padded(join(old_rect, self.rect()), arrow_head(self.style.arrow_width) + 2),
             _ => padded(join(old_rect, self.rect()), 3),
         }
     }
@@ -270,6 +312,8 @@ impl Draft {
         let pad = match self.tool {
             Tool::Brush => self.style.brush_width / 2 + 2,
             Tool::Mosaic => self.style.mosaic_width / 2 + 2,
+            Tool::Number => self.style.number_size / 2 + 3,
+            Tool::Arrow => arrow_head(self.style.arrow_width) + 2,
             _ => 3,
         };
         padded(between(a, b), pad)
@@ -294,7 +338,8 @@ impl Draft {
         }
     }
 
-    pub fn finish(self) -> Option<Mark> {
+    /// `next_number` is the value a step number gets.
+    pub fn finish(self, next_number: u32) -> Option<Mark> {
         match self.tool {
             Tool::Rectangle => ((self.start.x, self.start.y) != (self.end.x, self.end.y))
                 .then(|| Mark::Rectangle(self.rect())),
@@ -304,6 +349,21 @@ impl Draft {
                 self.style.brush_color,
             )),
             Tool::Mosaic => self.mosaic.finish().map(Mark::Mosaic),
+            // A click or a tiny drag is not an arrow.
+            Tool::Arrow => ((self.end.x - self.start.x).pow(2) + (self.end.y - self.start.y).pow(2) >= 64).then_some(
+                Mark::Arrow {
+                    from: self.start,
+                    to: self.end,
+                    width: self.style.arrow_width,
+                    color: self.style.arrow_color,
+                },
+            ),
+            Tool::Number => Some(Mark::Number {
+                center: self.end,
+                value: next_number,
+                size: self.style.number_size,
+                color: self.style.number_color,
+            }),
             Tool::Text => None,
         }
     }
@@ -316,8 +376,101 @@ impl Mark {
             Self::Brush(points, width, color) => stroke(dc, points, *width, *color),
             Self::Mosaic(mosaic) => mosaic.paint(dc),
             Self::Text(text) => text.paint(dc),
+            Self::Arrow { from, to, width, color } => arrow(dc, *from, *to, *width, *color),
+            Self::Number { center, value, size, color } => number(dc, *center, *value, *size, *color),
         }
     }
+}
+
+/// Length of an arrowhead for a shaft of `width`.
+fn arrow_head(width: i32) -> i32 {
+    (width * 4 + 6).max(16)
+}
+
+/// A straight shaft ending in a solid, slightly swept-back head.
+unsafe fn arrow(dc: HDC, from: POINT, to: POINT, width: i32, color: u32) {
+    let Some(graphics) = Graphics::new(dc) else { return };
+    let (dx, dy) = ((to.x - from.x) as f32, (to.y - from.y) as f32);
+    let length = (dx * dx + dy * dy).sqrt();
+    if length < 1.0 {
+        return;
+    }
+    let (ux, uy) = (dx / length, dy / length);
+    let head = (arrow_head(width) as f32).min(length);
+    let half = head * 0.5;
+    let (tx, ty) = (to.x as f32, to.y as f32);
+    let (bx, by) = (tx - ux * head, ty - uy * head);
+    // The notch keeps the head from looking like a plain triangle.
+    let (nx, ny) = (tx - ux * head * 0.78, ty - uy * head * 0.78);
+    let fill = argb(color, 255);
+    graphics.fill_segments(
+        &[
+            Seg::M(tx, ty),
+            Seg::L(bx - uy * half, by + ux * half),
+            Seg::L(nx, ny),
+            Seg::L(bx + uy * half, by - ux * half),
+            Seg::Z,
+        ],
+        1.0,
+        fill,
+    );
+    // Round caps on the tail; the end tucks under the head.
+    graphics.stroke_segments(
+        &[Seg::M(from.x as f32, from.y as f32), Seg::L(nx + ux, ny + uy)],
+        1.0,
+        fill,
+        width as f32,
+    );
+}
+
+/// A filled circle with its number in white (dark on light colors).
+unsafe fn number(dc: HDC, center: POINT, value: u32, size: i32, color: u32) {
+    let radius = size as f32 / 2.0;
+    let (cx, cy) = (center.x as f32, center.y as f32);
+    let (r, g, b) = ((color & 0xff) as f32, ((color >> 8) & 0xff) as f32, ((color >> 16) & 0xff) as f32);
+    let light = 0.299 * r + 0.587 * g + 0.114 * b > 186.0;
+    if let Some(graphics) = Graphics::new(dc) {
+        graphics.fill_ellipse([cx - radius, cy - radius, cx + radius, cy + radius], argb(color, 255));
+        // A thin contrasting ring keeps it readable on any background.
+        let ring = if light { argb(0x0022_2222, 150) } else { argb(0x00ff_ffff, 200) };
+        graphics.stroke_round(
+            [cx - radius, cy - radius, cx + radius, cy + radius],
+            radius,
+            ring,
+            (size as f32 / 14.0).max(1.5),
+        );
+    }
+    let digits = value.to_string();
+    let scale = if digits.len() > 1 { 0.5 } else { 0.62 };
+    let font = CreateFontW(
+        -((size as f32 * scale).round() as i32),
+        0,
+        0,
+        0,
+        FW_BOLD as i32,
+        0,
+        0,
+        0,
+        DEFAULT_CHARSET as u32,
+        OUT_DEFAULT_PRECIS as u32,
+        CLIP_DEFAULT_PRECIS as u32,
+        ANTIALIASED_QUALITY as u32,
+        DEFAULT_PITCH as u32,
+        windows_sys::core::w!("Segoe UI"),
+    );
+    let previous = SelectObject(dc, font);
+    SetBkMode(dc, TRANSPARENT as i32);
+    SetTextColor(dc, if light { 0x0022_2222 } else { 0x00ff_ffff });
+    let mut rect = RECT {
+        left: center.x - size,
+        top: center.y - size,
+        right: center.x + size + 1,
+        bottom: center.y + size + 1,
+    };
+    let text = wide(&digits);
+    DrawTextW(dc, text.as_ptr(), -1, &mut rect, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+    SelectObject(dc, previous);
+    DeleteObject(font);
 }
 
 fn between(a: POINT, b: POINT) -> RECT {
@@ -454,6 +607,93 @@ mod tests {
         assert!(history.text(text_index) == Some(&moved));
     }
 
+    /// Arrows and step numbers in every color. Run with `<test binary> annotation --ignored`.
+    #[test]
+    #[ignore]
+    fn preview() {
+        unsafe {
+            let (width, height) = (520, 200);
+            let clip = RECT { right: width, bottom: height, ..Default::default() };
+            let surface = Surface::new(null_mut(), width, height).unwrap();
+            FillRect(surface.dc, &clip, GetStockObject(WHITE_BRUSH));
+            let colors = [INK, 0x0031_91ff, 0x0000_c8f3, 0x0061_a825, 0x00ed_7a25, 0x00c4_4e84, 0x0022_2222, 0x00ff_ffff];
+            let mut history = History::default();
+            for (index, color) in colors.into_iter().enumerate() {
+                let x = 30 + index as i32 * 62;
+                history.push(Mark::Arrow {
+                    from: POINT { x, y: 150 },
+                    to: POINT { x: x + 40, y: 90 },
+                    width: 2 + index as i32,
+                    color,
+                });
+                history.push(Mark::Number { center: POINT { x: x + 10, y: 40 }, value: history.next_number(), size: 22 + index as i32 * 2, color });
+            }
+            history.push(Mark::Number { center: POINT { x: 490, y: 160 }, value: 12, size: 30, color: INK });
+            history.paint(surface.dc, clip, false, None);
+            GdiFlush();
+            let mut image = Desktop { bounds: clip, surface }.crop(clip).unwrap();
+            for pixel in image.pixels.chunks_exact_mut(4) {
+                pixel[3] = 255;
+            }
+            let folder = std::env::temp_dir().join("snapshot-preview");
+            std::fs::create_dir_all(&folder).unwrap();
+            image.save_png(&folder.join("annotation-arrow-number.png")).unwrap();
+        }
+    }
+
+    #[test]
+    fn step_numbers_count_up_and_follow_undo() {
+        unsafe {
+            let clip = RECT { right: 200, bottom: 120, ..Default::default() };
+            let source = Desktop { bounds: clip, surface: Surface::new(null_mut(), 200, 120).unwrap() };
+            let mut history = History::default();
+            let place = |history: &mut History, x: i32| {
+                let mut draft = Draft::new(Tool::Number, POINT { x, y: 40 }, Style::default(), clip, &source);
+                // A drag moves the number before it lands.
+                draft.update(POINT { x: x + 10, y: 50 }, clip, &source);
+                history.push(draft.finish(history.next_number()).unwrap());
+            };
+            place(&mut history, 20);
+            place(&mut history, 70);
+            assert_eq!(history.next_number(), 3);
+            assert!(matches!(history.marks[1], Mark::Number { value: 2, center: POINT { x: 80, y: 50 }, .. }));
+            history.undo(&mut RECT::default());
+            assert_eq!(history.next_number(), 2, "undo frees the number");
+            place(&mut history, 120);
+            assert!(matches!(history.marks[1], Mark::Number { value: 2, .. }));
+
+            // Painted: a filled circle with a white digit in the middle.
+            let target = Surface::new(null_mut(), 200, 120).unwrap();
+            FillRect(target.dc, &clip, GetStockObject(WHITE_BRUSH));
+            history.paint(target.dc, clip, false, None);
+            GdiFlush();
+            assert_eq!(GetPixel(target.dc, 30 - 10, 50), INK, "inside the first circle");
+        }
+    }
+
+    #[test]
+    fn arrows_need_a_real_drag_and_point_at_the_end() {
+        unsafe {
+            let clip = RECT { right: 200, bottom: 120, ..Default::default() };
+            let source = Desktop { bounds: clip, surface: Surface::new(null_mut(), 200, 120).unwrap() };
+            let click = Draft::new(Tool::Arrow, POINT { x: 50, y: 50 }, Style::default(), clip, &source);
+            assert!(click.finish(1).is_none(), "a click is not an arrow");
+            let mut draft = Draft::new(Tool::Arrow, POINT { x: 20, y: 60 }, Style::default(), clip, &source);
+            let dirty = draft.update(POINT { x: 180, y: 60 }, clip, &source);
+            assert!(dirty.right >= 180 + 11 && dirty.top <= 60 - 11, "the head is repainted");
+            let mut history = History::default();
+            history.push(draft.finish(1).unwrap());
+            let target = Surface::new(null_mut(), 200, 120).unwrap();
+            FillRect(target.dc, &clip, GetStockObject(WHITE_BRUSH));
+            history.paint(target.dc, clip, false, None);
+            GdiFlush();
+            assert_eq!(GetPixel(target.dc, 60, 60), INK, "shaft");
+            assert_eq!(GetPixel(target.dc, 172, 60), INK, "head");
+            assert_eq!(GetPixel(target.dc, 168, 65), INK, "head is wider than the shaft");
+            assert_eq!(GetPixel(target.dc, 60, 65), 0x00ff_ffff, "shaft stays thin");
+        }
+    }
+
     #[test]
     fn mosaic_stroke_covers_sparse_pointer_samples_and_only_the_brushed_area() {
         unsafe {
@@ -487,7 +727,7 @@ mod tests {
             );
             draft.update(POINT { x: 105, y: 40 }, clip, &source);
             let mut history = History::default();
-            history.push(draft.finish().unwrap());
+            history.push(draft.finish(1).unwrap());
             history.paint(target.dc, clip, false, None);
             assert_eq!(GetPixel(target.dc, 15, 40), 0x0080_8080);
             assert_eq!(GetPixel(target.dc, 20, 40), 0x0080_8080);

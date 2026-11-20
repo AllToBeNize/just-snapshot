@@ -47,6 +47,8 @@ impl Action {
             Binding::Pin => Self::Pin,
             Binding::ExtractText => Self::ExtractText,
             Binding::Translate => Self::Translate,
+            Binding::Arrow => Self::Tool(Tool::Arrow),
+            Binding::Number => Self::Tool(Tool::Number),
         })
     }
 
@@ -60,11 +62,13 @@ impl Action {
 }
 
 // Snipaste-style order: drawing tools | history | text | output, ending with exit and copy.
-pub const ACTIONS: [Action; 13] = [
+pub const ACTIONS: [Action; 15] = [
     Action::Tool(Tool::Rectangle),
     Action::Tool(Tool::Text),
     Action::Tool(Tool::Brush),
     Action::Tool(Tool::Mosaic),
+    Action::Tool(Tool::Arrow),
+    Action::Tool(Tool::Number),
     Action::Undo,
     Action::Redo,
     Action::ExtractText,
@@ -80,6 +84,8 @@ const LABELS: [*const u16; ACTIONS.len()] = [
     w!("文本"),
     w!("画笔"),
     w!("马赛克"),
+    w!("箭头"),
+    w!("序号"),
     w!("撤回"),
     w!("重做"),
     w!("提取文本"),
@@ -91,7 +97,7 @@ const LABELS: [*const u16; ACTIONS.len()] = [
     w!("复制"),
 ];
 /// Indexes of the first button in every group after the first.
-const GROUP_STARTS: [usize; 3] = [4, 6, 8];
+const GROUP_STARTS: [usize; 3] = [6, 8, 10];
 const OFFSET: i32 = 8;
 const GROUP_GAP: i32 = 11;
 const PADDING: i32 = 4;
@@ -354,6 +360,8 @@ fn action_icon(action: Action) -> Icon {
         Action::Tool(Tool::Text) => Icon::Text,
         Action::Tool(Tool::Brush) => Icon::Brush,
         Action::Tool(Tool::Mosaic) => Icon::Mosaic,
+        Action::Tool(Tool::Arrow) => Icon::Arrow,
+        Action::Tool(Tool::Number) => Icon::Number,
         Action::Undo => Icon::Undo,
         Action::Redo => Icon::Redo,
         Action::ScrollCapture => Icon::LongCapture,
@@ -392,9 +400,9 @@ mod tests {
             ..Default::default()
         };
         let selection = RECT {
-            left: 380,
+            left: 200,
             top: 120,
-            right: 820,
+            right: 700,
             bottom: 390,
         };
         let toolbar = Toolbar::new(selection, area).unwrap();

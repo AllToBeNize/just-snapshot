@@ -47,16 +47,17 @@ const EASE: f32 = 0.32;
 const PULSE_MS: f32 = 1100.0;
 
 // Layout in 96-DPI pixels.
-const WIDTH: i32 = 620;
+const WIDTH: i32 = 820;
 const PAD: i32 = 24;
 const HEADER: i32 = 52;
 const LABEL: i32 = 22;
 const SECTION_GAP: i32 = 14;
 const HERO: i32 = 124;
-const ROW: i32 = 35;
-const ROWS: i32 = 6;
+const ROW: i32 = 38;
+const ROWS: i32 = 5;
+const COLUMNS: i32 = 3;
 const CARD_INSET: i32 = 6;
-const GENERAL_ROW: i32 = 48;
+const GENERAL_ROW: i32 = 52;
 const GENERAL_ROWS: i32 = 3;
 const FOOTER: i32 = 60;
 const HERO_KEYS: i32 = 220;
@@ -268,7 +269,7 @@ impl Layout {
         );
         let clear_left = WIDTH - PAD - 16 - HERO_KEYS - 6 - 28;
         let clear = rect(clear_left, hero_top + 81, clear_left + 28, hero_top + 81 + 28);
-        let column = (WIDTH - PAD * 2 - CARD_INSET * 2) / 2;
+        let column = (WIDTH - PAD * 2 - CARD_INSET * 2) / COLUMNS;
         for index in 1..BINDINGS.len() {
             let slot = (index - 1) as i32;
             let left = PAD + CARD_INSET + (slot / ROWS) * column;
@@ -278,14 +279,14 @@ impl Layout {
             keys[index] = rect(right - ROW_KEYS, top + 6, right, top + ROW - 6);
         }
 
-        // After the "翻译" label: icon 12 + 20, gap 10, two 14 px characters, gap 6.
+        // A gear after the "翻译" label: icon 12 + 20, gap 10, two 14 px characters, gap 4.
         let translate_row = rows[Binding::Translate as usize];
-        let service_left = translate_row.left + s(12 + 20 + 10 + 28 + 6);
+        let service_left = translate_row.left + s(12 + 20 + 10 + 28 + 4);
         let service_top = (translate_row.top + translate_row.bottom) / 2 - s(12);
         let service = RECT {
             left: service_left,
             top: service_top,
-            right: service_left + s(64),
+            right: service_left + s(24),
             bottom: service_top + s(24),
         };
 
@@ -988,7 +989,7 @@ impl<'a> Painter<'a> {
         icons::paint(self.dc, icon, Icon::Close, color);
     }
 
-    /// A small link to the translation service window, after the "翻译" label.
+    /// A small gear after the "翻译" label that opens the translation service window.
     unsafe fn service_link(&self) {
         let rect = self.layout.service;
         let hover = self.hover(Target::Service);
@@ -998,8 +999,8 @@ impl<'a> Painter<'a> {
                 graphics.fill_round(ui::to_f(rect), self.f(6.0), argb(face, 255));
             }
         }
-        let color = mix(self.palette.accent, self.palette.accent_hover, hover);
-        self.text(rect, "服务设置", self.state.fonts.small, color, DT_CENTER | DT_VCENTER);
+        let color = mix(self.palette.secondary, self.palette.accent, hover);
+        icons::paint(self.dc, ui::inflate(rect, -self.s(4)), Icon::Settings, color);
     }
 
     unsafe fn card(&self, rect: RECT) {
@@ -1173,17 +1174,19 @@ impl<'a> Painter<'a> {
         let palette = self.palette;
         let layout = &self.layout;
         let card = layout.toolbar;
-        let middle = (card.left + card.right) / 2;
-        ui::fill(
-            self.dc,
-            RECT {
-                left: middle,
-                top: card.top + self.s(14),
-                right: middle + 1,
-                bottom: card.bottom - self.s(14),
-            },
-            palette.divider,
-        );
+        for column in 1..COLUMNS as usize {
+            let x = layout.rows[1 + column * ROWS as usize].left;
+            ui::fill(
+                self.dc,
+                RECT {
+                    left: x,
+                    top: card.top + self.s(14),
+                    right: x + 1,
+                    bottom: card.bottom - self.s(14),
+                },
+                palette.divider,
+            );
+        }
         for index in 1..BINDINGS.len() {
             let row = layout.rows[index];
             if (index - 1) as i32 % ROWS != 0 {
@@ -1622,6 +1625,8 @@ fn binding_icon(binding: Binding) -> Icon {
         Binding::Pin => Icon::Pin,
         Binding::ExtractText => Icon::ExtractText,
         Binding::Translate => Icon::Translate,
+        Binding::Arrow => Icon::Arrow,
+        Binding::Number => Icon::Number,
     }
 }
 

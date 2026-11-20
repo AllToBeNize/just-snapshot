@@ -4,6 +4,8 @@ mod annotation;
 mod app_icon;
 mod annotation_options;
 mod capture;
+mod clipboard_data;
+mod codes;
 mod credential;
 mod dialog;
 mod digest;

@@ -1,7 +1,7 @@
 use crate::{
     capture::{Image, Surface},
     hotkey::DEFAULT_OPACITY_STEP,
-    ocr,
+    codes, ocr,
     output::copy_text,
     pin_text::{Status, TextLayer, View},
     pin_translate::{self, Phase, Target as PaneTarget, TranslatePane},
@@ -28,6 +28,7 @@ use windows_sys::{
         UI::{
             Controls::WM_MOUSELEAVE,
             HiDpi::GetDpiForWindow,
+            Shell::ShellExecuteW,
             Input::KeyboardAndMouse::{
                 GetKeyState, ReleaseCapture, SetCapture, TrackMouseEvent, TME_LEAVE,
                 TME_NONCLIENT, TRACKMOUSEEVENT, VK_CONTROL, VK_ESCAPE,
@@ -38,6 +39,9 @@ use windows_sys::{
 };
 
 const CLASS: *const u16 = w!("Snapshot.Pinned");
+const POPUP_CLASS: *const u16 = w!("Snapshot.Translation");
+/// Gap between a pin and its translation popup.
+const POPUP_GAP: i32 = 8;
 const GLOW: i32 = 5;
 const BADGE_TIMER: usize = 1;
 const BADGE_DURATION_MS: u32 = 1200;
@@ -45,7 +49,7 @@ const MIN_OPACITY: i32 = 15;
 const WHEEL_NOTCH: i32 = 120;
 const TOAST_TIMER: usize = 2;
 const TOAST_MS: u32 = 2400;
-/// Posted by the recognition thread; `lparam` owns a `Box<Result<Vec<Line>, String>>`.
+/// Posted by the recognition thread; `lparam` owns a `Box<Recognized>`.
 const OCR_DONE: u32 = WM_APP + 1;
 /// Posted by the translation thread; `wparam` is the request id and `lparam`
 /// owns a `Box<Outcome>`.
@@ -79,6 +83,9 @@ pub enum Mode {
     Translate,
 }
 
+/// Text lines and QR codes / barcodes found in a pin.
+type Recognized = Result<(Vec<ocr::Line>, Vec<codes::Code>), String>;
+
 enum Outcome {
     Done(String),
     Unconfigured,
@@ -103,6 +110,8 @@ struct Pin {
     text: Option<TextLayer>,
     /// Present on pins made with "translate".
     translate: Option<TranslatePane>,
+    /// The small window beside the pin that shows the translation.
+    popup: HWND,
     /// Kept for recognizing again after a failure.
     source: Option<Image>,
     /// Whether the current text drag has moved past its first word.
@@ -122,22 +131,10 @@ impl Pin {
         (size(self.width), size(self.height))
     }
 
-    fn panel_width(&self) -> i32 {
-        let (width, _) = self.display_size();
-        width.clamp(self.s(pin_translate::MIN_WIDTH), self.s(pin_translate::MAX_WIDTH))
-    }
-
-    /// The whole window: the image, the translation panel if any, and the glow.
+    /// The whole window: the image and the glow.
     fn window_size(&self) -> (i32, i32) {
         let (width, height) = self.display_size();
-        if self.translate.is_some() {
-            (
-                width + 1 + self.panel_width() + GLOW * 2,
-                height.max(self.s(pin_translate::MIN_HEIGHT)) + GLOW * 2,
-            )
-        } else {
-            (width + GLOW * 2, height + GLOW * 2)
-        }
+        (width + GLOW * 2, height + GLOW * 2)
     }
 
     /// The image area inside the glow, in client pixels.
@@ -151,26 +148,22 @@ impl Pin {
         }
     }
 
-    fn panel_rect(&self) -> RECT {
-        let (width, height) = self.window_size();
-        RECT {
-            left: self.image_rect().right + 1,
-            top: GLOW,
-            right: width - GLOW,
-            bottom: height - GLOW,
-        }
-    }
-
-    unsafe fn pane_layout(&self, window: HWND) -> Option<pin_translate::Layout> {
+    /// The translation popup's layout, in its client pixels.
+    unsafe fn pane_layout(&self) -> Option<pin_translate::Layout> {
         let pane = self.translate.as_ref()?;
-        let dc = GetDC(window);
-        let layout = pane.layout(self.panel_rect(), self.scale, dc, &self.fonts);
-        ReleaseDC(window, dc);
+        if self.popup.is_null() {
+            return None;
+        }
+        let mut client = RECT::default();
+        GetClientRect(self.popup, &mut client);
+        let dc = GetDC(self.popup);
+        let layout = pane.layout(client, self.scale, dc, &self.fonts);
+        ReleaseDC(self.popup, dc);
         Some(layout)
     }
 
-    unsafe fn pane_hit(&self, window: HWND, point: POINT) -> Option<PaneTarget> {
-        let layout = self.pane_layout(window)?;
+    unsafe fn pane_hit(&self, point: POINT) -> Option<PaneTarget> {
+        let layout = self.pane_layout()?;
         self.translate.as_ref()?.hit(&layout, point)
     }
 
@@ -207,11 +200,22 @@ pub unsafe fn register(instance: HINSTANCE) -> io::Result<()> {
     if RegisterClassW(&class) == 0 {
         return Err(io::Error::last_os_error());
     }
+    let popup = WNDCLASSW {
+        style: CS_DROPSHADOW,
+        lpfnWndProc: Some(popup_proc),
+        hInstance: instance,
+        hCursor: LoadCursorW(null_mut(), IDC_ARROW),
+        lpszClassName: POPUP_CLASS,
+        ..Default::default()
+    };
+    if RegisterClassW(&popup) == 0 {
+        return Err(io::Error::last_os_error());
+    }
     Ok(())
 }
 
 /// Pins `image` at `bounds`. Text and translate pins recognize the text in
-/// the background; translate pins then translate it beside the image.
+/// the background; translate pins then show the translation in a popup beside it.
 pub unsafe fn open(image: Image, bounds: RECT, mode: Mode) -> io::Result<()> {
     let source = (mode != Mode::Plain).then(|| image.clone());
     let (surface, width, height) = image.into_surface()?;
@@ -246,24 +250,12 @@ pub unsafe fn open(image: Image, bounds: RECT, mode: Mode) -> io::Result<()> {
         badge: None,
         text: source.is_some().then(TextLayer::new),
         translate: (mode == Mode::Translate).then(TranslatePane::new),
+        popup: null_mut(),
         source,
         dragged: false,
         scale,
         fonts: Fonts::new(scale),
     });
-    if pin.translate.is_some() {
-        // The panel widens the pin; keep it on the monitor.
-        let (width, height) = pin.window_size();
-        let mut monitor = MONITORINFO {
-            cbSize: size_of::<MONITORINFO>() as u32,
-            ..Default::default()
-        };
-        GetMonitorInfoW(MonitorFromRect(&bounds, MONITOR_DEFAULTTONEAREST), &mut monitor);
-        let work = monitor.rcWork;
-        let left = (bounds.left - GLOW).min(work.right - width).max(work.left);
-        let top = (bounds.top - GLOW).min(work.bottom - height).max(work.top);
-        SetWindowPos(window, null_mut(), left, top, width, height, SWP_NOZORDER | SWP_NOACTIVATE);
-    }
     let recognize = pin.source.is_some();
     let pin = Box::into_raw(pin);
     SetWindowLongPtrW(window, GWLP_USERDATA, pin as isize);
@@ -274,6 +266,9 @@ pub unsafe fn open(image: Image, bounds: RECT, mode: Mode) -> io::Result<()> {
     }
     ShowWindow(window, SW_SHOW);
     SetForegroundWindow(window);
+    if (*pin).translate.is_some() {
+        open_popup(window, &mut *pin);
+    }
     if recognize {
         start_recognition(window, &mut *pin);
     }
@@ -296,6 +291,71 @@ pub unsafe fn translation_settings_changed() {
     }
 }
 
+/// Owned by the pin, so it stays above it and closes with it.
+unsafe fn open_popup(window: HWND, pin: &mut Pin) {
+    let popup = CreateWindowExW(
+        WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
+        POPUP_CLASS,
+        w!("Snapshot 翻译"),
+        WS_POPUP,
+        0,
+        0,
+        0,
+        0,
+        window,
+        null_mut(),
+        GetModuleHandleW(null()),
+        null(),
+    );
+    if popup.is_null() {
+        show_error(window, &format!("无法打开翻译窗口。\n{}", io::Error::last_os_error()));
+        return;
+    }
+    pin.popup = popup;
+    ui::round_corners(popup);
+    place_popup(window, pin);
+    ShowWindow(popup, SW_SHOWNOACTIVATE);
+}
+
+/// Sizes the popup to its content and puts it beside the pin: to the right,
+/// else to the left, else overlapping inside the screen, top-aligned.
+unsafe fn place_popup(window: HWND, pin: &Pin) {
+    let Some(pane) = &pin.translate else { return };
+    if pin.popup.is_null() {
+        return;
+    }
+    let width = pin.s(pin_translate::WIDTH);
+    let dc = GetDC(pin.popup);
+    let height = pane.preferred_height(width, pin.scale, dc, &pin.fonts);
+    ReleaseDC(pin.popup, dc);
+    let mut bounds = RECT::default();
+    GetWindowRect(window, &mut bounds);
+    let mut monitor = MONITORINFO {
+        cbSize: size_of::<MONITORINFO>() as u32,
+        ..Default::default()
+    };
+    GetMonitorInfoW(MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST), &mut monitor);
+    let work = monitor.rcWork;
+    let gap = pin.s(POPUP_GAP);
+    let mut left = bounds.right + gap;
+    if left + width > work.right {
+        left = bounds.left - gap - width;
+    }
+    if left < work.left {
+        left = (work.right - width).max(work.left);
+    }
+    let top = bounds.top.min(work.bottom - height).max(work.top);
+    SetWindowPos(pin.popup, null_mut(), left, top, width, height, SWP_NOZORDER | SWP_NOACTIVATE);
+}
+
+/// After the translation state changes: resize to fit and repaint.
+unsafe fn refresh_popup(window: HWND, pin: &Pin) {
+    place_popup(window, pin);
+    if !pin.popup.is_null() {
+        InvalidateRect(pin.popup, null(), 0);
+    }
+}
+
 unsafe fn start_recognition(window: HWND, pin: &mut Pin) {
     let Some(source) = pin.source.clone() else { return };
     if let Some(text) = &mut pin.text {
@@ -306,9 +366,11 @@ unsafe fn start_recognition(window: HWND, pin: &mut Pin) {
         SetTimer(window, SHIMMER_TIMER, SHIMMER_FRAME_MS, None);
     }
     InvalidateRect(window, null(), 0);
+    refresh_popup(window, pin);
     let target = window as isize;
     std::thread::spawn(move || {
-        let result = Box::into_raw(Box::new(ocr::recognize(&source)));
+        let recognized: Recognized = ocr::recognize(&source).map(|lines| (lines, codes::detect(&source)));
+        let result = Box::into_raw(Box::new(recognized));
         if PostMessageW(target as HWND, OCR_DONE, 0, result as LPARAM) == 0 {
             // The pin was closed before recognition finished.
             drop(Box::from_raw(result));
@@ -323,7 +385,7 @@ unsafe fn start_translation(window: HWND, pin: &mut Pin) {
     pane.scroll = 0;
     if lines.is_empty() {
         pane.phase = Phase::NoText;
-        InvalidateRect(window, null(), 0);
+        refresh_popup(window, pin);
         return;
     }
     let text = ocr::text(lines);
@@ -336,7 +398,7 @@ unsafe fn start_translation(window: HWND, pin: &mut Pin) {
     };
     let request = pane.request;
     SetTimer(window, SHIMMER_TIMER, SHIMMER_FRAME_MS, None);
-    InvalidateRect(window, null(), 0);
+    refresh_popup(window, pin);
     let target = window as isize;
     std::thread::spawn(move || {
         let outcome = match config.and_then(|config| Service::from_config(&config)) {
@@ -372,7 +434,7 @@ unsafe fn open_translation_settings(window: HWND) {
 
 /// The language picker: a menu under its button.
 unsafe fn pick_language(window: HWND, pin: &mut Pin) {
-    let Some(layout) = pin.pane_layout(window) else { return };
+    let Some(layout) = pin.pane_layout() else { return };
     let Some(pane) = &pin.translate else { return };
     let menu = CreatePopupMenu();
     for (index, language) in LANGUAGES.iter().enumerate() {
@@ -388,7 +450,7 @@ unsafe fn pick_language(window: HWND, pin: &mut Pin) {
         x: anchor.left,
         y: anchor.bottom + pin.s(4),
     };
-    ClientToScreen(window, &mut point);
+    ClientToScreen(pin.popup, &mut point);
     let chosen = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_NONOTIFY, point.x, point.y, 0, window, null());
     DestroyMenu(menu);
     let Some(&language) = (chosen as usize).checked_sub(1).and_then(|index| LANGUAGES.get(index)) else {
@@ -415,6 +477,52 @@ unsafe fn activate_pane(window: HWND, pin: &mut Pin, target: PaneTarget) {
                 start_translation(window, pin);
             }
         }
+    }
+}
+
+/// "识别到 3 行文字、1 个二维码，…" after recognition.
+fn recognized_message(lines: usize, codes: &[codes::Code]) -> String {
+    let mut found = Vec::new();
+    if lines > 0 {
+        found.push(format!("{lines} 行文字"));
+    }
+    for kind in ["二维码", "条形码"] {
+        let count = codes.iter().filter(|code| code.kind() == kind).count();
+        if count > 0 {
+            found.push(format!("{count} 个{kind}"));
+        }
+    }
+    if found.is_empty() {
+        "没有识别到文字".into()
+    } else if lines > 0 {
+        format!("识别到 {}，拖动选择，Ctrl+C 复制", found.join("、"))
+    } else {
+        format!("识别到 {}，单击复制内容", found.join("、"))
+    }
+}
+
+/// Copies a code's content; with Ctrl, a link opens in the browser instead.
+unsafe fn use_code(window: HWND, pin: &mut Pin, index: usize) {
+    let Some(code) = pin.text.as_ref().and_then(|text| text.codes.get(index)).cloned() else { return };
+    if GetKeyState(i32::from(VK_CONTROL)) < 0 {
+        if let Some(link) = code.link() {
+            let result = ShellExecuteW(
+                window,
+                w!("open"),
+                crate::wide(link).as_ptr(),
+                null(),
+                null(),
+                SW_SHOWNORMAL,
+            );
+            if result as isize <= 32 {
+                show_error(window, &format!("无法打开链接。\n{link}"));
+            }
+            return;
+        }
+    }
+    match copy_text(window, &code.text) {
+        Ok(()) => toast(window, pin, format!("已复制{}内容", code.kind())),
+        Err(error) => show_error(window, &format!("无法复制{}内容。\n{error}", code.kind())),
     }
 }
 
@@ -478,9 +586,6 @@ unsafe extern "system" fn window_proc(
             if !pin.is_null() && (*pin).text.is_some() {
                 let mut point = mouse_point(lparam);
                 ScreenToClient(window, &mut point);
-                if (*pin).pane_hit(window, point).is_some() {
-                    return HTCLIENT as LRESULT;
-                }
                 let view = (*pin).view(window);
                 let text = (*pin).text.as_ref().unwrap();
                 if text.selecting || text.over_text(view, point) || (*pin).over_button(window, point) {
@@ -493,8 +598,9 @@ unsafe extern "system" fn window_proc(
             let mut point = POINT::default();
             GetCursorPos(&mut point);
             ScreenToClient(window, &mut point);
-            let clickable = (*pin).over_button(window, point) || (*pin).pane_hit(window, point).is_some();
-            let cursor = if clickable { IDC_HAND } else { IDC_IBEAM };
+            let view = (*pin).view(window);
+            let over_code = (*pin).text.as_ref().is_some_and(|text| text.code_at(view, point).is_some());
+            let cursor = if over_code || (*pin).over_button(window, point) { IDC_HAND } else { IDC_IBEAM };
             SetCursor(LoadCursorW(null_mut(), cursor));
             return 1;
         }
@@ -503,9 +609,10 @@ unsafe extern "system" fn window_proc(
             track_leave(window, true);
             let button = (*pin).over_button(window, point);
             set_hover(window, &mut *pin, true, button);
-            let hit = (*pin).pane_hit(window, point);
-            if let Some(pane) = &mut (*pin).translate {
-                if std::mem::replace(&mut pane.hovered, hit) != hit {
+            let view = (*pin).view(window);
+            if let Some(text) = &mut (*pin).text {
+                let code = if text.selecting { None } else { text.code_at(view, point) };
+                if std::mem::replace(&mut text.hovered_code, code) != code {
                     InvalidateRect(window, null(), 0);
                 }
             }
@@ -529,20 +636,19 @@ unsafe extern "system" fn window_proc(
             GetWindowRect(window, &mut bounds);
             if !contains(bounds, point) {
                 set_hover(window, &mut *pin, false, false);
-            }
-            if let Some(pane) = &mut (*pin).translate {
-                if pane.hovered.take().is_some() {
-                    InvalidateRect(window, null(), 0);
+                if let Some(text) = &mut (*pin).text {
+                    if text.hovered_code.take().is_some() {
+                        InvalidateRect(window, null(), 0);
+                    }
                 }
             }
         }
         WM_LBUTTONDOWN if !pin.is_null() => {
             let point = mouse_point(lparam);
-            let hit = (*pin).pane_hit(window, point);
-            if let (Some(hit), Some(pane)) = (hit, &mut (*pin).translate) {
-                pane.pressed = Some(hit);
-                SetCapture(window);
-                InvalidateRect(window, null(), 0);
+            let view = (*pin).view(window);
+            let code = (*pin).text.as_ref().and_then(|text| text.code_at(view, point));
+            if let Some(index) = code {
+                use_code(window, &mut *pin, index);
             } else if (*pin).over_button(window, point) {
                 copy(window, &mut *pin, true);
             } else {
@@ -556,15 +662,6 @@ unsafe extern "system" fn window_proc(
             }
         }
         WM_LBUTTONUP if !pin.is_null() => {
-            let pressed = (*pin).translate.as_mut().and_then(|pane| pane.pressed.take());
-            if let Some(pressed) = pressed {
-                ReleaseCapture();
-                InvalidateRect(window, null(), 0);
-                if (*pin).pane_hit(window, mouse_point(lparam)) == Some(pressed) {
-                    activate_pane(window, &mut *pin, pressed);
-                }
-                return 0;
-            }
             if let Some(text) = &mut (*pin).text {
                 if text.selecting {
                     text.selecting = false;
@@ -588,24 +685,16 @@ unsafe extern "system" fn window_proc(
             if let Some(text) = &mut (*pin).text {
                 text.selecting = false;
             }
-            if let Some(pane) = &mut (*pin).translate {
-                if pane.pressed.take().is_some() {
-                    InvalidateRect(window, null(), 0);
-                }
-            }
         }
         OCR_DONE if !pin.is_null() => {
-            let result = *Box::from_raw(lparam as *mut Result<Vec<ocr::Line>, String>);
+            let result = *Box::from_raw(lparam as *mut Recognized);
             let translating = (*pin).translate.is_some();
             match result {
-                Ok(lines) => {
-                    let message = if lines.is_empty() {
-                        "没有识别到文字".to_string()
-                    } else {
-                        format!("识别到 {} 行文字，拖动选择，Ctrl+C 复制", lines.len())
-                    };
+                Ok((lines, codes)) => {
+                    let message = recognized_message(lines.len(), &codes);
                     if let Some(text) = &mut (*pin).text {
                         text.status = Status::Ready(lines);
+                        text.codes = codes;
                     }
                     if translating {
                         // The panel reports progress; Ctrl+C copies the translation.
@@ -620,8 +709,11 @@ unsafe extern "system" fn window_proc(
                     }
                     InvalidateRect(window, null(), 0);
                     match &mut (*pin).translate {
-                        // The panel shows the whole error with a retry button.
-                        Some(pane) => pane.phase = Phase::Failed(error),
+                        // The popup shows the whole error with a retry button.
+                        Some(pane) => {
+                            pane.phase = Phase::Failed(error);
+                            refresh_popup(window, &*pin);
+                        }
                         None => show_error(window, &error),
                     }
                 }
@@ -641,7 +733,7 @@ unsafe extern "system" fn window_proc(
                     Outcome::Unconfigured => Phase::Unconfigured,
                     Outcome::Failed(error) => Phase::Failed(error),
                 };
-                InvalidateRect(window, null(), 0);
+                refresh_popup(window, &*pin);
             }
         }
         RETRANSLATE if !pin.is_null() => {
@@ -658,7 +750,9 @@ unsafe extern "system" fn window_proc(
             if !(*pin).translate.as_ref().is_some_and(TranslatePane::busy) {
                 KillTimer(window, SHIMMER_TIMER);
             }
-            InvalidateRect(window, null(), 0);
+            if !(*pin).popup.is_null() {
+                InvalidateRect((*pin).popup, null(), 0);
+            }
         }
         WM_TIMER if !pin.is_null() && wparam == TOAST_TIMER => {
             KillTimer(window, TOAST_TIMER);
@@ -666,6 +760,10 @@ unsafe extern "system" fn window_proc(
                 text.toast = None;
             }
             InvalidateRect(window, null(), 0);
+        }
+        WM_WINDOWPOSCHANGED if !pin.is_null() && !(*pin).popup.is_null() => {
+            place_popup(window, &*pin);
+            return DefWindowProcW(window, message, wparam, lparam);
         }
         WM_ERASEBKGND => return 1,
         WM_NCDESTROY if !pin.is_null() => {
@@ -707,23 +805,9 @@ unsafe extern "system" fn window_proc(
         }
         WM_MOUSEWHEEL if !pin.is_null() => {
             let delta = i32::from((wparam >> 16) as i16);
-            let mut point = mouse_point(lparam);
-            ScreenToClient(window, &mut point);
-            if let Some(layout) = (*pin).pane_layout(window) {
-                if wparam & 8 == 0 && contains(layout.panel, point) {
-                    let dc = GetDC(window);
-                    let step = -delta * (*pin).s(WHEEL_SCROLL) / WHEEL_NOTCH;
-                    let fonts = &(*pin).fonts;
-                    let moved = (*pin)
-                        .translate
-                        .as_mut()
-                        .is_some_and(|pane| pane.scroll_by(&layout, dc, fonts, step));
-                    ReleaseDC(window, dc);
-                    if moved {
-                        InvalidateRect(window, null(), 0);
-                    }
-                    return 0;
-                }
+            // Wheel messages follow focus; the popup scrolls when the cursor is on it.
+            if !(*pin).popup.is_null() && WindowFromPoint(mouse_point(lparam)) == (*pin).popup {
+                return SendMessageW((*pin).popup, message, wparam, lparam);
             }
             let badge = if wparam & 8 != 0 {
                 let pending = (*pin).opacity_wheel_remainder + delta;
@@ -787,15 +871,6 @@ unsafe extern "system" fn window_proc(
                 InflateRect(&mut bounds, -1, -1);
             }
             let bounds = (*pin).image_rect();
-            if (*pin).translate.is_some() {
-                // The panel may be taller than the image; fill below it too.
-                ui::fill(dc, ui::inflate(client, -GLOW), palette.card);
-                ui::fill(
-                    dc,
-                    RECT { left: bounds.right, right: bounds.right + 1, top: GLOW, bottom: client.bottom - GLOW },
-                    palette.divider,
-                );
-            }
             SetStretchBltMode(dc, HALFTONE);
             SetBrushOrgEx(dc, 0, 0, null_mut());
             StretchBlt(
@@ -814,9 +889,6 @@ unsafe extern "system" fn window_proc(
             if let Some(text) = &(*pin).text {
                 text.paint(dc, (*pin).view(window), bounds, &(*pin).fonts);
             }
-            if let (Some(pane), Some(layout)) = (&(*pin).translate, (*pin).pane_layout(window)) {
-                pane.paint(dc, &layout, &(*pin).fonts, now_ms());
-            }
             if let Some(badge) = (*pin).badge {
                 paint_badge(dc, bounds, &*pin, badge);
             }
@@ -825,6 +897,101 @@ unsafe extern "system" fn window_proc(
             EndPaint(window, &paint);
         }
         _ => return DefWindowProcW(window, message, wparam, lparam),
+    }
+    0
+}
+
+/// The translation popup. Its state lives in the owning pin; keys go to the
+/// pin, which keeps the focus.
+unsafe extern "system" fn popup_proc(popup: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    let owner = GetWindow(popup, GW_OWNER);
+    let pin = if owner.is_null() {
+        null_mut()
+    } else {
+        GetWindowLongPtrW(owner, GWLP_USERDATA) as *mut Pin
+    };
+    if pin.is_null() {
+        return DefWindowProcW(popup, message, wparam, lparam);
+    }
+    let pin = &mut *pin;
+    let set_hovered = |pin: &mut Pin, hit: Option<PaneTarget>| {
+        if let Some(pane) = &mut pin.translate {
+            if std::mem::replace(&mut pane.hovered, hit) != hit {
+                InvalidateRect(popup, null(), 0);
+            }
+        }
+    };
+    match message {
+        WM_ERASEBKGND => return 1,
+        WM_MOUSEACTIVATE => return MA_NOACTIVATE as LRESULT,
+        WM_SETCURSOR if (lparam & 0xffff) as u32 == HTCLIENT => {
+            let hovered = pin.translate.as_ref().and_then(|pane| pane.hovered);
+            SetCursor(LoadCursorW(null_mut(), if hovered.is_some() { IDC_HAND } else { IDC_ARROW }));
+            return 1;
+        }
+        WM_MOUSEMOVE => {
+            track_leave(popup, true);
+            let hit = pin.pane_hit(mouse_point(lparam));
+            set_hovered(pin, hit);
+        }
+        WM_MOUSELEAVE => set_hovered(pin, None),
+        WM_LBUTTONDOWN => {
+            let hit = pin.pane_hit(mouse_point(lparam));
+            if let Some(pane) = &mut pin.translate {
+                pane.pressed = hit;
+            }
+            SetCapture(popup);
+            InvalidateRect(popup, null(), 0);
+        }
+        WM_LBUTTONUP => {
+            let pressed = pin.translate.as_mut().and_then(|pane| pane.pressed.take());
+            ReleaseCapture();
+            InvalidateRect(popup, null(), 0);
+            if let Some(pressed) = pressed.filter(|&pressed| pin.pane_hit(mouse_point(lparam)) == Some(pressed)) {
+                activate_pane(owner, pin, pressed);
+            }
+        }
+        WM_CAPTURECHANGED => {
+            if let Some(pane) = &mut pin.translate {
+                pane.pressed = None;
+            }
+        }
+        WM_MOUSEWHEEL => {
+            let delta = i32::from((wparam >> 16) as i16);
+            let Some(layout) = pin.pane_layout() else { return 0 };
+            let dc = GetDC(popup);
+            let step = -delta * pin.s(WHEEL_SCROLL) / WHEEL_NOTCH;
+            let fonts = &pin.fonts;
+            let moved = pin
+                .translate
+                .as_mut()
+                .is_some_and(|pane| pane.scroll_by(&layout, dc, fonts, step));
+            ReleaseDC(popup, dc);
+            if moved {
+                InvalidateRect(popup, null(), 0);
+            }
+        }
+        WM_KEYDOWN | WM_KEYUP => return SendMessageW(owner, message, wparam, lparam),
+        WM_PAINT => {
+            let mut paint = PAINTSTRUCT::default();
+            let target = BeginPaint(popup, &mut paint);
+            let mut client = RECT::default();
+            GetClientRect(popup, &mut client);
+            if let (Ok(buffer), Some(pane), Some(layout)) = (
+                Surface::new(target, client.right, client.bottom),
+                pin.translate.as_ref(),
+                pin.pane_layout(),
+            ) {
+                pane.paint(buffer.dc, &layout, &pin.fonts, now_ms());
+                if let Some(graphics) = crate::gdiplus::Graphics::new(buffer.dc) {
+                    let palette = theme::palette();
+                    graphics.stroke_round(ui::inset(ui::to_f(client), 0.5), 0.0, theme::argb(palette.card_border, 255), 1.0);
+                }
+                BitBlt(target, 0, 0, client.right, client.bottom, buffer.dc, 0, 0, SRCCOPY);
+            }
+            EndPaint(popup, &paint);
+        }
+        _ => return DefWindowProcW(popup, message, wparam, lparam),
     }
     0
 }
@@ -859,6 +1026,66 @@ unsafe fn paint_badge(dc: HDC, image: RECT, pin: &Pin, badge: Badge) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_recognition_toast_counts_text_and_codes() {
+        let qr = codes::Code { text: "x".into(), matrix: true, rect: [0.0; 4] };
+        let bar = codes::Code { text: "y".into(), matrix: false, rect: [0.0; 4] };
+        assert_eq!(recognized_message(0, &[]), "没有识别到文字");
+        assert_eq!(recognized_message(3, &[]), "识别到 3 行文字，拖动选择，Ctrl+C 复制");
+        assert_eq!(recognized_message(2, &[qr.clone()]), "识别到 2 行文字、1 个二维码，拖动选择，Ctrl+C 复制");
+        assert_eq!(recognized_message(0, &[qr.clone(), qr, bar]), "识别到 2 个二维码、1 个条形码，单击复制内容");
+    }
+
+    /// A text pin over a QR code: recognition finds it and a click copies it.
+    /// Run with `<test binary> pinned --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn clicking_a_qr_code_on_a_pin_copies_it() {
+        use windows_sys::Win32::System::DataExchange::{CloseClipboard, GetClipboardData, OpenClipboard};
+        unsafe {
+            let _ = register(GetModuleHandleW(null()));
+            let image = codes::tests::render(300, 300, &[(rxing::BarcodeFormat::QR_CODE, "https://example.com/扫码", 40, 40, 6)]);
+            let bounds = RECT { left: 60, top: 60, right: 360, bottom: 360 };
+            open(image, bounds, Mode::Text).unwrap();
+            let window = FindWindowW(CLASS, null());
+            let pin = GetWindowLongPtrW(window, GWLP_USERDATA) as *mut Pin;
+            let start = std::time::Instant::now();
+            let mut message = MSG::default();
+            while matches!((*pin).text.as_ref().unwrap().status, Status::Recognizing) && start.elapsed().as_secs() < 10 {
+                while PeekMessageW(&mut message, null_mut(), 0, 0, PM_REMOVE) != 0 {
+                    DispatchMessageW(&message);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            let text = (*pin).text.as_ref().unwrap();
+            assert_eq!(text.codes.len(), 1, "found in {:?}", start.elapsed());
+            println!("{:?}", text.toast);
+            assert!(text.toast.as_deref().is_some_and(|toast| toast.contains("1 个二维码")));
+            let view = (*pin).view(window);
+            let rect = text.codes[0].rect;
+            let center = POINT {
+                x: view.origin.x + ((rect[0] + rect[2]) / 2.0) as i32,
+                y: view.origin.y + ((rect[1] + rect[3]) / 2.0) as i32,
+            };
+            assert!(text.over_text(view, center), "codes take clicks instead of dragging the pin");
+            SendMessageW(window, WM_LBUTTONDOWN, 1, (center.x as u16 as isize) | ((center.y as isize) << 16));
+            SendMessageW(window, WM_LBUTTONUP, 0, (center.x as u16 as isize) | ((center.y as isize) << 16));
+            assert!(OpenClipboard(null_mut()) != 0);
+            let handle = GetClipboardData(13);
+            let data = windows_sys::Win32::System::Memory::GlobalLock(handle) as *const u16;
+            let mut length = 0;
+            while *data.add(length) != 0 {
+                length += 1;
+            }
+            let copied = String::from_utf16_lossy(std::slice::from_raw_parts(data, length));
+            windows_sys::Win32::System::Memory::GlobalUnlock(handle);
+            CloseClipboard();
+            assert_eq!(copied, "https://example.com/扫码");
+            assert_eq!((*pin).text.as_ref().unwrap().toast.as_deref(), Some("已复制二维码内容"));
+            DestroyWindow(window);
+        }
+    }
 
     /// Opens a text pin and pumps messages until background recognition lands.
     /// Run with `<test binary> pinned --ignored`.
@@ -906,4 +1133,66 @@ mod tests {
             assert!(IsWindow(window) == 0, "then closes the pin");
         }
     }
+
+    /// Opens a translate pin and checks the popup sits beside it and follows
+    /// it. Run with `<test binary> pinned --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn translate_pin_keeps_its_popup_beside_it() {
+        unsafe {
+            let _ = register(GetModuleHandleW(null()));
+            let image = crate::ocr::tests::sample("Save the file to your desktop", 18, true);
+            let bounds = RECT { left: 20, top: 150, right: 20 + image.width, bottom: 150 + image.height };
+            open(image, bounds, Mode::Translate).unwrap();
+            let window = FindWindowW(CLASS, null());
+            let pin = GetWindowLongPtrW(window, GWLP_USERDATA) as *mut Pin;
+            let popup = (*pin).popup;
+            assert!(!popup.is_null());
+            assert_eq!(GetWindow(popup, GW_OWNER), window, "the pin owns its popup");
+            let rects = || {
+                let (mut a, mut b) = (RECT::default(), RECT::default());
+                GetWindowRect(window, &mut a);
+                GetWindowRect(popup, &mut b);
+                (a, b)
+            };
+            let (pin_rect, popup_rect) = rects();
+            assert_eq!((pin_rect.left, pin_rect.top), (bounds.left - GLOW, bounds.top - GLOW), "the pin stays on the capture");
+            assert_eq!(popup_rect.left, pin_rect.right + (*pin).s(POPUP_GAP));
+            assert_eq!(popup_rect.top, pin_rect.top);
+            assert_eq!(popup_rect.right - popup_rect.left, (*pin).s(pin_translate::WIDTH));
+            SetWindowPos(window, null_mut(), 40, 260, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+            let (pin_rect, popup_rect) = rects();
+            assert_eq!((popup_rect.left, popup_rect.top), (pin_rect.right + (*pin).s(POPUP_GAP), pin_rect.top), "follows the pin");
+            let start = std::time::Instant::now();
+            let mut message = MSG::default();
+            while (*pin).translate.as_ref().unwrap().busy() && start.elapsed().as_secs() < 30 {
+                while PeekMessageW(&mut message, null_mut(), 0, 0, PM_REMOVE) != 0 {
+                    DispatchMessageW(&message);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            let (_, popup_rect) = rects();
+            let phase = match &(*pin).translate.as_ref().unwrap().phase {
+                Phase::Unconfigured => "unconfigured".to_string(),
+                Phase::Done { text, .. } => format!("done: {text}"),
+                Phase::Failed(error) => format!("failed: {error}"),
+                _ => "busy".into(),
+            };
+            println!("{phase}; popup {}x{}", popup_rect.right - popup_rect.left, popup_rect.bottom - popup_rect.top);
+            assert_ne!(phase, "busy");
+            // Near the right edge of the screen it flips to the left.
+            let mut monitor = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
+            GetMonitorInfoW(MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST), &mut monitor);
+            let (pin_rect, _) = rects();
+            let width = pin_rect.right - pin_rect.left;
+            SetWindowPos(window, null_mut(), monitor.rcWork.right - width, 260, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+            let (pin_rect, popup_rect) = rects();
+            if pin_rect.left - (*pin).s(POPUP_GAP + pin_translate::WIDTH) >= monitor.rcWork.left {
+                assert_eq!(popup_rect.right, pin_rect.left - (*pin).s(POPUP_GAP), "flips to the left");
+            }
+            DestroyWindow(window);
+            assert_eq!(IsWindow(popup), 0, "closing the pin closes the popup");
+        }
+    }
+
 }

@@ -8,6 +8,7 @@ use windows_sys::Win32::{
 };
 
 use crate::{
+    codes::Code,
     gdiplus::Graphics,
     ocr::{self, Line},
     theme::{self, argb},
@@ -32,6 +33,9 @@ pub struct TextLayer {
     pub button_hovered: bool,
     /// Short feedback shown at the bottom, like "已复制".
     pub toast: Option<String>,
+    /// QR codes and barcodes found next to the text.
+    pub codes: Vec<Code>,
+    pub hovered_code: Option<usize>,
 }
 
 /// Where the image sits in the pin's client area.
@@ -74,7 +78,17 @@ impl TextLayer {
             hovering: false,
             button_hovered: false,
             toast: None,
+            codes: Vec::new(),
+            hovered_code: None,
         }
+    }
+
+    /// The code under `point`, if any; a click there copies it.
+    pub fn code_at(&self, view: View, point: POINT) -> Option<usize> {
+        let (x, y) = view.to_image(point);
+        self.codes
+            .iter()
+            .position(|code| x >= code.rect[0] && x <= code.rect[2] && y >= code.rect[1] && y <= code.rect[3])
     }
 
     pub fn lines(&self) -> &[Line] {
@@ -103,6 +117,9 @@ impl TextLayer {
 
     /// Whether `point` is on recognized text, where a drag selects instead of moving the pin.
     pub fn over_text(&self, view: View, point: POINT) -> bool {
+        if self.code_at(view, point).is_some() {
+            return true;
+        }
         let slack = 3.0 / view.zoom;
         let (x, y) = view.to_image(point);
         self.lines().iter().flat_map(|line| &line.words).any(|word| {
@@ -211,6 +228,7 @@ impl TextLayer {
                 ui::button(dc, button, BUTTON_LABEL, fonts.small, palette, false, face, 7.0 * view.scale);
             }
         }
+        self.paint_codes(dc, view, image, fonts);
         let note = match (&self.status, &self.toast) {
             (Status::Recognizing, _) => Some("正在识别文字…"),
             (_, Some(toast)) => Some(toast.as_str()),
@@ -219,6 +237,63 @@ impl TextLayer {
         if let Some(note) = note {
             paint_note(dc, view, image, fonts, note);
         }
+    }
+}
+
+impl TextLayer {
+    /// An outline on every code; the hovered one is filled and gets a hint
+    /// with its content under (or above) it.
+    unsafe fn paint_codes(&self, dc: HDC, view: View, image: RECT, fonts: &Fonts) {
+        if self.codes.is_empty() {
+            return;
+        }
+        let palette = theme::palette();
+        if let Some(graphics) = Graphics::new(dc) {
+            for (index, code) in self.codes.iter().enumerate() {
+                let rect = ui::inset(view.to_client(code.rect), -2.0 * view.scale);
+                let radius = 6.0 * view.scale;
+                let hovered = self.hovered_code == Some(index);
+                if hovered {
+                    graphics.fill_round(rect, radius, argb(palette.accent, 40));
+                }
+                let alpha = if hovered || self.hovering { 255 } else { 150 };
+                graphics.stroke_round(rect, radius, argb(palette.accent, alpha), 2.0 * view.scale);
+            }
+        }
+        let Some(code) = self.hovered_code.and_then(|index| self.codes.get(index)) else { return };
+        let action = if code.link().is_some() { "单击复制 · Ctrl+单击打开链接" } else { "单击复制" };
+        let label = format!("{}：{}", code.kind(), code.text.replace(['\r', '\n'], " "));
+        let max_width = image.right - image.left - view.s(12);
+        let width = (ui::measure(dc, &label, fonts.small).max(ui::measure(dc, action, fonts.small)) + view.s(20))
+            .min(max_width);
+        let height = view.s(42);
+        let bounds = view.to_client(code.rect);
+        let left = (bounds[0] as i32).clamp(image.left + view.s(6), (image.right - view.s(6) - width).max(image.left));
+        let below = bounds[3] as i32 + view.s(6);
+        let top = if below + height <= image.bottom {
+            below
+        } else {
+            (bounds[1] as i32 - view.s(6) - height).max(image.top)
+        };
+        let pill = RECT { left, top, right: left + width, bottom: top + height };
+        if let Some(graphics) = Graphics::new(dc) {
+            graphics.fill_round(ui::to_f(pill), 8.0 * view.scale, argb(palette.tooltip, 240));
+        }
+        let line = |top: i32, text: &str, color: u32| {
+            ui::text(
+                dc,
+                RECT { left: pill.left + view.s(10), top, right: pill.right - view.s(10), bottom: top + view.s(18) },
+                text,
+                fonts.small,
+                color,
+                windows_sys::Win32::Graphics::Gdi::DT_LEFT
+                    | windows_sys::Win32::Graphics::Gdi::DT_VCENTER
+                    | windows_sys::Win32::Graphics::Gdi::DT_SINGLELINE
+                    | windows_sys::Win32::Graphics::Gdi::DT_END_ELLIPSIS,
+            )
+        };
+        line(pill.top + view.s(4), &label, palette.tooltip_text);
+        line(pill.top + view.s(21), action, theme::mix(palette.tooltip, palette.tooltip_text, 0.65));
     }
 }
 
@@ -378,6 +453,15 @@ mod tests {
             selected.toast = Some("已复制 12 个字".into());
             states.push(("selected", selected));
             states.push(("recognizing", TextLayer::new()));
+            let mut code = TextLayer::new();
+            code.status = Status::Ready(lines.clone());
+            code.codes = vec![crate::codes::Code {
+                text: "https://github.com/AllToBeNize/snapshot".into(),
+                matrix: true,
+                rect: [width as f32 - 60.0, 4.0, width as f32 - 8.0, height as f32 - 4.0],
+            }];
+            code.hovered_code = Some(0);
+            states.push(("code", code));
             for (name, layer) in states {
                 let surface = Surface::new(std::ptr::null_mut(), width, height).unwrap();
                 BitBlt(surface.dc, 0, 0, width, height, image_surface.dc, 0, 0, SRCCOPY);

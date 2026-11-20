@@ -275,6 +275,24 @@ pub(super) unsafe fn update_loupe(window: HWND, point: POINT) {
     }
 }
 
+/// Copies the color under the magnifier as `#RRGGBB` and says so on it.
+pub(super) unsafe fn copy_color(window: HWND) {
+    let picked = SESSION.with_borrow_mut(|session| {
+        let selection = session.as_mut()?;
+        let loupe = selection.loupe.as_mut()?;
+        loupe.copied = true;
+        let color = GetPixel(selection.desktop.surface.dc, loupe.point.x, loupe.point.y);
+        Some((loupe.bounds, color))
+    });
+    let Some((bounds, color)) = picked else { return };
+    match crate::output::copy_text(window, &crate::overlay_ui::hex(color)) {
+        Ok(()) => {
+            InvalidateRect(window, &bounds, 0);
+        }
+        Err(error) => show_error(window, &format!("无法复制颜色。\n{error}")),
+    }
+}
+
 pub(super) unsafe fn hide_loupe(window: HWND) {
     let loupe = SESSION.with_borrow_mut(|session| {
         session

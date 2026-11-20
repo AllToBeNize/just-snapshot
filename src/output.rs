@@ -28,6 +28,8 @@ use windows_sys::{
     },
 };
 
+use windows_sys::Win32::{Foundation::SYSTEMTIME, System::SystemInformation::GetLocalTime};
+
 use crate::{
     capture::{bitmap_header, Image, BYTES_PER_PIXEL},
     pinned,
@@ -85,15 +87,64 @@ pub unsafe fn deliver(window: HWND, image: &Image, target: Target) -> Result<boo
 /// (Feishu, browsers) would paste a fully transparent image. Many apps also
 /// mishandle top-down DIBs, so rows are flipped. PNG is what Chromium-based
 /// apps and Office prefer; it is added next to the DIB when encoding works.
+///
+/// The PNG also goes on as a virtual file (`FileGroupDescriptorW` plus
+/// `FileContents`), so pasting in Explorer or on the desktop creates a PNG
+/// file. Chat apps and editors keep pasting the image itself: they look for
+/// the bitmap formats, not virtual files.
 pub fn copy_image(owner: HWND, image: &Image) -> Result<(), String> {
     let mut png = Vec::new();
     let png = image.write_png(&mut png).ok().map(|()| png);
     let format = unsafe { RegisterClipboardFormatW(w!("PNG")) };
     let mut items = vec![(CF_DIB, opaque_dib(image))];
     if let (Some(png), true) = (png, format != 0) {
-        items.push((format, png));
+        let (descriptor, contents) = unsafe {
+            (
+                RegisterClipboardFormatW(w!("FileGroupDescriptorW")),
+                RegisterClipboardFormatW(w!("FileContents")),
+            )
+        };
+        items.push((format, png.clone()));
+        if descriptor != 0 && contents != 0 {
+            let mut with_file = items.clone();
+            with_file.push((descriptor, file_descriptor(&file_name(), png.len())));
+            with_file.push((contents, png));
+            if crate::clipboard_data::set(with_file, contents).is_ok() {
+                return Ok(());
+            }
+            // Without OLE the image still copies; only pasting as a file is lost.
+        }
     }
     set_clipboard(owner, items)
+}
+
+/// "Snapshot 2026-11-20 114500.png" in local time.
+fn file_name() -> String {
+    let mut time = SYSTEMTIME::default();
+    unsafe { GetLocalTime(&mut time) };
+    format!(
+        "Snapshot {:04}-{:02}-{:02} {:02}{:02}{:02}.png",
+        time.wYear, time.wMonth, time.wDay, time.wHour, time.wMinute, time.wSecond
+    )
+}
+
+/// A `FILEGROUPDESCRIPTORW` with one file of `size` bytes.
+fn file_descriptor(name: &str, size: usize) -> Vec<u8> {
+    const FD_FILESIZE: u32 = 0x40;
+    const FD_PROGRESSUI: u32 = 0x4000;
+    // FILEDESCRIPTORW: flags, CLSID, SIZEL, POINTL, attributes, three
+    // FILETIMEs, size high and low, then a 260-character name.
+    let mut data = Vec::with_capacity(4 + 592);
+    data.extend_from_slice(&1u32.to_le_bytes());
+    data.extend_from_slice(&(FD_FILESIZE | FD_PROGRESSUI).to_le_bytes());
+    data.extend_from_slice(&[0; 16 + 8 + 8 + 4 + 24]);
+    data.extend_from_slice(&((size as u64 >> 32) as u32).to_le_bytes());
+    data.extend_from_slice(&(size as u32).to_le_bytes());
+    let mut units: Vec<u16> = name.encode_utf16().take(259).collect();
+    units.resize(260, 0);
+    data.extend(units.into_iter().flat_map(u16::to_le_bytes));
+    debug_assert_eq!(data.len(), 4 + 592);
+    data
 }
 
 pub fn copy_text(owner: HWND, text: &str) -> Result<(), String> {
@@ -229,5 +280,60 @@ mod tests {
         let mut png = Vec::new();
         image.write_png(&mut png).unwrap();
         assert_eq!(&png[1..4], b"PNG");
+    }
+
+    #[test]
+    fn the_virtual_file_names_a_png_of_the_right_size() {
+        let descriptor = file_descriptor("截图.png", 0x1_0000_0002);
+        assert_eq!(descriptor.len(), 596);
+        assert_eq!(&descriptor[..4], &1u32.to_le_bytes(), "one file");
+        assert_eq!(&descriptor[68..72], &1u32.to_le_bytes(), "size high");
+        assert_eq!(&descriptor[72..76], &2u32.to_le_bytes(), "size low");
+        let name: Vec<u16> = descriptor[76..]
+            .chunks_exact(2)
+            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+            .take_while(|&unit| unit != 0)
+            .collect();
+        assert_eq!(String::from_utf16(&name).unwrap(), "截图.png");
+        assert!(file_name().starts_with("Snapshot 20") && file_name().ends_with(".png"));
+    }
+
+    /// Reads the clipboard back the way Explorer does, through OLE with
+    /// `lindex` 0. Run with `<test binary> paste_as_file --ignored`.
+    #[test]
+    #[ignore]
+    fn explorer_can_paste_the_copy_as_a_file() {
+        use windows::Win32::System::{
+            Com::{FORMATETC, DVASPECT_CONTENT, TYMED_HGLOBAL},
+            Ole::{OleGetClipboard, OleInitialize, ReleaseStgMedium},
+        };
+        let image = Image { width: 3, height: 2, pixels: vec![200; 24] };
+        copy_image(std::ptr::null_mut(), &image).unwrap();
+        unsafe {
+            let _ = OleInitialize(None);
+            let data = OleGetClipboard().unwrap();
+            let read = |name: *const u16, index: i32| {
+                let format = FORMATETC {
+                    cfFormat: RegisterClipboardFormatW(name) as u16,
+                    ptd: std::ptr::null_mut(),
+                    dwAspect: DVASPECT_CONTENT.0,
+                    lindex: index,
+                    tymed: TYMED_HGLOBAL.0 as u32,
+                };
+                let mut medium = data.GetData(&format).unwrap_or_else(|error| panic!("lindex {index}: {error}"));
+                let global = medium.u.hGlobal;
+                let size = windows::Win32::System::Memory::GlobalSize(global);
+                let pointer = windows::Win32::System::Memory::GlobalLock(global) as *const u8;
+                let bytes = std::slice::from_raw_parts(pointer, size).to_vec();
+                let _ = windows::Win32::System::Memory::GlobalUnlock(global);
+                ReleaseStgMedium(&mut medium);
+                bytes
+            };
+            let descriptor = read(w!("FileGroupDescriptorW"), -1);
+            let size = u32::from_le_bytes(descriptor[72..76].try_into().unwrap()) as usize;
+            let contents = read(w!("FileContents"), 0);
+            assert_eq!(&contents[1..4], b"PNG");
+            assert!(contents.len() >= size, "the file has the announced size");
+        }
     }
 }

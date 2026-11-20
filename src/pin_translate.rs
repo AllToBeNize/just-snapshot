@@ -21,10 +21,10 @@ const TOOLBAR: i32 = 44;
 const CONTROL: i32 = 28;
 const PAD: i32 = 14;
 const ACTIONS: i32 = 44;
-/// Width of the panel relative to the image, within these bounds.
-pub const MIN_WIDTH: i32 = 300;
-pub const MAX_WIDTH: i32 = 520;
-pub const MIN_HEIGHT: i32 = 240;
+/// The popup is this wide; its height follows the content within these bounds.
+pub const WIDTH: i32 = 360;
+const MIN_HEIGHT: i32 = 120;
+const MAX_HEIGHT: i32 = 460;
 const SHIMMER_MS: f32 = 1300.0;
 
 pub enum Phase {
@@ -196,6 +196,21 @@ impl TranslatePane {
             primary,
             secondary,
         }
+    }
+
+    /// Height that fits the content at `width`, scrolling past the maximum.
+    pub unsafe fn preferred_height(&self, width: i32, scale: f32, dc: HDC, fonts: &Fonts) -> i32 {
+        let s = |value: i32| (value as f32 * scale).round() as i32;
+        let text_width = width - s(PAD) * 2;
+        let wrapped = |text: &str| ui::wrapped_height(dc, text, fonts.body, text_width, WRAP);
+        let content = match &self.phase {
+            Phase::Done { text, .. } => wrapped(text),
+            Phase::Failed(error) => wrapped(error) + s(ACTIONS),
+            Phase::Unconfigured => s(130),
+            Phase::NoText => s(48),
+            Phase::Recognizing | Phase::Translating { .. } => s(120),
+        };
+        (s(TOOLBAR) + s(10) + content + s(10)).clamp(s(MIN_HEIGHT), s(MAX_HEIGHT))
     }
 
     pub fn hit(&self, layout: &Layout, point: POINT) -> Option<Target> {

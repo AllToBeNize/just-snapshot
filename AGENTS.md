@@ -48,16 +48,18 @@ Build and test on Windows only. `snapshot.ps1` locates Cargo and the Visual Stud
 | `selection_geometry.rs`, `targets.rs`, `panel_edges.rs` | Rect math, window/UIA target snapping, content-column edge detection |
 | `toolbar.rs` | Main toolbar layout, painting, hit testing; shared `paint_panel` / `paint_button` |
 | `annotation_options.rs` | Secondary option bar (width, font size, colors) |
-| `annotation.rs`, `text_mark.rs`, `text_render.rs`, `mosaic.rs` | Annotation model and history, text boxes, capturing the hidden text editor, mosaic |
+| `annotation.rs`, `text_mark.rs`, `text_render.rs`, `mosaic.rs` | Annotation model and history (rectangle, brush, mosaic, text, arrow, step numbers; numbers count from `History::next_number`), text boxes, capturing the hidden text editor, mosaic |
 | `gdiplus.rs` | GDI+ wrapper: anti-aliased shapes, vector icon rasterizing, image drawing |
 | `overlay_ui.rs`, `typography.rs` | Hint panel, fonts |
 | `icons.rs`, `icons/lucide.rs` | Vector icons rendered at the exact target size. `icons/lucide.rs` is generated: edit SVGs in `tools/icons/` and run `python tools/svg2rust.py tools/icons <lucide version> <names...> > src/icons/lucide.rs` |
 | `theme.rs` | Color themes (Graphite default, Midnight, Forest, Light) and color helpers |
 | `ui.rs`, `dialog.rs` | Shared drawing helpers for custom-drawn windows; the themed dialog that replaces `MessageBox` |
 | `scroll_capture.rs`, `scroll_input.rs`, `scroll_stitch.rs` | Long capture session, wheel forwarding, frame stitching |
-| `pinned.rs` | Pinned image windows (`Mode::Plain` / `Text` / `Translate`). Text and translate pins carry a `pin_text::TextLayer` and recognize in a background thread that posts `OCR_DONE`; translate pins add a `pin_translate::TranslatePane` and post `TRANSLATE_DONE` with a request id so stale replies are dropped. `translation_settings_changed()` makes waiting pins retry |
+| `pinned.rs` | Pinned image windows (`Mode::Plain` / `Text` / `Translate`). Text and translate pins carry a `pin_text::TextLayer` and recognize in a background thread that posts `OCR_DONE`; translate pins add a `pin_translate::TranslatePane` shown in an owned popup window (`popup_proc`, keys forwarded to the pin) and post `TRANSLATE_DONE` with a request id so stale replies are dropped. `translation_settings_changed()` makes waiting pins retry |
 | `ocr.rs` | Windows built-in OCR (`Windows.Media.Ocr`). Recognizes at 1×, and again on a 2× Catmull-Rom enlargement when the median word is under 18 px; tall images go in overlapping strips. `<test binary> ocr --ignored --nocapture` prints accuracy by font size |
-| `pin_translate.rs` | Translation panel beside a translate pin: language picker, copy, settings, skeleton while waiting, full error with retry. `<test binary> pin_translate --ignored` renders previews to `%TEMP%\snapshot-preview` |
+| `codes.rs` | QR codes and barcodes via rxing (decoders only, no image formats), run on the recognition thread. `codes::tests::render` draws codes for tests |
+| `clipboard_data.rs` | Our own `IDataObject` put on the clipboard with `OleSetClipboard`, so `FileContents` can be read at `lindex` 0 (Explorer's paste-as-file). `output::tests::explorer_can_paste_the_copy_as_a_file` reads it back the way Explorer does |
+| `pin_translate.rs` | Translation popup beside a translate pin (owned by the pin, follows it, sized to its content): language picker, copy, settings, skeleton while waiting, full error with retry. `<test binary> pin_translate --ignored` renders previews to `%TEMP%\snapshot-preview` |
 | `translate.rs` | Providers (OpenAI-compatible, DeepL, Baidu, Youdao), auto language, chunking, retries (network / 429 / 5xx only), `translate.txt`. Tests run every provider against a local mock server (`http::tests::serve`) |
 | `translate_settings.rs` | Translation service window with native EDIT boxes (Tab via `IsDialogMessageW` in the main loop). Keys are written to the Credential Manager and never read back into the window |
 | `http.rs` | Blocking HTTPS POST over WinHTTP (system proxy and TLS); call off the UI thread |
