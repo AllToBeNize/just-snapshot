@@ -632,8 +632,10 @@ unsafe fn save(window: HWND) {
             DestroyWindow(window);
         }
         Err(error) => {
-            with_state(|state| state.notice = Notice::Error(error.replace('\n', " ")));
+            // The footer has room for one line; the full error goes to the dialog.
+            with_state(|state| state.notice = Notice::Error("保存失败，详细原因见弹出的提示".into()));
             redraw(window);
+            crate::show_error(window, &error);
         }
     }
 }
@@ -1544,12 +1546,20 @@ impl<'a> Painter<'a> {
             right: layout.cancel.left - self.s(12),
             bottom: layout.reset.bottom,
         };
+        // Wrap rather than cut off, centered on the buttons.
+        let wrap = DT_WORDBREAK | DT_EDITCONTROL;
+        let height = ui::wrapped_height(self.dc, &message, fonts.small, rect.right - rect.left, wrap);
+        let top = (rect.top + rect.bottom - height) / 2;
         self.text(
-            rect,
+            RECT {
+                top,
+                bottom: top + height,
+                ..rect
+            },
             &message,
             fonts.small,
             color,
-            DT_LEFT | DT_VCENTER | DT_END_ELLIPSIS,
+            DT_LEFT | DT_TOP | wrap,
         );
     }
 }
@@ -1706,9 +1716,19 @@ mod tests {
                     crate::dialog::Kind::Error,
                     "无法注册截图快捷键 Ctrl+Shift+A。\n它可能已被其他程序占用。可以双击托盘图标截图，或者在设置里换一个快捷键。",
                     1.0,
+                    i32::MAX,
                 )
                 .save_png(&folder.join(format!("dialog-{}.png", theme.key())))
                 .unwrap();
+            }
+            let long = format!(
+                "长截图拼接失败，因为连续多帧找不到重叠区域，可能是页面里有固定悬浮的元素。\n{}C:\\Users\\ERIC\\AppData\\Local\\Temp\\snapshot-ai\\long-capture\\frame-0042-overlap-search-failed.png",
+                "错误详情会完整显示，太长时可以滚动查看。\n".repeat(30)
+            );
+            for (name, max_height) in [("long", i32::MAX), ("scroll", 420)] {
+                crate::dialog::preview(crate::dialog::Kind::Error, &long, 1.0, max_height)
+                    .save_png(&folder.join(format!("dialog-{name}.png")))
+                    .unwrap();
             }
             theme::set(Theme::default());
             for warning in [false, true] {

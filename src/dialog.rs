@@ -1,5 +1,7 @@
 //! Themed replacement for `MessageBox`: a small rounded card with an icon,
 //! title, wrapped message, "copy" and "OK" buttons. Runs its own modal loop.
+//! Text is never cut off: everything wraps, and a message taller than the
+//! screen scrolls inside the card.
 
 use std::{
     cell::RefCell,
@@ -15,7 +17,8 @@ use windows_sys::{
             HiDpi::GetDpiForWindow,
             Input::KeyboardAndMouse::{
                 EnableWindow, GetKeyState, IsWindowEnabled, ReleaseCapture, SetCapture, SetFocus,
-                VK_CONTROL, VK_ESCAPE, VK_RETURN, VK_SPACE,
+                VK_CONTROL, VK_DOWN, VK_END, VK_ESCAPE, VK_HOME, VK_NEXT, VK_PRIOR, VK_RETURN,
+                VK_SPACE, VK_UP,
             },
             WindowsAndMessaging::*,
         },
@@ -35,6 +38,12 @@ const WIDTH: i32 = 420;
 const PAD: i32 = 24;
 const BADGE: i32 = 36;
 const BUTTON_HEIGHT: i32 = 34;
+const TITLE_HEIGHT: i32 = 24;
+/// Margin kept between the card and the edges of the work area.
+const SCREEN_MARGIN: i32 = 48;
+/// Wrap like an edit control: long words and paths break mid-word instead of
+/// overflowing.
+const WRAP: u32 = DT_WORDBREAK | DT_EDITCONTROL;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
@@ -53,6 +62,10 @@ struct State {
     message: String,
     scale: f32,
     fonts: Fonts,
+    /// Tallest the card may be, from the work area it is shown on.
+    max_height: i32,
+    /// Pixels of the message scrolled out above the visible area.
+    scroll: i32,
     hovered: Option<Button>,
     pressed: Option<Button>,
     copied: bool,
@@ -69,6 +82,8 @@ struct Layout {
     badge: RECT,
     title: RECT,
     message: RECT,
+    /// Height of the whole wrapped message; taller than `message` when it scrolls.
+    message_full: i32,
     copy: RECT,
     ok: RECT,
 }
@@ -79,23 +94,28 @@ impl Layout {
         let width = s(WIDTH);
         let text_left = s(PAD + BADGE + 14);
         let text_width = width - text_left - s(PAD);
-        let title_height = s(24);
-        let message_height = if state.message.is_empty() {
-            0
-        } else {
-            ui::wrapped_height(dc, &state.message, state.fonts.body, text_width).min(s(320))
-        };
+        let title_height = ui::wrapped_height(dc, &state.title, state.fonts.heading, text_width, WRAP);
+        let title_top = s(PAD) + (s(TITLE_HEIGHT) - title_height).max(0) / 2;
         let title = RECT {
             left: text_left,
-            top: s(PAD),
+            top: title_top,
             right: width - s(PAD),
-            bottom: s(PAD) + title_height,
+            bottom: title_top + title_height,
         };
+        let message_full = if state.message.is_empty() {
+            0
+        } else {
+            ui::wrapped_height(dc, &state.message, state.fonts.body, text_width, WRAP)
+        };
+        let message_top = title.bottom.max(s(PAD + TITLE_HEIGHT)) + s(6);
+        // Everything below the message: gap, buttons and bottom padding.
+        let below = s(22) + s(BUTTON_HEIGHT) + s(20);
+        let room = (state.max_height - message_top - below).max(s(60));
         let message = RECT {
             left: text_left,
-            top: title.bottom + s(6),
+            top: message_top,
             right: width - s(PAD),
-            bottom: title.bottom + s(6) + message_height,
+            bottom: message_top + message_full.min(room),
         };
         let content = message.bottom.max(s(PAD + BADGE));
         let top = content + s(22);
@@ -121,9 +141,15 @@ impl Layout {
             },
             title,
             message,
+            message_full,
             copy,
             ok,
         }
+    }
+
+    /// Largest scroll offset; 0 when the whole message is visible.
+    fn max_scroll(&self) -> i32 {
+        (self.message_full - (self.message.bottom - self.message.top)).max(0)
     }
 
     fn hit(&self, point: POINT) -> Option<Button> {
@@ -181,6 +207,8 @@ pub unsafe fn show(owner: HWND, kind: Kind, message: &str) {
         message: body.trim().to_string(),
         scale,
         fonts: Fonts::new(scale),
+        max_height: i32::MAX,
+        scroll: 0,
         hovered: None,
         pressed: None,
         copied: false,
@@ -221,15 +249,6 @@ pub unsafe fn show(owner: HWND, kind: Kind, message: &str) {
 }
 
 unsafe fn place(window: HWND, owner: HWND) {
-    let dc = GetDC(window);
-    let size = STATE.with_borrow(|state| {
-        state.as_ref().map(|state| {
-            let layout = Layout::new(dc, state);
-            (layout.width, layout.height)
-        })
-    });
-    ReleaseDC(window, dc);
-    let Some((width, height)) = size else { return };
     let mut anchor = POINT::default();
     let mut bounds = RECT::default();
     if !owner.is_null() && IsWindowVisible(owner) != 0 && GetWindowRect(owner, &mut bounds) != 0 {
@@ -240,7 +259,21 @@ unsafe fn place(window: HWND, owner: HWND) {
     } else {
         GetCursorPos(&mut anchor);
     }
-    let (x, y) = monitor_info(anchor).map_or((anchor.x, anchor.y), |info| {
+    let info = monitor_info(anchor);
+    let dc = GetDC(window);
+    let size = STATE.with_borrow_mut(|state| {
+        state.as_mut().map(|state| {
+            if let Some(info) = &info {
+                let margin = (SCREEN_MARGIN as f32 * state.scale).round() as i32;
+                state.max_height = info.rcWork.bottom - info.rcWork.top - margin;
+            }
+            let layout = Layout::new(dc, state);
+            (layout.width, layout.height)
+        })
+    });
+    ReleaseDC(window, dc);
+    let Some((width, height)) = size else { return };
+    let (x, y) = info.map_or((anchor.x, anchor.y), |info| {
         let area = info.rcWork;
         (
             (area.left + (area.right - area.left - width) / 2).max(area.left),
@@ -281,6 +314,32 @@ unsafe fn copy_message(window: HWND) {
         }
     });
     InvalidateRect(window, null(), 0);
+}
+
+/// Scrolls the message by `delta` pixels (positive moves the text up).
+unsafe fn scroll_by(window: HWND, delta: i32) {
+    let dc = GetDC(window);
+    let changed = STATE.with_borrow_mut(|state| {
+        state.as_mut().is_some_and(|state| {
+            let max = Layout::new(dc, state).max_scroll();
+            let next = (state.scroll + delta).clamp(0, max);
+            std::mem::replace(&mut state.scroll, next) != next
+        })
+    });
+    ReleaseDC(window, dc);
+    if changed {
+        InvalidateRect(window, null(), 0);
+    }
+}
+
+/// One wheel notch or arrow press, and one page, in pixels.
+fn scroll_steps() -> (i32, i32) {
+    STATE.with_borrow(|state| {
+        state.as_ref().map_or((60, 300), |state| {
+            let s = |value: f32| (value * state.scale).round() as i32;
+            (s(60.0), (state.max_height / 2).max(s(60.0)))
+        })
+    })
 }
 
 unsafe fn hit(window: HWND, lparam: LPARAM) -> Option<Button> {
@@ -356,8 +415,18 @@ unsafe extern "system" fn window_proc(
                 None => {}
             }
         }
+        WM_MOUSEWHEEL => {
+            let notches = i32::from((wparam >> 16) as i16) as f32 / WHEEL_DELTA as f32;
+            scroll_by(window, -(notches * scroll_steps().0 as f32).round() as i32);
+        }
         WM_KEYDOWN => match wparam as u16 {
             VK_RETURN | VK_ESCAPE | VK_SPACE => close(window),
+            VK_UP => scroll_by(window, -scroll_steps().0),
+            VK_DOWN => scroll_by(window, scroll_steps().0),
+            VK_PRIOR => scroll_by(window, -scroll_steps().1),
+            VK_NEXT => scroll_by(window, scroll_steps().1),
+            VK_HOME => scroll_by(window, i32::MIN / 2),
+            VK_END => scroll_by(window, i32::MAX / 2),
             key if key == u16::from(b'C') && GetKeyState(i32::from(VK_CONTROL)) < 0 => {
                 copy_message(window)
             }
@@ -416,16 +485,9 @@ unsafe fn paint_contents(dc: HDC, client: RECT, state: &State) {
         &state.title,
         state.fonts.heading,
         palette.text,
-        DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+        DT_LEFT | DT_TOP | WRAP,
     );
-    ui::text(
-        dc,
-        layout.message,
-        &state.message,
-        state.fonts.body,
-        palette.secondary,
-        DT_LEFT | DT_TOP | DT_WORDBREAK | DT_END_ELLIPSIS,
-    );
+    paint_message(dc, &layout, state, palette);
     let radius = 8.0 * state.scale;
     let face = |button: Button, base: u32, hover: u32| {
         if state.pressed == Some(button) {
@@ -458,9 +520,47 @@ unsafe fn paint_contents(dc: HDC, client: RECT, state: &State) {
     );
 }
 
+/// The message, clipped to its area and shifted by the scroll offset, with a
+/// scroll thumb when it does not fit.
+unsafe fn paint_message(dc: HDC, layout: &Layout, state: &State, palette: &theme::Palette) {
+    let area = layout.message;
+    let max_scroll = layout.max_scroll();
+    let scroll = state.scroll.min(max_scroll);
+    let saved = SaveDC(dc);
+    IntersectClipRect(dc, area.left, area.top, area.right, area.bottom);
+    ui::text(
+        dc,
+        RECT {
+            top: area.top - scroll,
+            bottom: area.top - scroll + layout.message_full,
+            ..area
+        },
+        &state.message,
+        state.fonts.body,
+        palette.secondary,
+        DT_LEFT | DT_TOP | WRAP,
+    );
+    RestoreDC(dc, saved);
+    if max_scroll == 0 {
+        return;
+    }
+    let s = |value: f32| value * state.scale;
+    let visible = (area.bottom - area.top) as f32;
+    let thumb = (visible * visible / layout.message_full as f32).max(s(24.0));
+    let top = area.top as f32 + (visible - thumb) * scroll as f32 / max_scroll as f32;
+    let left = area.right as f32 + s(PAD as f32 / 2.0 - 2.0);
+    if let Some(graphics) = Graphics::new(dc) {
+        graphics.fill_round(
+            [left, top, left + s(4.0), top + thumb],
+            s(2.0),
+            argb(palette.tertiary, 200),
+        );
+    }
+}
+
 /// Renders the dialog without a window, for the preview test.
 #[cfg(test)]
-pub unsafe fn preview(kind: Kind, message: &str, scale: f32) -> crate::capture::Image {
+pub unsafe fn preview(kind: Kind, message: &str, scale: f32, max_height: i32) -> crate::capture::Image {
     use crate::capture::{Desktop, Surface};
     let (title, body) = message.split_once('\n').unwrap_or((message, ""));
     let state = State {
@@ -469,6 +569,8 @@ pub unsafe fn preview(kind: Kind, message: &str, scale: f32) -> crate::capture::
         message: body.into(),
         scale,
         fonts: Fonts::new(scale),
+        max_height,
+        scroll: 0,
         hovered: Some(Button::Ok),
         pressed: None,
         copied: false,
@@ -489,4 +591,70 @@ pub unsafe fn preview(kind: Kind, message: &str, scale: f32) -> crate::capture::
         pixel[3] = 255;
     }
     image
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::capture::Surface;
+
+    const LONG: &str = "长截图拼接失败，因为连续多帧找不到重叠区域，可能是页面里有固定悬浮的元素、动画，或者滚动太快。\n\
+        C:\\Users\\ERIC\\AppData\\Local\\Temp\\snapshot-ai\\long-capture\\frame-0042-overlap-search-failed.png\n\
+        The operation completed but the stitched image would exceed the maximum supported height of 32767 pixels.";
+
+    unsafe fn state(message: &str, max_height: i32) -> State {
+        let (title, body) = message.split_once('\n').unwrap_or((message, ""));
+        State {
+            kind: Kind::Error,
+            title: title.into(),
+            message: body.into(),
+            scale: 1.0,
+            fonts: Fonts::new(1.0),
+            max_height,
+            scroll: 0,
+            hovered: None,
+            pressed: None,
+            copied: false,
+            closed: false,
+        }
+    }
+
+    #[test]
+    fn long_text_wraps_in_full() {
+        unsafe {
+            let probe = Surface::new(null_mut(), 1, 1).unwrap();
+            let long = state(LONG, i32::MAX);
+            let layout = Layout::new(probe.dc, &long);
+            let short = Layout::new(probe.dc, &state("出错了\n短", i32::MAX));
+            assert!(
+                layout.title.bottom - layout.title.top > short.title.bottom - short.title.top,
+                "a long title wraps onto more lines instead of being cut off"
+            );
+            assert_eq!(layout.max_scroll(), 0, "a message that fits does not scroll");
+            assert_eq!(layout.message.bottom - layout.message.top, layout.message_full);
+            // The unbreakable path must wrap within the text column, not overflow it.
+            let width = layout.message.right - layout.message.left;
+            let one_line = ui::wrapped_height(probe.dc, "C", long.fonts.body, width, WRAP);
+            assert!(layout.message_full >= one_line * 5, "the path is broken across lines");
+        }
+    }
+
+    #[test]
+    fn a_message_taller_than_the_screen_scrolls() {
+        unsafe {
+            let probe = Surface::new(null_mut(), 1, 1).unwrap();
+            let message = format!("出错了\n{}", "这一行是很长的错误详情。\n".repeat(80));
+            let mut state = state(&message, 400);
+            let layout = Layout::new(probe.dc, &state);
+            assert!(layout.height <= 400, "the card fits the screen: {}", layout.height);
+            assert!(layout.max_scroll() > 0);
+            assert_eq!(
+                layout.max_scroll(),
+                layout.message_full - (layout.message.bottom - layout.message.top),
+                "scrolling reaches the last line"
+            );
+            state.scroll = layout.max_scroll();
+            assert_eq!(Layout::new(probe.dc, &state).max_scroll(), layout.max_scroll());
+        }
+    }
 }

@@ -91,8 +91,8 @@ pub unsafe fn text(dc: HDC, mut rect: RECT, value: &str, font: HFONT, color: u32
     DrawTextW(dc, value.as_ptr(), -1, &mut rect, format | DT_NOPREFIX);
 }
 
-/// Height of `value` wrapped to `width`.
-pub unsafe fn wrapped_height(dc: HDC, value: &str, font: HFONT, width: i32) -> i32 {
+/// Height of `value` wrapped to `width` with the given `DrawText` wrap flags.
+pub unsafe fn wrapped_height(dc: HDC, value: &str, font: HFONT, width: i32, wrap: u32) -> i32 {
     let value = wide(value);
     let previous = SelectObject(dc, font);
     let mut rect = RECT {
@@ -104,7 +104,7 @@ pub unsafe fn wrapped_height(dc: HDC, value: &str, font: HFONT, width: i32) -> i
         value.as_ptr(),
         -1,
         &mut rect,
-        DT_CALCRECT | DT_WORDBREAK | DT_NOPREFIX,
+        DT_CALCRECT | wrap | DT_NOPREFIX,
     );
     SelectObject(dc, previous);
     rect.bottom

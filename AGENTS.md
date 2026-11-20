@@ -88,6 +88,7 @@ A capture hotkey conflict must never stop the app or open a modal dialog. The tr
 - Animations run on one 15 ms timer that stops when everything settles. Do not add idle timers.
 - Colors: accent for primary actions, amber for warnings (conflicts, duplicates), red only for errors. The window is frameless: the header is the drag area and has its own close button.
 - Errors go through `show_error`, which opens the themed dialog in `dialog.rs`; do not call `MessageBoxW`.
+- Error text shown to the user is never cut off: no `DT_END_ELLIPSIS`, no height caps. Wrap with `DT_WORDBREAK | DT_EDITCONTROL` so paths break mid-word; the dialog scrolls a message taller than the screen. A one-line area (like the settings footer) shows a short summary and sends the full error to `show_error`.
 
 ## Text Editing and Change Visibility
 
