@@ -5,7 +5,7 @@
 use std::{
     ffi::OsString,
     mem::size_of,
-    os::windows::ffi::OsStringExt,
+    os::windows::ffi::{OsStrExt, OsStringExt},
     path::PathBuf,
     slice,
 };
@@ -32,6 +32,7 @@ use windows_sys::Win32::{Foundation::SYSTEMTIME, System::SystemInformation::GetL
 
 use crate::{
     capture::{bitmap_header, Image, BYTES_PER_PIXEL},
+    output_settings::{self, OutputConfig},
     pinned,
 };
 
@@ -41,8 +42,9 @@ const CF_UNICODETEXT: u32 = 13;
 #[derive(Clone, Copy)]
 pub enum Target {
     Copy,
-    /// Save as PNG, suggesting `name` in the file dialog.
-    Save(&'static str),
+    /// Save as PNG: straight into the save folder when auto-save is on,
+    /// otherwise through the file dialog, named by the template.
+    Save,
     /// Pin on screen at the capture's screen position.
     Pin(RECT),
     /// Pin, then recognize its text so it can be selected and copied.
@@ -54,15 +56,18 @@ pub enum Target {
 /// Delivers a capture. `Ok(true)` means it left Snapshot and the capture UI
 /// can close; `Ok(false)` means the user cancelled the save dialog.
 pub unsafe fn deliver(window: HWND, image: &Image, target: Target) -> Result<bool, String> {
+    // A broken settings file must not stop a copy; it falls back to defaults.
+    let config = OutputConfig::load().unwrap_or_default();
     let result = match target {
         Target::Copy => copy_image(window, image).map(|()| true),
-        Target::Save(name) => match save_path(window, name)? {
-            Some(path) => image
-                .save_png(&path)
-                .map(|()| true)
-                .map_err(|error| error.to_string()),
-            None => Ok(false),
-        },
+        Target::Save if config.auto_save => save_to_folder(image, &config).map(|_| true),
+        Target::Save => {
+            let name = config.file_name(image.width, image.height);
+            match save_path(window, &name, &config.folder())? {
+                Some(path) => save_file(image, &config, &path).map(|()| true),
+                None => Ok(false),
+            }
+        }
         Target::Pin(screen) | Target::TextPin(screen) | Target::TranslatePin(screen) => {
             let mode = match target {
                 Target::TextPin(_) => pinned::Mode::Text,
@@ -74,11 +79,37 @@ pub unsafe fn deliver(window: HWND, image: &Image, target: Target) -> Result<boo
                 .map_err(|error| error.to_string())
         }
     };
-    result.map_err(|error| match target {
+    let delivered = result.map_err(|error| match target {
         Target::Copy => format!("无法复制到剪贴板。\n{error}"),
-        Target::Save(_) => format!("无法保存图片。\n{error}"),
+        Target::Save => format!("无法保存图片。\n{error}"),
         Target::Pin(_) | Target::TextPin(_) | Target::TranslatePin(_) => format!("无法贴图。\n{error}"),
-    })
+    })?;
+    if delivered && config.auto_save && !matches!(target, Target::Save) {
+        save_to_folder(image, &config).map_err(|error| {
+            let done = if matches!(target, Target::Copy) { "复制" } else { "贴到屏幕上" };
+            format!("截图已经{done}，但没能自动保存。\n{error}")
+        })?;
+    }
+    Ok(delivered)
+}
+
+/// Writes the capture to the save folder under a free name.
+pub fn save_to_folder(image: &Image, config: &OutputConfig) -> Result<PathBuf, String> {
+    let folder = config.folder();
+    std::fs::create_dir_all(&folder).map_err(|error| format!("无法创建保存位置 {}。\n{error}", folder.display()))?;
+    let path = output_settings::unique_path(&folder, &config.file_name(image.width, image.height));
+    save_file(image, config, &path)?;
+    Ok(path)
+}
+
+/// Saves as PNG, with the shadow and border the settings ask for.
+fn save_file(image: &Image, config: &OutputConfig, path: &std::path::Path) -> Result<(), String> {
+    let result = if config.decorates() {
+        output_settings::decorate(image, config.shadow, config.border).save_png_alpha(path)
+    } else {
+        image.save_png(path)
+    };
+    result.map_err(|error| format!("{}\n{error}", path.display()))
 }
 
 /// Puts the image on the clipboard as an opaque bottom-up CF_DIB plus PNG.
@@ -230,10 +261,11 @@ unsafe fn global_copy(bytes: &[u8]) -> Result<*mut core::ffi::c_void, String> {
     Ok(memory)
 }
 
-/// Asks where to save. `Ok(None)` when the user cancels.
-unsafe fn save_path(window: HWND, default_name: &str) -> Result<Option<PathBuf>, String> {
+/// Asks where to save, starting in `folder`. `Ok(None)` when the user cancels.
+unsafe fn save_path(window: HWND, default_name: &str, folder: &std::path::Path) -> Result<Option<PathBuf>, String> {
+    let folder: Vec<u16> = folder.as_os_str().encode_wide().chain([0]).collect();
     let mut filename = [0u16; 1024];
-    let default_name: Vec<u16> = default_name.encode_utf16().collect();
+    let default_name: Vec<u16> = default_name.encode_utf16().take(filename.len() - 1).collect();
     filename[..default_name.len()].copy_from_slice(&default_name);
     let mut dialog = OPENFILENAMEW {
         lStructSize: size_of::<OPENFILENAMEW>() as u32,
@@ -243,6 +275,7 @@ unsafe fn save_path(window: HWND, default_name: &str) -> Result<Option<PathBuf>,
         nMaxFile: filename.len() as u32,
         Flags: OFN_EXPLORER | OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR,
         lpstrDefExt: w!("png"),
+        lpstrInitialDir: folder.as_ptr(),
         ..Default::default()
     };
     if GetSaveFileNameW(&mut dialog) == 0 {

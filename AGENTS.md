@@ -35,32 +35,33 @@ Build and test on Windows only. `snapshot.ps1` locates Cargo and the Visual Stud
 
 | Module | Responsibility |
 | --- | --- |
-| `main.rs` | Tray icon and menu, first-run setup, applying settings |
-| `global_hotkey.rs` | The global capture shortcuts (main + optional second) registered on the tray window, with conflict tracking and retry |
+| `main.rs` | Tray icon and menu (capture, capture window, last capture, the 贴图 submenu), first-run setup, applying settings |
+| `global_hotkey.rs` | The global shortcuts registered on the tray window, each with a `hotkey::Global` action (capture main + optional second, capture window, last capture), with conflict tracking and retry |
 | `hotkey.rs` | Binding list, defaults (capture `Ctrl+Alt+A`), parsing, `shortcuts.txt` load/save, `first_run()` |
 | `settings.rs` | Settings window: frameless and custom-drawn (GDI + GDI+), DPI-scaled, key recording, live hotkey probe, theme picker |
 | `app_icon.rs` | Tray icon drawn in code, with an amber warning badge variant |
 | `startup.rs` | Start-at-login value under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\Snapshot` |
 | `capture.rs` | Desktop grab, cropping, the `Surface` bitmap helper and PNG encoding |
-| `output.rs` | The only exit for captures: `deliver` copies (opaque bottom-up DIB + PNG), saves or pins. Normal and long captures both use it |
-| `selection/mod.rs` | The capture session: state, window creation and message dispatch |
-| `selection/chrome.rs`, `annotate.rs`, `text.rs`, `pointer.rs`, `paint.rs`, `export.rs` | Toolbar/option/hint state and commands; strokes; text editing; dragging, snapping, loupe and cursors; painting; leaving the overlay |
+| `output.rs` | The only exit for captures: `deliver` copies (opaque bottom-up DIB + PNG), saves or pins, then auto-saves when enabled. Normal and long captures both use it |
+| `output_settings.rs` | `output.txt` (folder, file name template, auto-save, shadow, border), template expansion, the shadow/border decoration (real alpha, saved with `save_png_alpha`), and the 保存设置 window |
+| `selection/mod.rs` | The capture session: state, window creation and message dispatch. A locked session is kept in `LAST` when it closes; `restore_last` reopens it on the same frozen desktop |
+| `selection/chrome.rs`, `annotate.rs`, `marks.rs`, `text.rs`, `pointer.rs`, `size.rs`, `paint.rs`, `export.rs` | Toolbar/option/hint state and commands; strokes; picking drawn shapes again (move, handles, restyle, delete); text editing; dragging, snapping, loupe and cursors; typed sizes and arrow-key nudging; painting; leaving the overlay |
 | `selection_geometry.rs`, `targets.rs`, `panel_edges.rs` | Rect math, window/UIA target snapping, content-column edge detection |
 | `toolbar.rs` | Main toolbar layout, painting, hit testing; shared `paint_panel` / `paint_button` |
-| `annotation_options.rs` | Secondary option bar (width, font size, colors) |
-| `annotation.rs`, `text_mark.rs`, `text_render.rs`, `mosaic.rs` | Annotation model and history (rectangle, brush, mosaic, text, arrow, step numbers; numbers count from `History::next_number`), text boxes, capturing the hidden text editor, mosaic |
+| `annotation_options.rs` | Secondary option bar (width, font size, zoom, on/off toggles such as 圆角 / 虚线 / 描边 / 底色, colors) |
+| `annotation.rs`, `text_mark.rs`, `text_render.rs`, `mosaic.rs` | Annotation model and history (rectangle, brush, mosaic, text, arrow, step numbers, lens; numbers count from `History::next_number`). Shapes other than text and mosaic are selectable: `Mark::hit` / `grips` / `dragged` / `with_style`, edits recorded as `Edit::Replace`, text boxes, capturing the hidden text editor, mosaic |
 | `gdiplus.rs` | GDI+ wrapper: anti-aliased shapes, vector icon rasterizing, image drawing |
 | `overlay_ui.rs`, `typography.rs` | Hint panel, fonts |
 | `icons.rs`, `icons/lucide.rs` | Vector icons rendered at the exact target size. `icons/lucide.rs` is generated: edit SVGs in `tools/icons/` and run `python tools/svg2rust.py tools/icons <lucide version> <names...> > src/icons/lucide.rs` |
 | `theme.rs` | Color themes (Graphite default, Midnight, Forest, Light) and color helpers |
 | `ui.rs`, `dialog.rs` | Shared drawing helpers for custom-drawn windows; the themed dialog that replaces `MessageBox` |
 | `scroll_capture.rs`, `scroll_input.rs`, `scroll_stitch.rs` | Long capture session, wheel forwarding, frame stitching |
-| `pinned.rs` | Pinned image windows (`Mode::Plain` / `Text` / `Translate`). Text and translate pins carry a `pin_text::TextLayer` and recognize in a background thread that posts `OCR_DONE`; translate pins add a `pin_translate::TranslatePane` shown in an owned popup window (`popup_proc`, keys forwarded to the pin) and post `TRANSLATE_DONE` with a request id so stale replies are dropped. `translation_settings_changed()` makes waiting pins retry |
+| `pinned.rs` | Pinned image windows (`Mode::Plain` / `Text` / `Translate`). Right-click menu: copy, save, topmost, group, hide group, close; groups are shown/hidden together (`groups`, `toggle_group`, `set_all_hidden`). Text and translate pins carry a `pin_text::TextLayer` and recognize in a background thread that posts `OCR_DONE`; translate pins add a `pin_translate::TranslatePane` shown in an owned popup window (`popup_proc`, keys forwarded to the pin) and post `TRANSLATE_DONE` with a request id so stale replies are dropped. `translation_settings_changed()` makes waiting pins retry |
 | `ocr.rs` | Windows built-in OCR (`Windows.Media.Ocr`). Recognizes at 1×, and again on a 2× Catmull-Rom enlargement when the median word is under 18 px; tall images go in overlapping strips. `<test binary> ocr --ignored --nocapture` prints accuracy by font size |
 | `codes.rs` | QR codes and barcodes via rxing (decoders only, no image formats), run on the recognition thread. `codes::tests::render` draws codes for tests |
 | `clipboard_data.rs` | Our own `IDataObject` put on the clipboard with `OleSetClipboard`, so `FileContents` can be read at `lindex` 0 (Explorer's paste-as-file). `output::tests::explorer_can_paste_the_copy_as_a_file` reads it back the way Explorer does |
 | `pin_translate.rs` | Translation popup beside a translate pin (owned by the pin, follows it, sized to its content): language picker, copy, settings, skeleton while waiting, full error with retry. `<test binary> pin_translate --ignored` renders previews to `%TEMP%\snapshot-preview` |
-| `translate.rs` | Providers (OpenAI-compatible, DeepL, Baidu, Youdao), auto language, chunking, retries (network / 429 / 5xx only), `translate.txt`. Tests run every provider against a local mock server (`http::tests::serve`) |
+| `translate.rs` | Providers (free MyMemory, the default with no key; OpenAI-compatible, DeepL, Baidu, Youdao), auto language, chunking, retries (network / 429 / 5xx only), `translate.txt`. Tests run every provider against a local mock server (`http::tests::serve`) |
 | `translate_settings.rs` | Translation service window with native EDIT boxes (Tab via `IsDialogMessageW` in the main loop). Keys are written to the Credential Manager and never read back into the window |
 | `http.rs` | Blocking HTTPS POST over WinHTTP (system proxy and TLS); call off the UI thread |
 | `credential.rs` | Windows Credential Manager secrets named `Snapshot/<name>`. The ignored round-trip test needs the desktop session |
@@ -84,7 +85,8 @@ The overlay follows Snipaste's layout:
 | Location | Content |
 | --- | --- |
 | `%LOCALAPPDATA%\Snapshot\shortcuts.txt` | Shortcuts (`capture_secondary=` is the optional second capture key, empty when unset), pin opacity step and theme. Its absence (together with no legacy `hotkey.txt`) marks the first run, which enables start at login |
-| `%LOCALAPPDATA%\Snapshot\translate.txt` | Translation provider, OpenAI-compatible address and model, Baidu/Youdao app IDs. Never secrets |
+| `%LOCALAPPDATA%\Snapshot\translate.txt` | Translation provider (none means the free service), OpenAI-compatible address and model, Baidu/Youdao app IDs, the optional email for the free service. Never secrets |
+| `%LOCALAPPDATA%\Snapshot\output.txt` | Save folder (empty means Pictures\Snapshot), file name template, auto-save, shadow, border |
 | Credential Manager `Snapshot/translate/<provider>/<field>` | Translation API keys and secrets |
 | `%LOCALAPPDATA%\Snapshot\hotkey.txt` | Legacy capture shortcut, migrated on first run |
 | `HKCU\...\Run\Snapshot` | Start-at-login command, pointing at the running executable |

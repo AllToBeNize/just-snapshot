@@ -51,13 +51,13 @@ const WIDTH: i32 = 820;
 const PAD: i32 = 24;
 const HEADER: i32 = 52;
 const LABEL: i32 = 22;
-const SECTION_GAP: i32 = 14;
+const SECTION_GAP: i32 = 12;
 const HERO: i32 = 124;
-const ROW: i32 = 38;
-const ROWS: i32 = 5;
+const ROW: i32 = 36;
+const ROWS: i32 = 6;
 const COLUMNS: i32 = 3;
 const CARD_INSET: i32 = 6;
-const GENERAL_ROW: i32 = 52;
+const GENERAL_ROW: i32 = 48;
 const GENERAL_ROWS: i32 = 3;
 const FOOTER: i32 = 60;
 const HERO_KEYS: i32 = 220;
@@ -78,6 +78,8 @@ enum Target {
     ClearSecondary,
     /// "服务设置" beside the translate shortcut.
     Service,
+    /// Opens the save settings: folder, file names, auto-save, shadow, border.
+    Output,
     Close,
     Reset,
     Cancel,
@@ -211,6 +213,7 @@ struct Layout {
     clear: RECT,
     service: RECT,
     toggle: RECT,
+    output: RECT,
     stepper: RECT,
     minus: RECT,
     plus: RECT,
@@ -292,8 +295,12 @@ impl Layout {
 
         let right = WIDTH - PAD - 18;
         let row_top = |row: i32, height: i32| general_top + GENERAL_ROW * row + (GENERAL_ROW - height) / 2;
+        // The first row holds two settings side by side.
+        let half = WIDTH / 2;
         let toggle_top = row_top(0, 24);
-        let toggle = rect(right - 44, toggle_top, right, toggle_top + 24);
+        let toggle = rect(half - 18 - 44, toggle_top, half - 18, toggle_top + 24);
+        let output_top = row_top(0, 30);
+        let output = rect(right - 76, output_top, right, output_top + 30);
         let stepper_top = row_top(1, 30);
         let stepper = rect(right - 112, stepper_top, right, stepper_top + 30);
         let minus = rect(right - 112, stepper_top, right - 80, stepper_top + 30);
@@ -333,6 +340,7 @@ impl Layout {
             clear,
             service,
             toggle,
+            output,
             stepper,
             minus,
             plus,
@@ -350,7 +358,11 @@ impl Layout {
     fn targets(&self) -> impl Iterator<Item = (Target, RECT)> + '_ {
         (0..FIELDS)
             .map(|index| (Target::Key(index), self.keys[index]))
-            .chain([(Target::ClearSecondary, self.clear), (Target::Service, self.service)])
+            .chain([
+                (Target::ClearSecondary, self.clear),
+                (Target::Service, self.service),
+                (Target::Output, self.output),
+            ])
             .chain((0..THEMES.len()).map(|index| (Target::Theme(index), self.themes[index])))
             .chain([
                 (Target::Toggle, self.toggle),
@@ -628,6 +640,11 @@ unsafe fn activate(window: HWND, target: Target) {
         Target::Service => {
             if let Err(error) = translate_settings::open(window) {
                 crate::show_error(window, &format!("无法打开翻译设置。\n{error}"));
+            }
+        }
+        Target::Output => {
+            if let Err(error) = crate::output_settings::open(window) {
+                crate::show_error(window, &format!("无法打开保存设置。\n{error}"));
             }
         }
         Target::Close | Target::Cancel => {
@@ -950,7 +967,7 @@ impl<'a> Painter<'a> {
         self.close_button();
         for (rect, label) in [
             (layout.capture_label, "截图"),
-            (layout.toolbar_label, "截图工具栏"),
+            (layout.toolbar_label, "截图工具栏　·　「截取窗口」和「上次截图」在任何程序里都能用"),
             (layout.general_label, "常规"),
         ] {
             let rect = RECT {
@@ -1337,6 +1354,7 @@ impl<'a> Painter<'a> {
         let palette = self.palette;
         let card = self.layout.general;
         let row = self.s(GENERAL_ROW);
+        let half = card.left + (card.right - card.left) / 2;
         let rows = [
             ("开机自动启动", "登录 Windows 后在托盘待命", self.layout.toggle.left),
             (
@@ -1388,6 +1406,39 @@ impl<'a> Painter<'a> {
                 DT_LEFT | DT_TOP | DT_END_ELLIPSIS,
             );
         }
+        // The right half of the first row: save settings.
+        let middle = card.top + row / 2;
+        ui::fill(
+            self.dc,
+            RECT { left: half, top: card.top + self.s(10), right: half + 1, bottom: card.top + row - self.s(10) },
+            palette.divider,
+        );
+        let text = RECT { left: half + self.s(18), right: self.layout.output.left - self.s(12), ..card };
+        self.text(
+            RECT { top: middle - self.s(21), bottom: middle, ..text },
+            "保存截图",
+            self.state.fonts.body,
+            palette.text,
+            DT_LEFT | DT_BOTTOM | DT_END_ELLIPSIS,
+        );
+        self.text(
+            RECT { top: middle + self.s(2), bottom: middle + self.s(21), ..text },
+            "位置、文件名、自动保存、阴影和边框",
+            self.state.fonts.small,
+            palette.secondary,
+            DT_LEFT | DT_TOP | DT_END_ELLIPSIS,
+        );
+        let radius = self.f(8.0);
+        ui::button(
+            self.dc,
+            self.layout.output,
+            "设置…",
+            self.state.fonts.body,
+            palette,
+            false,
+            self.face(Target::Output, palette.key_face),
+            radius,
+        );
         self.toggle();
         self.stepper();
         self.theme_chips();
@@ -1627,6 +1678,9 @@ fn binding_icon(binding: Binding) -> Icon {
         Binding::Translate => Icon::Translate,
         Binding::Arrow => Icon::Arrow,
         Binding::Number => Icon::Number,
+        Binding::Magnify => Icon::Magnify,
+        Binding::CaptureWindow => Icon::Window,
+        Binding::LastCapture => Icon::History,
     }
 }
 
@@ -1809,7 +1863,7 @@ mod tests {
         draft.set_slot(SECONDARY, Shortcut::parse("F1").unwrap());
         assert!(draft.first_duplicate().is_none());
         let preferences = draft.preferences().unwrap();
-        assert_eq!(preferences.captures().len(), 2);
+        assert_eq!(preferences.globals().len(), 4, "main, second, window and last capture");
     }
 
     #[test]

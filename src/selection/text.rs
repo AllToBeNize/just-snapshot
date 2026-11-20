@@ -20,6 +20,7 @@ pub(super) unsafe fn begin_text_drag(window: HWND, point: POINT, double: bool) -
             })?;
         let text = selection.annotations.text(index)?.clone();
         let bounds = text.bounds();
+        let previous = previous.or_else(|| selection.take_selected_mark());
         selection.selected_text = Some(index);
         selection.annotations.tool = Some(Tool::Text);
         let edit = double && matches!(handle, TextHandle::Move);

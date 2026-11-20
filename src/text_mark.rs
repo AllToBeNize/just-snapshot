@@ -8,11 +8,33 @@ use windows_sys::Win32::{
 
 use crate::{capture::Image, selection_geometry::BORDER_BLUE, gdiplus::Graphics, typography};
 
+/// How a text box sets off its letters from the capture behind them.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Look {
+    #[default]
+    Plain,
+    /// A halo in the contrasting color around every letter.
+    Outline,
+    /// A rounded box in the text color, with the letters in its contrast.
+    Fill,
+}
+
+/// Dark ink on light colors, white on everything else.
+pub fn contrast(color: u32) -> u32 {
+    let (r, g, b) = ((color & 0xff) as f32, ((color >> 8) & 0xff) as f32, ((color >> 16) & 0xff) as f32);
+    if 0.299 * r + 0.587 * g + 0.114 * b > 186.0 {
+        0x0022_2222
+    } else {
+        0x00ff_ffff
+    }
+}
+
 #[derive(Clone, PartialEq)]
 pub struct TextMark {
     pub text: Vec<u16>,
     pub size: i32,
     pub color: u32,
+    pub look: Look,
     center: (f64, f64),
     width: i32,
     height: i32,
@@ -58,6 +80,7 @@ impl TextMark {
             text: Vec::new(),
             size,
             color,
+            look: Look::Plain,
             center: (
                 f64::from(rect.left + rect.right) / 2.0,
                 f64::from(rect.top + rect.bottom) / 2.0,
@@ -364,21 +387,61 @@ impl TextMark {
             eDx: self.center.0 as f32,
             eDy: self.center.1 as f32,
         };
+        self.paint_background(dc);
         if SetGraphicsMode(dc, GM_ADVANCED) != 0 && SetWorldTransform(dc, &transform) != 0 {
             SelectObject(dc, typography::annotation_font(self.size));
             SetBkMode(dc, TRANSPARENT as i32);
-            SetTextColor(dc, self.color);
             let mut rect = self.local_rect();
             InflateRect(&mut rect, -3, -3);
-            DrawTextW(
-                dc,
-                self.text.as_ptr(),
-                self.text.len() as i32,
-                &mut rect,
-                DT_WORDBREAK | DT_NOPREFIX | DT_EDITCONTROL,
-            );
+            let draw = |rect: &mut RECT, color: u32| {
+                SetTextColor(dc, color);
+                DrawTextW(
+                    dc,
+                    self.text.as_ptr(),
+                    self.text.len() as i32,
+                    rect,
+                    DT_WORDBREAK | DT_NOPREFIX | DT_EDITCONTROL,
+                );
+            };
+            if self.look == Look::Outline {
+                let halo = contrast(self.color);
+                let reach = (self.size / 12).clamp(1, 4);
+                for (dx, dy) in [(-1, -1), (0, -1), (1, -1), (-1, 0), (1, 0), (-1, 1), (0, 1), (1, 1)] {
+                    let mut offset = rect;
+                    OffsetRect(&mut offset, dx * reach, dy * reach);
+                    draw(&mut offset, halo);
+                }
+            }
+            draw(&mut rect, self.ink());
         }
         RestoreDC(dc, saved);
+    }
+
+    /// The letters' color: the contrast of the box color when filled.
+    pub fn ink(&self) -> u32 {
+        if self.look == Look::Fill {
+            contrast(self.color)
+        } else {
+            self.color
+        }
+    }
+
+    /// The rounded box behind filled text; nothing for the other looks.
+    pub unsafe fn paint_background(&self, dc: HDC) {
+        if self.look != Look::Fill {
+            return;
+        }
+        let Some(graphics) = Graphics::new(dc) else {
+            return;
+        };
+        graphics.transform(self.center.0 as f32, self.center.1 as f32, self.angle.to_degrees() as f32);
+        let rect = self.local_rect();
+        let radius = (self.size as f32 * 0.35).clamp(4.0, 12.0);
+        graphics.fill_round(
+            [rect.left as f32, rect.top as f32, rect.right as f32, rect.bottom as f32],
+            radius,
+            crate::theme::argb(self.color, 255),
+        );
     }
 
     /// Snipaste-style chrome: a thin dashed outline, small square corner

@@ -178,6 +178,95 @@ impl Graphics {
     }
 }
 
+impl Graphics {
+    /// Strokes a rectangle, rounded when `radius` > 0, solid or dashed. `argb` is 0xAARRGGBB.
+    pub unsafe fn stroke_shape(&self, bounds: [f32; 4], radius: f32, argb: u32, width: f32, dashed: bool) {
+        let Some(path) = round_path(bounds, radius) else {
+            return;
+        };
+        if let Some(pen) = styled_pen(argb, width, dashed) {
+            GdipDrawPath(self.0, pen.0, path);
+        }
+        GdipDeletePath(path);
+    }
+
+    pub unsafe fn stroke_ellipse(&self, [left, top, right, bottom]: [f32; 4], argb: u32, width: f32, dashed: bool) {
+        if let Some(pen) = styled_pen(argb, width, dashed) {
+            GdipDrawEllipse(self.0, pen.0, left, top, right - left, bottom - top);
+        }
+    }
+
+    pub unsafe fn line(&self, from: (f32, f32), to: (f32, f32), argb: u32, width: f32) {
+        if let Some(pen) = styled_pen(argb, width, false) {
+            GdipDrawLine(self.0, pen.0, from.0, from.1, to.0, to.1);
+        }
+    }
+
+    /// Later drawing is rotated by `degrees` about the origin, then moved by (`dx`, `dy`).
+    pub unsafe fn transform(&self, dx: f32, dy: f32, degrees: f32) {
+        GdipTranslateWorldTransform(self.0, dx, dy, MatrixOrderPrepend);
+        GdipRotateWorldTransform(self.0, degrees, MatrixOrderPrepend);
+    }
+
+    /// Draws `image` stretched over `target`, showing only the part inside the ellipse `clip`.
+    pub unsafe fn image_in_ellipse(&self, image: &Image, target: [f32; 4], clip: [f32; 4]) {
+        let mut path = null_mut();
+        if GdipCreatePath(FillModeAlternate, &mut path) != Ok {
+            return;
+        }
+        GdipAddPathEllipse(path, clip[0], clip[1], clip[2] - clip[0], clip[3] - clip[1]);
+        GdipSetClipPath(self.0, path, CombineModeReplace);
+        let mut bitmap = null_mut();
+        if GdipCreateBitmapFromScan0(
+            image.width,
+            image.height,
+            image.width * 4,
+            PARGB_32,
+            image.pixels.as_ptr(),
+            &mut bitmap,
+        ) == Ok
+        {
+            GdipSetInterpolationMode(self.0, InterpolationModeHighQualityBicubic);
+            GdipSetPixelOffsetMode(self.0, PixelOffsetModeHalf);
+            GdipDrawImageRectRect(
+                self.0,
+                bitmap.cast(),
+                target[0],
+                target[1],
+                target[2] - target[0],
+                target[3] - target[1],
+                0.0,
+                0.0,
+                image.width as f32,
+                image.height as f32,
+                UnitPixel,
+                null(),
+                0,
+                null_mut(),
+            );
+            GdipDisposeImage(bitmap.cast());
+        }
+        GdipResetClip(self.0);
+        GdipDeletePath(path);
+    }
+}
+
+/// A pen with round caps; dashes scale with the width.
+unsafe fn styled_pen(argb: u32, width: f32, dashed: bool) -> Option<Pen> {
+    let mut pen = null_mut();
+    if GdipCreatePen1(argb, width, UnitPixel, &mut pen) != Ok {
+        return None;
+    }
+    GdipSetPenLineJoin(pen, LineJoinRound);
+    if dashed {
+        // In units of the pen width: long dashes with round ends read well at any size.
+        let pattern = [2.2f32, 1.8];
+        GdipSetPenDashArray(pen, pattern.as_ptr(), pattern.len() as i32);
+        GdipSetPenDashCap197819(pen, DashCapRound);
+    }
+    Some(Pen(pen))
+}
+
 /// Renders into a transparent premultiplied-BGRA image of `size`×`size`.
 pub unsafe fn rasterize(size: i32, draw: impl FnOnce(&Graphics)) -> Option<Image> {
     if size <= 0 || !STARTUP.with(|startup| startup.is_some()) {

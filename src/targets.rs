@@ -114,6 +114,40 @@ unsafe extern "system" fn collect_window(window: HWND, context: LPARAM) -> i32 {
     1
 }
 
+/// The screen bounds of the foreground window, without its invisible
+/// resize borders and clipped to its monitor when maximized. `None` for the
+/// desktop, the taskbar and hidden or minimized windows.
+pub unsafe fn active_window() -> Option<RECT> {
+    let window = GetAncestor(GetForegroundWindow(), GA_ROOT);
+    if window.is_null() || IsWindowVisible(window) == 0 || IsIconic(window) != 0 {
+        return None;
+    }
+    let mut class = [0u16; 32];
+    let length = GetClassNameW(window, class.as_mut_ptr(), class.len() as i32) as usize;
+    let shell = ["WorkerW", "Progman", "Shell_TrayWnd", "Shell_SecondaryTrayWnd"]
+        .iter()
+        .any(|name| class[..length].iter().copied().eq(name.encode_utf16()));
+    if shell || window == GetShellWindow() {
+        return None;
+    }
+    let mut rect = RECT::default();
+    let status = DwmGetWindowAttribute(
+        window,
+        DWMWA_EXTENDED_FRAME_BOUNDS as u32,
+        (&mut rect as *mut RECT).cast(),
+        size_of::<RECT>() as u32,
+    );
+    if status < 0 && GetWindowRect(window, &mut rect) == 0 {
+        return None;
+    }
+    // A maximized window hangs a few pixels over the screen edges.
+    let screen = monitors().into_iter().find_map(|monitor| intersect(rect, monitor).filter(|_| contains(monitor, POINT {
+        x: rect.left + (rect.right - rect.left) / 2,
+        y: rect.top + (rect.bottom - rect.top) / 2,
+    })));
+    screen.or_else(|| intersect(rect, rect))
+}
+
 /// Every monitor's rectangle in screen coordinates.
 pub unsafe fn monitors() -> Vec<RECT> {
     unsafe extern "system" fn collect(_: HMONITOR, _: HDC, rect: *mut RECT, context: LPARAM) -> i32 {

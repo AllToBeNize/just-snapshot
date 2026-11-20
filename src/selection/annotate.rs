@@ -9,7 +9,10 @@ pub(super) unsafe fn begin_annotation(window: HWND, point: POINT) -> bool {
             return None;
         }
         let tool = selection.annotations.tool?;
-        let previous = selection.selected_text().map(TextMark::bounds);
+        let previous = selection
+            .selected_text()
+            .map(TextMark::bounds)
+            .or_else(|| selection.take_selected_mark());
         selection.selected_text = None;
         let draft = Draft::new(
             tool,
@@ -48,18 +51,22 @@ pub(super) unsafe fn update_annotation(window: HWND, point: POINT, end: bool) ->
     if let Some(draft) = finished {
         ReleaseCapture();
         if draft.tool == Tool::Text {
-            open_text(
-                window,
-                None,
-                TextMark::new(draft.text_rect(clip), style.text_size, style.text_color),
-            );
+            let mut text = TextMark::new(draft.text_rect(clip), style.text_size, style.text_color);
+            text.look = style.text_look;
+            open_text(window, None, text);
         } else {
-            SESSION.with_borrow_mut(|session| {
-                let annotations = &mut session.as_mut().unwrap().annotations;
-                if let Some(mark) = draft.finish(annotations.next_number()) {
-                    annotations.push(mark);
-                }
+            let added = SESSION.with_borrow_mut(|session| {
+                let selection = session.as_mut().unwrap();
+                let next = selection.annotations.next_number();
+                let mark = draft.finish(next, clip, &selection.desktop)?;
+                let bounds = mark.bounds();
+                selection.annotations.push(mark);
+                Some(bounds)
             });
+            // A lens appears away from where it was dragged.
+            if let Some(bounds) = added {
+                InvalidateRect(window, &bounds, 0);
+            }
         }
         invalidate_toolbar(window);
     }
@@ -70,7 +77,10 @@ pub(super) unsafe fn leave_tool(window: HWND, point: POINT) -> bool {
     let changed = SESSION.with_borrow_mut(|session| {
         let selection = session.as_mut()?;
         selection.annotations.tool.take()?;
-        let frame = selection.selected_text().map(TextMark::bounds);
+        let frame = selection
+            .selected_text()
+            .map(TextMark::bounds)
+            .or_else(|| selection.take_selected_mark());
         selection.selected_text = None;
         let draft = selection.annotations.draft.take().is_some();
         Some((

@@ -91,19 +91,27 @@ pub(super) unsafe fn change_option(window: HWND, choice: Choice) {
     let changed = SESSION.with_borrow_mut(|session| {
         let selection = session.as_mut()?;
         let tool = selection.annotations.tool?;
-        if selection.annotations.draft.is_some() || selection.text_drag.is_some() {
+        if selection.annotations.draft.is_some() || selection.text_drag.is_some() || selection.mark_drag.is_some() {
             return None;
         }
         let mut style = selection.option_style();
         choice.adjust(tool, &mut style);
         let mut dirty = [None, None];
         let mut editor_font = None;
-        if tool != Tool::Text {
+        if let Some(index) = selection.selected_mark {
+            // Restyle the picked shape; new shapes keep using the same style.
+            let mark = selection.annotations.mark(index)?;
+            let restyled = mark.with_style(&style);
+            dirty = [Some(mark.bounds()), Some(restyled.bounds())];
+            selection.annotations.replace(index, restyled);
+            selection.style = style;
+        } else if tool != Tool::Text {
             selection.style = style;
         } else if let Some(editor) = &selection.editor {
             let mut text = editor.text.clone();
             text.size = style.text_size;
             text.color = style.text_color;
+            text.look = style.text_look;
             let rect = text_editor_bounds(selection, &text);
             let resized = (EqualRect(&editor.rect, &rect) == 0).then_some(rect);
             let editor = selection.editor.as_mut().unwrap();
@@ -123,6 +131,7 @@ pub(super) unsafe fn change_option(window: HWND, choice: Choice) {
                 dirty[0] = Some(text.bounds());
                 text.size = style.text_size;
                 text.color = style.text_color;
+                text.look = style.text_look;
                 text.fit_text(selection.desktop.surface.dc);
                 dirty[1] = Some(text.bounds());
                 selection.annotations.replace_text(index, text);
@@ -200,6 +209,8 @@ pub(super) unsafe fn refresh_hint(window: HWND) {
             HintMode::EditText
         } else if selection.selected_text().is_some() {
             HintMode::SelectedText
+        } else if selection.selected_mark.is_some() {
+            HintMode::SelectedMark
         } else if selection.automatic {
             HintMode::Automatic
         } else if let Some(tool) = selection.annotations.tool {
@@ -245,7 +256,13 @@ pub(super) unsafe fn command(window: HWND, action: Action) {
         {
             return None;
         }
-        let previous = selection.selected_text().map(TextMark::bounds);
+        if selection.mark_drag.is_some() {
+            return None;
+        }
+        let previous = selection
+            .selected_text()
+            .map(TextMark::bounds)
+            .or_else(|| selection.take_selected_mark());
         let region = selection.rect;
         match action {
             Action::Tool(tool) => {

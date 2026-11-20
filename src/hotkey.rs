@@ -31,9 +31,22 @@ pub enum Binding {
     Translate,
     Arrow,
     Number,
+    Magnify,
+    /// Global: capture the active window.
+    CaptureWindow,
+    /// Global: bring back the last capture with its annotations.
+    LastCapture,
 }
 
-pub const BINDINGS: [Binding; 15] = [
+/// What a global shortcut does.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Global {
+    Capture,
+    Window,
+    Last,
+}
+
+pub const BINDINGS: [Binding; 18] = [
     Binding::Capture,
     Binding::Rectangle,
     Binding::Text,
@@ -49,6 +62,9 @@ pub const BINDINGS: [Binding; 15] = [
     Binding::Translate,
     Binding::Arrow,
     Binding::Number,
+    Binding::Magnify,
+    Binding::CaptureWindow,
+    Binding::LastCapture,
 ];
 const NAMES: [&str; BINDINGS.len()] = [
     "capture",
@@ -66,6 +82,9 @@ const NAMES: [&str; BINDINGS.len()] = [
     "translate",
     "arrow",
     "number",
+    "magnify",
+    "capture_window",
+    "last_capture",
 ];
 const LABELS: [&str; BINDINGS.len()] = [
     "开始截图（全局）",
@@ -83,6 +102,9 @@ const LABELS: [&str; BINDINGS.len()] = [
     "翻译",
     "箭头",
     "序号",
+    "放大镜",
+    "截取窗口",
+    "上次截图",
 ];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -148,6 +170,15 @@ pub const DEFAULT: Bindings = Bindings([
     ctrl(b'9'),
     ctrl(b'R'),
     ctrl(b'N'),
+    ctrl(b'M'),
+    Shortcut {
+        modifiers: MOD_CONTROL | MOD_ALT,
+        key: b'W' as u32,
+    },
+    Shortcut {
+        modifiers: MOD_CONTROL | MOD_ALT,
+        key: b'R' as u32,
+    },
 ]);
 
 thread_local! {
@@ -166,6 +197,16 @@ impl Binding {
     pub fn label(self) -> &'static str {
         LABELS[self as usize]
     }
+
+    /// Registered with Windows, so it works in any program.
+    pub fn global(self) -> Option<Global> {
+        match self {
+            Self::Capture => Some(Global::Capture),
+            Self::CaptureWindow => Some(Global::Window),
+            Self::LastCapture => Some(Global::Last),
+            _ => None,
+        }
+    }
 }
 
 impl Bindings {
@@ -182,7 +223,7 @@ impl Bindings {
             .into_iter()
             .find(|&binding| self.get(binding) == shortcut)
         {
-            return (binding != Binding::Capture).then_some(binding);
+            return binding.global().is_none().then_some(binding);
         }
         match shortcut {
             Shortcut { modifiers: 0, key } if key == u32::from(VK_RETURN) => Some(Binding::Copy),
@@ -381,10 +422,15 @@ fn load_from(path: &Path) -> Result<Preferences, String> {
 }
 
 impl Preferences {
-    /// The global capture shortcuts: the main one, then the optional second one.
-    pub fn captures(&self) -> Vec<Shortcut> {
-        std::iter::once(self.bindings.get(Binding::Capture))
-            .chain(self.capture_secondary)
+    /// The global shortcuts: the main capture key, the optional second one,
+    /// then capturing the active window and bringing back the last capture.
+    pub fn globals(&self) -> Vec<(Shortcut, Global)> {
+        std::iter::once((self.bindings.get(Binding::Capture), Global::Capture))
+            .chain(self.capture_secondary.map(|shortcut| (shortcut, Global::Capture)))
+            .chain([
+                (self.bindings.get(Binding::CaptureWindow), Global::Window),
+                (self.bindings.get(Binding::LastCapture), Global::Last),
+            ])
             .collect()
     }
 
@@ -499,7 +545,7 @@ mod tests {
         preferences.opacity_step = 10;
         preferences.theme = Theme::Midnight;
         preferences.capture_secondary = Shortcut::parse("F1");
-        assert_eq!(preferences.captures().len(), 2);
+        assert_eq!(preferences.globals().len(), 4);
         save_to(&file, preferences).unwrap();
         assert_eq!(load_from(&file).unwrap(), preferences);
         save_to(&file, Preferences::default()).unwrap();

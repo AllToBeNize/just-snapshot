@@ -140,7 +140,9 @@ impl Layout {
         let dc = GetDC(null_mut());
         let inner = s(WIDTH - PAD * 2);
         let hint_height = ui::wrapped_height(dc, state.provider.hint(), state.fonts.small, inner, WRAP);
-        let security_height = ui::wrapped_height(dc, SECURITY_NOTE, state.fonts.small, inner, WRAP);
+        // Only services with keys need the note about where keys are kept.
+        let has_secret = state.provider.fields().iter().any(|field| field.secret());
+        let security_height = if has_secret { ui::wrapped_height(dc, SECURITY_NOTE, state.fonts.small, inner, WRAP) } else { 0 };
         let status_height = match status_text(&state.status) {
             Some((text, _)) => ui::wrapped_height(dc, &text, state.fonts.small, inner, WRAP),
             None => 0,
@@ -334,7 +336,7 @@ pub unsafe fn open(near: HWND) -> io::Result<()> {
         }
     }
     STATE.set(Some(State {
-        provider: config.provider.unwrap_or(Provider::OpenAi),
+        provider: config.provider.unwrap_or(Provider::Free),
         inputs,
         hovered: None,
         pressed: None,
@@ -464,7 +466,7 @@ fn missing(provider: Provider, values: &[(Field, String, bool)]) -> Option<&'sta
         .iter()
         .find(|(field, value, saved)| {
             let required = match field {
-                Field::Endpoint | Field::Model => false,
+                Field::Endpoint | Field::Model | Field::Email => false,
                 Field::ApiKey => provider == Provider::DeepL,
                 Field::AppId | Field::Secret => true,
             };
@@ -493,7 +495,7 @@ unsafe fn service_from_form(provider: Provider, values: &[(Field, String, bool)]
         model: Some(plain(Field::Model))
             .filter(|value| !value.is_empty())
             .unwrap_or_else(|| translate::DEFAULT_MODEL.into()),
-        app_id: plain(Field::AppId),
+        app_id: plain(if provider == Provider::Free { Field::Email } else { Field::AppId }),
         secret,
     })
 }
@@ -823,7 +825,7 @@ unsafe fn paint(dc: HDC, client: RECT, state: &State) {
     ui::text(
         dc,
         layout.security,
-        SECURITY_NOTE,
+        if layout.security.bottom > layout.security.top { SECURITY_NOTE } else { "" },
         fonts.small,
         palette.tertiary,
         DT_LEFT | DT_TOP | WRAP,
@@ -887,11 +889,14 @@ mod tests {
                 ShowWindow(window, SW_SHOW);
                 activate(window, Target::Provider(index));
                 if provider == Provider::OpenAi {
-                    let edit = STATE.with_borrow(|state| state.as_ref().unwrap().inputs[0].edit);
+                    let edit = STATE.with_borrow(|state| {
+                        let inputs = &state.as_ref().unwrap().inputs;
+                        inputs.iter().find(|input| input.provider == provider && input.field == Field::Endpoint).unwrap().edit
+                    });
                     assert_eq!(text_of(edit), translate::DEFAULT_ENDPOINT, "addresses start filled in");
                 }
                 if provider == Provider::Baidu {
-                    set_status(window, Status::Error("百度翻译翻译失败。\n签名错误，请检查 APP ID 和密钥是否填对（错误码 54001）\n服务器返回：Invalid Sign".into()));
+                    set_status(window, Status::Error("翻译失败（百度翻译）\n签名错误，请检查 APP ID 和密钥是否填对（错误码 54001）\n服务器返回：Invalid Sign".into()));
                 }
                 let mut message = MSG::default();
                 while PeekMessageW(&mut message, null_mut(), 0, 0, PM_REMOVE) != 0 {

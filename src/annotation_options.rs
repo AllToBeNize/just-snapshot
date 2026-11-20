@@ -8,6 +8,7 @@ use windows_sys::{
 
 use crate::{
     annotation::{Style, Tool, INK},
+    text_mark::Look,
     selection_geometry::contains,
     gdiplus::Graphics,
     theme::{self, argb},
@@ -21,6 +22,8 @@ const HEIGHT: i32 = 40;
 const GAP: i32 = 4;
 const PADDING: i32 = 5;
 const FIELD: i32 = 104;
+/// A labeled on/off button such as 圆角 or 底色.
+const TOGGLE: i32 = 42;
 const COLORS: [u32; 8] = [
     INK,
     0x0031_91ff,
@@ -37,6 +40,44 @@ pub enum Choice {
     Primary(i32),
     Block(i32),
     Color(u32),
+    Toggle(Flag),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Flag {
+    Round,
+    Dashed,
+    Outline,
+    Fill,
+}
+
+impl Flag {
+    fn label(self) -> *const u16 {
+        match self {
+            Self::Round => w!("圆角"),
+            Self::Dashed => w!("虚线"),
+            Self::Outline => w!("描边"),
+            Self::Fill => w!("底色"),
+        }
+    }
+
+    fn on(self, style: &Style) -> bool {
+        match self {
+            Self::Round => style.rect_round,
+            Self::Dashed => style.rect_dashed,
+            Self::Outline => style.text_look == Look::Outline,
+            Self::Fill => style.text_look == Look::Fill,
+        }
+    }
+}
+
+/// The on/off buttons a tool offers.
+fn flags(tool: Tool) -> &'static [Flag] {
+    match tool {
+        Tool::Rectangle => &[Flag::Round, Flag::Dashed],
+        Tool::Text => &[Flag::Outline, Flag::Fill],
+        _ => &[],
+    }
 }
 
 impl Choice {
@@ -60,6 +101,21 @@ impl Choice {
             (Tool::Number, Self::Primary(step)) => {
                 style.number_size = (style.number_size + step * 4).clamp(16, 96)
             }
+            (Tool::Rectangle, Self::Primary(step)) => {
+                style.rect_width = (style.rect_width + step).clamp(1, 32)
+            }
+            (Tool::Magnify, Self::Primary(step)) => {
+                style.magnify_zoom = (style.magnify_zoom + step).clamp(2, 6)
+            }
+            (Tool::Rectangle, Self::Toggle(Flag::Round)) => style.rect_round = !style.rect_round,
+            (Tool::Rectangle, Self::Toggle(Flag::Dashed)) => style.rect_dashed = !style.rect_dashed,
+            // Outline and fill exclude each other; clicking the active one turns it off.
+            (Tool::Text, Self::Toggle(flag @ (Flag::Outline | Flag::Fill))) => {
+                let look = if flag == Flag::Outline { Look::Outline } else { Look::Fill };
+                style.text_look = if style.text_look == look { Look::Plain } else { look };
+            }
+            (Tool::Rectangle, Self::Color(color)) => style.rect_color = color,
+            (Tool::Magnify, Self::Color(color)) => style.magnify_color = color,
             (Tool::Text, Self::Color(color)) => style.text_color = color,
             (Tool::Arrow, Self::Color(color)) => style.arrow_color = color,
             (Tool::Number, Self::Color(color)) => style.number_color = color,
@@ -79,11 +135,11 @@ pub struct Options {
 impl Options {
     pub fn new(tool: Tool, toolbar: RECT, area: RECT, selection: RECT) -> Option<Self> {
         let available = area.right - area.left;
-        let swatch = ((available - FIELD - PADDING * 2) / COLORS.len() as i32).min(26);
+        let toggles = TOGGLE * flags(tool).len() as i32;
+        let swatch = ((available - FIELD - toggles - PADDING * 2) / COLORS.len() as i32).min(26);
         let width = match tool {
-            Tool::Rectangle => return None,
             Tool::Mosaic => FIELD * 2,
-            _ if swatch >= 12 => FIELD + swatch * COLORS.len() as i32,
+            _ if swatch >= 12 => FIELD + toggles + swatch * COLORS.len() as i32,
             _ => return None,
         } + PADDING * 2;
         if width > available {
@@ -136,9 +192,17 @@ impl Options {
             (self.cell(FIELD + 31, 22), Choice::Block(-1)),
             (self.cell(FIELD + 81, 22), Choice::Block(1)),
         ];
+        let flags = flags(self.tool);
+        let toggles = flags.iter().enumerate().map(move |(index, &flag)| {
+            (
+                self.cell(FIELD + TOGGLE * index as i32 + 2, TOGGLE - 4),
+                Choice::Toggle(flag),
+            )
+        });
+        let offset = FIELD + TOGGLE * flags.len() as i32;
         let colors = COLORS.into_iter().enumerate().map(move |(index, color)| {
             (
-                self.cell(FIELD + self.swatch * index as i32, self.swatch),
+                self.cell(offset + self.swatch * index as i32, self.swatch),
                 Choice::Color(color),
             )
         });
@@ -146,6 +210,7 @@ impl Options {
         primary
             .into_iter()
             .chain(block.into_iter().filter(move |_| mosaic))
+            .chain(toggles)
             .chain(colors.filter(move |_| !mosaic))
     }
 
@@ -170,7 +235,8 @@ impl Options {
             Tool::Text => (w!("字号"), style.text_size, style.text_color),
             Tool::Arrow => (w!("粗细"), style.arrow_width, style.arrow_color),
             Tool::Number => (w!("大小"), style.number_size, style.number_color),
-            Tool::Rectangle => unreachable!(),
+            Tool::Rectangle => (w!("粗细"), style.rect_width, style.rect_color),
+            Tool::Magnify => (w!("倍数"), style.magnify_zoom, style.magnify_color),
         };
         label(dc, self.cell(0, 31), name);
         label(dc, self.cell(53, 28), wide(&value.to_string()).as_ptr());
@@ -203,6 +269,25 @@ impl Options {
                     // A hairline keeps white and black swatches visible on any theme.
                     graphics.stroke_round([cx - r, cy - r, cx + r, cy + r], r, argb(palette.text, 40), 1.0);
                 }
+                Choice::Toggle(flag) => {
+                    let on = flag.on(&style);
+                    if let Some(graphics) = &graphics {
+                        let fill = if on {
+                            palette.accent_soft
+                        } else if hover {
+                            palette.hover
+                        } else {
+                            palette.card
+                        };
+                        graphics.fill_round(to_f(rect), 6.0, argb(fill, 255));
+                        if on {
+                            graphics.stroke_round(ui_inset(to_f(rect)), 6.0, argb(palette.accent, 255), 1.0);
+                        }
+                    }
+                    SetTextColor(dc, if on { palette.accent } else { palette.text });
+                    label(dc, rect, flag.label());
+                    SetTextColor(dc, palette.text);
+                }
                 Choice::Primary(step) | Choice::Block(step) => {
                     if hover {
                         if let Some(graphics) = &graphics {
@@ -218,6 +303,10 @@ impl Options {
     }
 }
 
+fn ui_inset(bounds: [f32; 4]) -> [f32; 4] {
+    crate::ui::inset(bounds, 0.5)
+}
+
 unsafe fn label(dc: HDC, mut rect: RECT, text: *const u16) {
     DrawTextW(
         dc,
@@ -226,4 +315,65 @@ unsafe fn label(dc: HDC, mut rect: RECT, text: *const u16) {
         &mut rect,
         DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::capture::{Desktop, Surface};
+    use std::ptr::null_mut;
+
+    #[test]
+    fn toggles_flip_styles_and_outline_and_fill_exclude_each_other() {
+        let mut style = Style::default();
+        Choice::Toggle(Flag::Round).adjust(Tool::Rectangle, &mut style);
+        assert!(style.rect_round && !style.rect_dashed);
+        Choice::Toggle(Flag::Outline).adjust(Tool::Text, &mut style);
+        assert_eq!(style.text_look, Look::Outline);
+        Choice::Toggle(Flag::Fill).adjust(Tool::Text, &mut style);
+        assert_eq!(style.text_look, Look::Fill);
+        Choice::Toggle(Flag::Fill).adjust(Tool::Text, &mut style);
+        assert_eq!(style.text_look, Look::Plain);
+        Choice::Primary(10).adjust(Tool::Magnify, &mut style);
+        assert_eq!(style.magnify_zoom, 6, "zoom stops at 6×");
+        // Every button of the rectangle bar is hit at its center.
+        let area = RECT { right: 800, bottom: 300, ..Default::default() };
+        let toolbar = RECT { left: 100, top: 100, right: 700, bottom: 146 };
+        let options = Options::new(Tool::Rectangle, toolbar, area, RECT { bottom: 90, ..area }).unwrap();
+        let toggles = options.buttons().filter(|(_, choice)| matches!(choice, Choice::Toggle(_))).count();
+        assert_eq!(toggles, 2);
+        for (rect, choice) in options.buttons() {
+            let center = POINT { x: (rect.left + rect.right) / 2, y: (rect.top + rect.bottom) / 2 };
+            assert!(options.hit(center) == Some(choice));
+        }
+    }
+
+    /// The option bars with toggles. Run with `<test binary> annotation_options --ignored`.
+    #[test]
+    #[ignore]
+    fn preview() {
+        unsafe {
+            let area = RECT { right: 520, bottom: 170, ..Default::default() };
+            let surface = Surface::new(null_mut(), area.right, area.bottom).unwrap();
+            SetDCBrushColor(surface.dc, 0x00d8_d8d8);
+            FillRect(surface.dc, &area, GetStockObject(DC_BRUSH));
+            let mut style = Style::default();
+            style.rect_round = true;
+            style.text_look = Look::Fill;
+            for (index, tool) in [Tool::Rectangle, Tool::Text, Tool::Magnify].into_iter().enumerate() {
+                let top = 10 + index as i32 * 52;
+                let toolbar = RECT { left: 10, top: top - 50, right: 510, bottom: top - 4 };
+                let options = Options::new(tool, toolbar, area, RECT { bottom: 0, ..area }).unwrap();
+                options.paint(surface.dc, style, (index == 0).then_some(Choice::Toggle(Flag::Dashed)));
+            }
+            GdiFlush();
+            let mut image = Desktop { bounds: area, surface }.crop(area).unwrap();
+            for pixel in image.pixels.chunks_exact_mut(4) {
+                pixel[3] = 255;
+            }
+            let folder = std::env::temp_dir().join("snapshot-preview");
+            std::fs::create_dir_all(&folder).unwrap();
+            image.save_png(&folder.join("options-toggles.png")).unwrap();
+        }
+    }
 }

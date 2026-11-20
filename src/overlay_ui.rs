@@ -59,6 +59,8 @@ pub enum HintMode {
     Selected,
     Annotate(Tool),
     SelectedText,
+    /// A drawn shape picked up again.
+    SelectedMark,
     EditText,
 }
 
@@ -94,6 +96,7 @@ impl HintMode {
                 const {
                     &[
                         (Mouse(Icon::Drag), w!("绘制矩形")),
+                        (Mouse(Icon::Move), w!("拖动已画的标注调整")),
                         (Bound(Binding::Rectangle), w!("退出矩形工具")),
                         (Bound(Binding::Undo), w!("撤回标注")),
                     ]
@@ -112,6 +115,7 @@ impl HintMode {
                 const {
                     &[
                         (Mouse(Icon::Drag), w!("自由绘制")),
+                        (Mouse(Icon::Move), w!("拖动已画的标注调整")),
                         (Bound(Binding::Brush), w!("退出画笔工具")),
                         (Bound(Binding::Undo), w!("撤回标注")),
                     ]
@@ -130,6 +134,7 @@ impl HintMode {
                 const {
                     &[
                         (Mouse(Icon::Drag), w!("从起点拖到箭头指向")),
+                        (Mouse(Icon::Move), w!("拖动已画的标注调整")),
                         (Bound(Binding::Arrow), w!("退出箭头工具")),
                         (Bound(Binding::Undo), w!("撤回标注")),
                     ]
@@ -139,8 +144,29 @@ impl HintMode {
                 const {
                     &[
                         (Mouse(Icon::MouseLeft), w!("放下下一个序号")),
+                        (Mouse(Icon::Move), w!("拖动已画的标注调整")),
                         (Bound(Binding::Number), w!("退出序号工具")),
                         (Bound(Binding::Undo), w!("撤回标注")),
+                    ]
+                }
+            }
+            Self::Annotate(Tool::Magnify) => {
+                const {
+                    &[
+                        (Mouse(Icon::Drag), w!("从中心拖出放大范围")),
+                        (Mouse(Icon::Move), w!("拖动已画的标注调整")),
+                        (Mouse(Icon::MouseLeft), w!("单击放大默认范围")),
+                        (Bound(Binding::Magnify), w!("退出放大镜工具")),
+                    ]
+                }
+            }
+            Self::SelectedMark => {
+                const {
+                    &[
+                        (Mouse(Icon::Move), w!("拖动标注移动")),
+                        (Mouse(Icon::Resize), w!("拖动控制点调整")),
+                        (Key("Delete"), w!("删除标注")),
+                        (HintInput::MouseOrKey(Icon::MouseRight, "Esc"), w!("取消选中")),
                     ]
                 }
             }
@@ -151,7 +177,7 @@ impl HintMode {
                         (Mouse(Icon::Move), w!("拖动文本框移动")),
                         (Mouse(Icon::Resize), w!("拖动四角缩放")),
                         (Mouse(Icon::Drag), w!("拖动旋转手柄")),
-                        (Bound(Binding::Undo), w!("撤回上一步")),
+                        (Key("Delete"), w!("删除文本框")),
                     ]
                 }
             }

@@ -1,6 +1,7 @@
-//! The global capture shortcuts (main plus optional second), registered on the
-//! tray window. A shortcut held by another program stays configured and is
-//! reported as a conflict instead of failing startup.
+//! The global shortcuts (capture, its optional second key, capture window and
+//! last capture), registered on the tray window. A shortcut held by another
+//! program stays configured and is reported as a conflict instead of failing
+//! startup.
 
 use std::cell::RefCell;
 use windows_sys::Win32::{
@@ -8,11 +9,12 @@ use windows_sys::Win32::{
     UI::Input::KeyboardAndMouse::{RegisterHotKey, UnregisterHotKey, MOD_NOREPEAT},
 };
 
-use crate::hotkey::Shortcut;
+use crate::hotkey::{Global, Shortcut};
 
 #[derive(Clone, Copy)]
 struct Slot {
     shortcut: Shortcut,
+    action: Global,
     registered: bool,
 }
 
@@ -34,22 +36,22 @@ unsafe fn register(window: HWND, index: usize, shortcut: Shortcut) -> bool {
     ) != 0
 }
 
-/// Replaces every capture shortcut. Returns the ones another program holds.
-pub unsafe fn set(window: HWND, shortcuts: &[Shortcut]) -> Vec<Shortcut> {
+/// Replaces every global shortcut. Returns the ones another program holds.
+pub unsafe fn set(window: HWND, shortcuts: &[(Shortcut, Global)]) -> Vec<Shortcut> {
     let unchanged = SLOTS.with_borrow(|slots| {
         slots.len() == shortcuts.len()
-            && slots
-                .iter()
-                .zip(shortcuts)
-                .all(|(slot, shortcut)| slot.registered && slot.shortcut == *shortcut)
+            && slots.iter().zip(shortcuts).all(|(slot, (shortcut, action))| {
+                slot.registered && slot.shortcut == *shortcut && slot.action == *action
+            })
     });
     if !unchanged {
         unregister_all(window);
         let slots = shortcuts
             .iter()
             .enumerate()
-            .map(|(index, &shortcut)| Slot {
+            .map(|(index, &(shortcut, action))| Slot {
                 shortcut,
+                action,
                 registered: register(window, index, shortcut),
             })
             .collect();
@@ -83,16 +85,28 @@ pub unsafe fn retry(window: HWND) -> bool {
     })
 }
 
-pub fn is_capture(id: usize) -> bool {
-    SLOTS.with_borrow(|slots| (1..=slots.len()).contains(&id))
+/// What the hotkey with this id does.
+pub fn action(id: usize) -> Option<Global> {
+    SLOTS.with_borrow(|slots| slots.get(id.checked_sub(1)?).map(|slot| slot.action))
 }
 
-/// The configured shortcuts, main first.
+/// The configured capture shortcuts, main first.
 pub fn shortcuts() -> Vec<Shortcut> {
-    SLOTS.with_borrow(|slots| slots.iter().map(|slot| slot.shortcut).collect())
+    SLOTS.with_borrow(|slots| {
+        slots
+            .iter()
+            .filter(|slot| slot.action == Global::Capture)
+            .map(|slot| slot.shortcut)
+            .collect()
+    })
 }
 
-/// Whether Snapshot currently holds `shortcut` as a capture key.
+/// The shortcut for `action`, if one is configured.
+pub fn shortcut(action: Global) -> Option<Shortcut> {
+    SLOTS.with_borrow(|slots| slots.iter().find(|slot| slot.action == action).map(|slot| slot.shortcut))
+}
+
+/// Whether Snapshot currently holds `shortcut` as a global key.
 pub fn holds(shortcut: Shortcut) -> bool {
     SLOTS.with_borrow(|slots| {
         slots
@@ -112,7 +126,7 @@ pub fn conflicts() -> Vec<Shortcut> {
     })
 }
 
-/// "Ctrl+Alt+A / F1" for menus and tooltips.
+/// "Ctrl+Alt+A / F1": the capture keys, for menus and tooltips.
 pub fn label() -> String {
     shortcuts()
         .iter()

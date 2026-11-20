@@ -155,6 +155,13 @@ pub(super) unsafe fn paint(window: HWND) {
                 let saved = SaveDC(dc);
                 if saved != 0 {
                     IntersectClipRect(dc, rect.left, rect.top, rect.right, rect.bottom);
+                    if editor.preview.is_some() {
+                        // A filled box shows behind the letters while typing too.
+                        let frame = if selection.text_drag.is_some() { Cow::Borrowed(&editor.text) } else { editor.frame() };
+                        let mut filled = frame.into_owned();
+                        filled.look = editor.text.look;
+                        filled.paint_background(dc);
+                    }
                     if let Some(drag) = &selection.text_drag {
                         if let Some(preview) = &editor.preview {
                             editor.text.paint_input(dc, preview, drag.caret);
@@ -188,6 +195,15 @@ pub(super) unsafe fn paint(window: HWND) {
             }
             SelectObject(dc, old_brush);
             SelectObject(dc, old_pen);
+        }
+        if let Some(mark) = selection
+            .selected_mark_frame()
+            .filter(|mark| intersect(mark.bounds(), area).is_some())
+        {
+            let saved = SaveDC(dc);
+            IntersectClipRect(dc, rect.left - 8, rect.top - 8, rect.right + 8, rect.bottom + 8);
+            mark.paint_frame(dc);
+            RestoreDC(dc, saved);
         }
         if let Some(text) = selection.text_frame() {
             if intersect(text.bounds(), area).is_some() {

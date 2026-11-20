@@ -16,13 +16,15 @@ use crate::{credential, digest, http};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Provider {
+    /// MyMemory's public API: no key, a daily allowance per address.
+    Free,
     OpenAi,
     DeepL,
     Baidu,
     Youdao,
 }
 
-pub const PROVIDERS: [Provider; 4] = [Provider::OpenAi, Provider::DeepL, Provider::Baidu, Provider::Youdao];
+pub const PROVIDERS: [Provider; 5] = [Provider::Free, Provider::OpenAi, Provider::DeepL, Provider::Baidu, Provider::Youdao];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Field {
@@ -31,6 +33,8 @@ pub enum Field {
     ApiKey,
     AppId,
     Secret,
+    /// Optional for the free service; raises its daily allowance.
+    Email,
 }
 
 pub const DEFAULT_ENDPOINT: &str = "https://api.openai.com/v1";
@@ -39,6 +43,7 @@ pub const DEFAULT_MODEL: &str = "gpt-4o-mini";
 impl Provider {
     pub fn name(self) -> &'static str {
         match self {
+            Self::Free => "免费翻译",
             Self::OpenAi => "OpenAI 兼容",
             Self::DeepL => "DeepL",
             Self::Baidu => "百度翻译",
@@ -48,6 +53,7 @@ impl Provider {
 
     fn key(self) -> &'static str {
         match self {
+            Self::Free => "free",
             Self::OpenAi => "openai",
             Self::DeepL => "deepl",
             Self::Baidu => "baidu",
@@ -61,6 +67,7 @@ impl Provider {
 
     pub fn fields(self) -> &'static [Field] {
         match self {
+            Self::Free => &[Field::Email],
             Self::OpenAi => &[Field::Endpoint, Field::Model, Field::ApiKey],
             Self::DeepL => &[Field::ApiKey],
             Self::Baidu | Self::Youdao => &[Field::AppId, Field::Secret],
@@ -70,6 +77,7 @@ impl Provider {
     /// Where to get credentials, shown under the fields.
     pub fn hint(self) -> &'static str {
         match self {
+            Self::Free => "不用注册也不用密钥，直接可用（MyMemory 公共接口）。不填邮箱每天约 5000 字，填写邮箱可提高到每天约 5 万字；文字会发到 MyMemory 的服务器翻译，质量一般，正式使用建议配置其他服务。",
             Self::OpenAi => "OpenAI、DeepSeek、通义千问、Kimi、Ollama 等兼容 /chat/completions 的接口都能用；本地模型可以不填 Key。",
             Self::DeepL => "在 DeepL 账户的「API Keys」页复制密钥；免费版密钥以 :fx 结尾，会自动走免费接口。",
             Self::Baidu => "在百度翻译开放平台开通「通用文本翻译」，在开发者信息里复制 APP ID 和密钥。",
@@ -80,7 +88,8 @@ impl Provider {
     /// Requests are sent at most this far apart, matching each service's free tier.
     fn spacing(self) -> Duration {
         match self {
-            Self::Baidu => Duration::from_millis(1100),
+            // A public service shared by everyone: go slowly.
+            Self::Baidu | Self::Free => Duration::from_millis(1100),
             _ => Duration::from_millis(300),
         }
     }
@@ -88,6 +97,8 @@ impl Provider {
     /// Longest text sent in one request, in characters.
     fn chunk(self) -> usize {
         match self {
+            // MyMemory takes 500 bytes per request; 150 Chinese characters fit.
+            Self::Free => 150,
             Self::OpenAi => 6000,
             Self::DeepL => 20_000,
             Self::Baidu | Self::Youdao => 1800,
@@ -105,6 +116,7 @@ impl Field {
             (Self::AppId, _) => "APP ID",
             (Self::Secret, Provider::Youdao) => "应用密钥",
             (Self::Secret, _) => "密钥",
+            (Self::Email, _) => "邮箱（可选）",
         }
     }
 
@@ -128,6 +140,7 @@ impl Field {
             Self::ApiKey => "api_key",
             Self::AppId => "app_id",
             Self::Secret => "secret",
+            Self::Email => "email",
         }
     }
 }
@@ -243,6 +256,19 @@ impl Language {
         }
     }
 
+    fn mymemory(self) -> &'static str {
+        match self {
+            Self::Auto | Self::Chinese => "zh-CN",
+            Self::English => "en",
+            Self::Japanese => "ja",
+            Self::Korean => "ko",
+            Self::French => "fr",
+            Self::German => "de",
+            Self::Spanish => "es",
+            Self::Russian => "ru",
+        }
+    }
+
     fn youdao(self) -> &'static str {
         match self {
             Self::Auto | Self::Chinese => "zh-CHS",
@@ -346,9 +372,19 @@ pub struct Service {
 }
 
 impl Service {
-    /// `Ok(None)` when no provider is chosen or a required field is empty.
+    /// `Ok(None)` when a required field is empty. Without a chosen provider
+    /// the free service is used, so translation works out of the box.
     pub fn from_config(config: &Config) -> Result<Option<Self>, String> {
-        let Some(provider) = config.provider else { return Ok(None) };
+        let provider = config.provider.unwrap_or(Provider::Free);
+        if provider == Provider::Free {
+            return Ok(Some(Self {
+                provider,
+                endpoint: String::new(),
+                model: String::new(),
+                app_id: config.value(provider, Field::Email).to_string(),
+                secret: String::new(),
+            }));
+        }
         let secret_field = if provider == Provider::Baidu || provider == Provider::Youdao {
             Field::Secret
         } else {
@@ -378,7 +414,7 @@ impl Service {
         };
         let complete = match provider {
             // Local models such as Ollama need no key.
-            Provider::OpenAi => true,
+            Provider::OpenAi | Provider::Free => true,
             Provider::DeepL => !service.secret.is_empty(),
             Provider::Baidu | Provider::Youdao => !service.app_id.is_empty() && !service.secret.is_empty(),
         };
@@ -455,6 +491,7 @@ fn chunks(text: &str, limit: usize) -> Vec<String> {
 
 fn request(service: &Service, text: &str, target: Language) -> Result<String, Failure> {
     match service.provider {
+        Provider::Free => mymemory(service, text, target),
         Provider::OpenAi => openai(service, text, target),
         Provider::DeepL => deepl(service, text, target),
         Provider::Baidu => baidu(service, text, target),
@@ -542,6 +579,50 @@ fn openai(service: &Service, text: &str, target: Language) -> Result<String, Fai
     value["choices"][0]["message"]["content"]
         .as_str()
         .map(|content| strip_thinking(content).to_string())
+        .ok_or_else(|| Failure::Fatal(format!("接口返回的内容里没有译文。\n服务器返回：{}", response.body.trim())))
+}
+
+/// MyMemory: the source language is detected; `app_id` holds the optional email.
+fn mymemory(service: &Service, text: &str, target: Language) -> Result<String, Failure> {
+    let url = if service.endpoint.is_empty() {
+        "https://api.mymemory.translated.net/get"
+    } else {
+        &service.endpoint
+    };
+    let pair = format!("autodetect|{}", target.mymemory());
+    let mut pairs = vec![("q", text), ("langpair", pair.as_str())];
+    let email = service.app_id.trim();
+    if !email.is_empty() {
+        pairs.push(("de", email));
+    }
+    let body = http::form(&pairs);
+    let (response, value) = send(url, &[("Content-Type", "application/x-www-form-urlencoded")], &body)?;
+    // The status comes as a number or a string, and errors often arrive with HTTP 200.
+    let status = value["responseStatus"]
+        .as_u64()
+        .or_else(|| value["responseStatus"].as_str().and_then(|status| status.parse().ok()))
+        .unwrap_or(u64::from(response.status));
+    let detail = value["responseDetails"].as_str().unwrap_or("").trim();
+    if value["quotaFinished"].as_bool() == Some(true) || status == 429 || detail.contains("ALL AVAILABLE FREE") {
+        return Err(Failure::Fatal(format!(
+            "今天的免费额度用完了。可以在翻译设置里填写邮箱提高额度，或者换用其他翻译服务。\n服务器返回：{}",
+            if detail.is_empty() { response.body.trim() } else { detail }
+        )));
+    }
+    if status != 200 || !response.ok() {
+        let meaning = if detail.contains("DISTINCT LANGUAGES") {
+            "原文已经是目标语言，请换一个目标语言"
+        } else if status >= 500 {
+            "服务器出错"
+        } else {
+            "请求失败"
+        };
+        let text = format!("{meaning}（{status}）\n服务器返回：{}", if detail.is_empty() { response.body.trim() } else { detail });
+        return Err(if status >= 500 { Failure::Retry(text) } else { Failure::Fatal(text) });
+    }
+    value["responseData"]["translatedText"]
+        .as_str()
+        .map(|text| text.trim().to_string())
         .ok_or_else(|| Failure::Fatal(format!("接口返回的内容里没有译文。\n服务器返回：{}", response.body.trim())))
 }
 
@@ -849,6 +930,44 @@ mod tests {
         let (address, _) = serve(vec![(200, json!({ "errorCode": "202" }).to_string())]);
         let error = translate(&service(Provider::Youdao, &address), "你好", Language::English).unwrap_err();
         assert!(error.contains("签名检验失败"), "{error}");
+    }
+
+    #[test]
+    fn the_free_service_needs_no_key_and_explains_its_limit() {
+        let config = Config::default();
+        let free = Service::from_config(&config).unwrap().expect("works without any settings");
+        assert_eq!(free.provider, Provider::Free);
+        let reply = json!({ "responseStatus": 200, "responseData": { "translatedText": "Hello, world" }, "quotaFinished": false });
+        let (address, received) = serve(vec![(200, reply.to_string())]);
+        let mut free = service(Provider::Free, &address);
+        free.app_id = "me@example.com".into();
+        assert_eq!(translate(&free, "你好，世界", Language::English).unwrap(), "Hello, world");
+        let request = received.recv().unwrap();
+        assert_eq!(form_value(&request, "langpair"), "autodetect%7Cen");
+        assert_eq!(form_value(&request, "de"), "me%40example.com");
+        assert!(!request.contains("Authorization"));
+
+        let quota = json!({ "responseStatus": "429", "responseDetails": "MYMEMORY WARNING: YOU USED ALL AVAILABLE FREE TRANSLATIONS FOR TODAY", "quotaFinished": true });
+        let (address, received) = serve(vec![(200, quota.to_string())]);
+        free.endpoint = address;
+        let error = translate(&free, "hi", Language::Chinese).unwrap_err();
+        assert!(error.starts_with("翻译失败（免费翻译）\n今天的免费额度用完了"), "{error}");
+        assert_eq!(received.iter().count(), 1, "a spent allowance is not retried");
+
+        let same = json!({ "responseStatus": 403, "responseDetails": "PLEASE SELECT TWO DISTINCT LANGUAGES" });
+        let (address, _) = serve(vec![(200, same.to_string())]);
+        let error = translate(&service(Provider::Free, &address), "你好", Language::Chinese).unwrap_err();
+        assert!(error.contains("原文已经是目标语言"), "{error}");
+    }
+
+    /// Asks the real MyMemory once. Run with `<test binary> free_service_live --ignored`.
+    #[test]
+    #[ignore]
+    fn free_service_live() {
+        let service = Service::from_config(&Config::default()).unwrap().unwrap();
+        let text = translate(&service, "Save the screenshot\nCopy to clipboard", Language::Chinese).unwrap();
+        println!("{text}");
+        assert!(text.chars().any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c)), "{text}");
     }
 
     #[test]

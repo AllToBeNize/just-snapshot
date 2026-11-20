@@ -167,6 +167,7 @@ pub(super) unsafe fn select_screen(window: HWND) {
         let selection = session.as_mut()?;
         if selection.drag.is_some()
             || selection.text_drag.is_some()
+            || selection.mark_drag.is_some()
             || selection.editor.is_some()
             || selection.annotations.draft.is_some()
         {
@@ -208,6 +209,8 @@ pub(super) unsafe fn reset_automatic(window: HWND, point: POINT) {
         selection.rect = RECT::default();
         selection.annotations = History::default();
         selection.selected_text = None;
+        selection.selected_mark = None;
+        selection.mark_drag = None;
         Some((previous, selection.rect, selection.canvas, was_dragging))
     });
     if let Some((old, new, canvas, was_dragging)) = change {
@@ -350,6 +353,11 @@ pub(super) unsafe fn update_cursor(point: POINT) {
             });
         if let Some((handle, angle)) = text_handle {
             return system(handle_cursor(handle, angle));
+        }
+        if selection.editor.is_none() && selection.drag.is_none() {
+            if let Some(cursor) = mark_cursor(selection, point) {
+                return system(cursor);
+            }
         }
         if selection
             .editor

@@ -19,8 +19,9 @@ use windows_sys::{
                 IMN_OPENCANDIDATE,
             },
             Input::KeyboardAndMouse::{
-                GetKeyState, ReleaseCapture, SetCapture, SetFocus, TrackMouseEvent, MOD_CONTROL,
-                TME_LEAVE, TRACKMOUSEEVENT, VK_CONTROL, VK_ESCAPE, VK_RETURN,
+                GetKeyState, ReleaseCapture, SetCapture, SetFocus, TrackMouseEvent, MOD_CONTROL, MOD_SHIFT,
+                TME_LEAVE, TRACKMOUSEEVENT, VK_BACK, VK_CONTROL, VK_DELETE, VK_DOWN, VK_ESCAPE, VK_LEFT,
+                VK_RETURN, VK_RIGHT, VK_UP,
             },
             Shell::{DefSubclassProc, SetWindowSubclass},
             WindowsAndMessaging::*,
@@ -29,7 +30,7 @@ use windows_sys::{
 };
 
 use crate::{
-    annotation::{Draft, History, Mark, Style, Tool},
+    annotation::{Draft, Grip, History, Mark, Style, Tool},
     annotation_options::{Choice, Options},
     capture::{Desktop, Image, Surface},
     output,
@@ -52,12 +53,15 @@ use crate::{
 mod annotate;
 mod chrome;
 mod export;
+mod marks;
 mod paint;
 mod pointer;
+mod size;
 mod text;
 #[cfg(test)]
 mod tests {
     mod clipboard;
+    mod marks;
     mod select;
     mod text;
 }
@@ -65,8 +69,10 @@ mod tests {
 use annotate::*;
 use chrome::*;
 use export::*;
+use marks::*;
 use paint::*;
 use pointer::*;
+use size::*;
 use text::*;
 
 const CLASS: *const u16 = w!("Snapshot.Selection");
@@ -76,6 +82,24 @@ const TEXT_CARET_TIMER: usize = 3;
 
 thread_local! {
     static SESSION: RefCell<Option<Selection>> = const { RefCell::new(None) };
+    /// The last locked capture, kept so it can be brought back.
+    static LAST: RefCell<Option<Last>> = const { RefCell::new(None) };
+}
+
+/// What "找回上次截图" restores: the frozen screen, the selection and the
+/// annotations with their undo history.
+struct Last {
+    desktop: Desktop,
+    rect: RECT,
+    annotations: History,
+    style: Style,
+}
+
+enum Start {
+    Fresh,
+    /// Screen coordinates to select right away.
+    Region(RECT),
+    Last(Last),
 }
 
 struct Selection {
@@ -102,9 +126,23 @@ struct Selection {
     style: Style,
     selected_text: Option<usize>,
     text_drag: Option<TextDrag>,
+    /// A drawn shape picked up again to move, resize or restyle.
+    selected_mark: Option<usize>,
+    mark_drag: Option<MarkDrag>,
+    /// The box for typing an exact size, over the size badge.
+    size_input: Option<HWND>,
     editor: Option<Editor>,
     brush_cursor: Option<Cursor>,
     mosaic_cursor: Option<(i32, Cursor)>,
+}
+
+struct MarkDrag {
+    index: usize,
+    grip: Grip,
+    anchor: POINT,
+    /// The shape before the drag; every move starts from it.
+    original: Mark,
+    moved: bool,
 }
 
 struct TextDrag {
@@ -167,6 +205,10 @@ impl Selection {
         {
             style.text_size = text.size;
             style.text_color = text.color;
+            style.text_look = text.look;
+        }
+        if let Some(mark) = self.selected_mark_frame() {
+            mark.style_into(&mut style);
         }
         style
     }
@@ -198,21 +240,64 @@ pub unsafe fn register(instance: HINSTANCE) -> io::Result<()> {
 }
 
 pub unsafe fn open(instance: HINSTANCE) -> io::Result<()> {
-    open_selection(instance, None)
+    open_selection(instance, Start::Fresh)
 }
 
 pub unsafe fn reopen(instance: HINSTANCE, region: RECT) -> io::Result<()> {
-    open_selection(instance, Some(region))
+    open_selection(instance, Start::Region(region))
 }
 
-unsafe fn open_selection(instance: HINSTANCE, region: Option<RECT>) -> io::Result<()> {
+pub fn has_last() -> bool {
+    LAST.with_borrow(Option::is_some)
+}
+
+/// Opens the last capture again. `Ok(false)` when there is none.
+pub unsafe fn restore_last(instance: HINSTANCE) -> Result<bool, String> {
+    if SESSION.with_borrow(Option::is_some) || scroll_capture::is_open() {
+        return Ok(true);
+    }
+    let Some(last) = LAST.take() else {
+        return Ok(false);
+    };
+    let current = RECT {
+        left: GetSystemMetrics(SM_XVIRTUALSCREEN),
+        top: GetSystemMetrics(SM_YVIRTUALSCREEN),
+        right: GetSystemMetrics(SM_XVIRTUALSCREEN) + GetSystemMetrics(SM_CXVIRTUALSCREEN),
+        bottom: GetSystemMetrics(SM_YVIRTUALSCREEN) + GetSystemMetrics(SM_CYVIRTUALSCREEN),
+    };
+    if EqualRect(&current, &last.desktop.bounds) == 0 {
+        return Err("屏幕的排列或分辨率变了，上次的截图对不上现在的屏幕。".into());
+    }
+    open_selection(instance, Start::Last(last)).map(|()| true).map_err(|error| error.to_string())
+}
+
+unsafe fn open_selection(instance: HINSTANCE, start: Start) -> io::Result<()> {
     if SESSION.with_borrow(Option::is_some) || scroll_capture::is_open() {
         return Ok(());
     }
     let mut cursor = POINT::default();
     GetCursorPos(&mut cursor);
-    let targets = targets::windows_at_capture();
-    let desktop = Desktop::capture()?;
+    let (targets, desktop, region, annotations, style) = match start {
+        Start::Last(last) => {
+            let bounds = last.desktop.bounds;
+            let screen = RECT {
+                left: last.rect.left + bounds.left,
+                top: last.rect.top + bounds.top,
+                right: last.rect.right + bounds.left,
+                bottom: last.rect.bottom + bounds.top,
+            };
+            // The windows have moved since; the old screen has no live targets.
+            (Vec::new(), last.desktop, Some(screen), last.annotations, last.style)
+        }
+        start => {
+            let targets = targets::windows_at_capture();
+            let region = match start {
+                Start::Region(rect) => Some(rect),
+                _ => None,
+            };
+            (targets, Desktop::capture()?, region, History::default(), Style::default())
+        }
+    };
     let bounds = desktop.bounds;
     let restored = region.and_then(|rect| overlay_rect(rect, bounds));
     let width = bounds.right - bounds.left;
@@ -280,14 +365,17 @@ unsafe fn open_selection(instance: HINSTANCE, region: Option<RECT>) -> io::Resul
         hint,
         loupe: None,
         pointer_monitor,
-        annotations: History::default(),
+        annotations,
         toolbar: None,
         toolbar_hover: None,
         options: None,
         options_hover: None,
-        style: Style::default(),
+        style,
         selected_text: None,
         text_drag: None,
+        selected_mark: None,
+        mark_drag: None,
+        size_input: None,
         editor: None,
         brush_cursor: None,
         mosaic_cursor: None,
@@ -347,6 +435,9 @@ unsafe extern "system" fn window_proc(
                 }
                 return 0;
             }
+            if begin_size_input(window, point) {
+                return 0;
+            }
             if begin_editor_drag(window, point) {
                 return 0;
             }
@@ -364,6 +455,10 @@ unsafe extern "system" fn window_proc(
             }
             finish_text(window, true);
             if begin_text_drag(window, point, message == WM_LBUTTONDBLCLK) {
+                hide_loupe(window);
+                return 0;
+            }
+            if begin_mark_drag(window, point) {
                 hide_loupe(window);
                 return 0;
             }
@@ -398,7 +493,10 @@ unsafe extern "system" fn window_proc(
         }
         WM_MOUSEMOVE => {
             let point = mouse_point(lparam);
-            if update_text_drag(window, point, false) || update_annotation(window, point, false) {
+            if update_text_drag(window, point, false)
+                || update_mark_drag(window, point, false)
+                || update_annotation(window, point, false)
+            {
                 return 0;
             }
             if !update_drag(window, point, false) {
@@ -411,7 +509,10 @@ unsafe extern "system" fn window_proc(
         }
         WM_LBUTTONUP => {
             let point = mouse_point(lparam);
-            if update_text_drag(window, point, true) || update_annotation(window, point, true) {
+            if update_text_drag(window, point, true)
+                || update_mark_drag(window, point, true)
+                || update_annotation(window, point, true)
+            {
                 return 0;
             }
             update_drag(window, point, true);
@@ -424,7 +525,7 @@ unsafe extern "system" fn window_proc(
             let editing =
                 SESSION.with_borrow(|session| session.as_ref().is_some_and(|s| s.editor.is_some()));
             finish_text(window, false);
-            if editing || leave_tool(window, mouse_point(lparam)) {
+            if editing || deselect_mark(window) || leave_tool(window, mouse_point(lparam)) {
                 return 0;
             }
             if SESSION.with_borrow(|session| session.as_ref().is_some_and(|s| s.automatic)) {
@@ -433,6 +534,7 @@ unsafe extern "system" fn window_proc(
                 reset_automatic(window, mouse_point(lparam));
             }
         }
+        SIZE_DONE => finish_size_input(window, lparam as HWND, wparam != 0),
         FINISH_TEXT => {
             if SESSION.with_borrow(|session| {
                 session
@@ -458,7 +560,7 @@ unsafe extern "system" fn window_proc(
         WM_CTLCOLOREDIT => {
             if let Some(color) = SESSION.with_borrow(|session| {
                 let editor = session.as_ref()?.editor.as_ref()?;
-                (editor.window == lparam as HWND).then_some(editor.text.color)
+                (editor.window == lparam as HWND).then_some(editor.text.ink())
             }) {
                 SetTextColor(wparam as HDC, color);
                 SetBkMode(wparam as HDC, TRANSPARENT as i32);
@@ -502,6 +604,7 @@ unsafe extern "system" fn window_proc(
         }
         WM_CAPTURECHANGED => {
             cancel_text_drag(window);
+            cancel_mark_drag(window);
             let (interrupted, draft) = SESSION.with_borrow_mut(|session| {
                 let Some(selection) = session else {
                     return (false, None);
@@ -523,7 +626,13 @@ unsafe extern "system" fn window_proc(
             let key = wparam as u32;
             let modifiers = hotkey::modifiers();
             if key == u32::from(VK_ESCAPE) && modifiers == 0 {
-                DestroyWindow(window);
+                // A selected shape is let go first; the next Esc leaves.
+                if !deselect_mark(window) {
+                    DestroyWindow(window);
+                }
+            } else if modifiers == 0 && (key == u32::from(VK_DELETE) || key == u32::from(VK_BACK)) {
+                delete_selected(window);
+            } else if nudge(window, key, modifiers, lparam & (1 << 30) != 0) {
             } else if let Some(action) = hotkey::current()
                 .resolve(Shortcut { modifiers, key })
                 .and_then(Action::from_binding)
@@ -544,11 +653,29 @@ unsafe extern "system" fn window_proc(
             DestroyWindow(window);
         }
         WM_DESTROY => {
-            SESSION.take();
+            if let Some(selection) = SESSION.take() {
+                remember(selection);
+            }
         }
         _ => return DefWindowProcW(window, message, wparam, lparam),
     }
     0
+}
+
+/// Keeps a locked capture, finished or cancelled, for "找回上次截图".
+fn remember(selection: Selection) {
+    if selection.automatic || outline_empty(selection.rect) {
+        return;
+    }
+    let mut annotations = selection.annotations;
+    annotations.tool = None;
+    annotations.draft = None;
+    LAST.set(Some(Last {
+        desktop: selection.desktop,
+        rect: selection.rect,
+        annotations,
+        style: selection.style,
+    }));
 }
 
 fn point_param(point: POINT) -> LPARAM {

@@ -632,7 +632,7 @@ unsafe fn export(window: HWND, save: bool) {
     KillTimer(window, TIMER);
     let input = InputHooks::target(None);
     let target = if save {
-        output::Target::Save("Snapshot-Long.png")
+        output::Target::Save
     } else {
         output::Target::Copy
     };

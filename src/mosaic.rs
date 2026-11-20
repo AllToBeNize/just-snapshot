@@ -17,7 +17,7 @@ thread_local! {
     static BLEND_TILE: RefCell<Option<Surface>> = const { RefCell::new(None) };
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct Mosaic {
     colors: HashMap<(i32, i32), [u8; 3]>,
     chunks: HashMap<(i32, i32), Box<[u8]>>,

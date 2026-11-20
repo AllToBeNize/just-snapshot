@@ -239,6 +239,17 @@ impl Surface {
         self.bitmap
     }
 
+    /// A copy of the pixels of a `width`×`height` surface.
+    pub unsafe fn image(&self, width: i32, height: i32) -> io::Result<Image> {
+        let length = pixel_len(width, height)?;
+        GdiFlush();
+        Ok(Image {
+            width,
+            height,
+            pixels: slice::from_raw_parts(self.pixels.as_ptr(), length).to_vec(),
+        })
+    }
+
     // The source buffer must fit the allocated DIB.
     pub unsafe fn write_pixels(&self, source: &[u8]) {
         self.pixels
@@ -336,7 +347,21 @@ impl Image {
         Ok(())
     }
 
+    /// Saves with the alpha channel kept, for images that have real
+    /// transparency (a decorated save with a shadow).
+    pub fn save_png_alpha(&self, path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+        let mut file = BufWriter::new(File::create(path)?);
+        self.encode_png(&mut file, true)?;
+        file.flush()?;
+        Ok(())
+    }
+
+    /// Opaque PNG: GDI captures leave alpha at 0, so it is written as 255.
     pub fn write_png(&self, output: impl Write) -> Result<(), Box<dyn std::error::Error>> {
+        self.encode_png(output, false)
+    }
+
+    fn encode_png(&self, output: impl Write, alpha: bool) -> Result<(), Box<dyn std::error::Error>> {
         let mut encoder = png::Encoder::new(output, self.width as u32, self.height as u32);
         encoder.set_color(png::ColorType::Rgba);
         encoder.set_depth(png::BitDepth::Eight);
@@ -346,8 +371,8 @@ impl Image {
         let mut rgba = Vec::with_capacity(row_bytes);
         for row in self.pixels.chunks_exact(row_bytes) {
             rgba.clear();
-            for &[b, g, r, _] in row.as_chunks::<BYTES_PER_PIXEL>().0 {
-                rgba.extend_from_slice(&[r, g, b, 255]);
+            for &[b, g, r, a] in row.as_chunks::<BYTES_PER_PIXEL>().0 {
+                rgba.extend_from_slice(&[r, g, b, if alpha { a } else { 255 }]);
             }
             stream.write_all(&rgba)?;
         }

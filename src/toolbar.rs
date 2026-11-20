@@ -49,6 +49,8 @@ impl Action {
             Binding::Translate => Self::Translate,
             Binding::Arrow => Self::Tool(Tool::Arrow),
             Binding::Number => Self::Tool(Tool::Number),
+            Binding::Magnify => Self::Tool(Tool::Magnify),
+            Binding::CaptureWindow | Binding::LastCapture => return None,
         })
     }
 
@@ -62,13 +64,14 @@ impl Action {
 }
 
 // Snipaste-style order: drawing tools | history | text | output, ending with exit and copy.
-pub const ACTIONS: [Action; 15] = [
+pub const ACTIONS: [Action; 16] = [
     Action::Tool(Tool::Rectangle),
     Action::Tool(Tool::Text),
     Action::Tool(Tool::Brush),
     Action::Tool(Tool::Mosaic),
     Action::Tool(Tool::Arrow),
     Action::Tool(Tool::Number),
+    Action::Tool(Tool::Magnify),
     Action::Undo,
     Action::Redo,
     Action::ExtractText,
@@ -86,6 +89,7 @@ const LABELS: [*const u16; ACTIONS.len()] = [
     w!("马赛克"),
     w!("箭头"),
     w!("序号"),
+    w!("放大镜"),
     w!("撤回"),
     w!("重做"),
     w!("提取文本"),
@@ -97,7 +101,7 @@ const LABELS: [*const u16; ACTIONS.len()] = [
     w!("复制"),
 ];
 /// Indexes of the first button in every group after the first.
-const GROUP_STARTS: [usize; 3] = [6, 8, 10];
+const GROUP_STARTS: [usize; 3] = [7, 9, 11];
 const OFFSET: i32 = 8;
 const GROUP_GAP: i32 = 11;
 const PADDING: i32 = 4;
@@ -362,6 +366,7 @@ fn action_icon(action: Action) -> Icon {
         Action::Tool(Tool::Mosaic) => Icon::Mosaic,
         Action::Tool(Tool::Arrow) => Icon::Arrow,
         Action::Tool(Tool::Number) => Icon::Number,
+        Action::Tool(Tool::Magnify) => Icon::Magnify,
         Action::Undo => Icon::Undo,
         Action::Redo => Icon::Redo,
         Action::ScrollCapture => Icon::LongCapture,
@@ -533,7 +538,7 @@ mod tests {
         let mut history = History::default();
         assert!(!Action::Undo.enabled(&history));
         assert!(!Action::Redo.enabled(&history));
-        history.push(Mark::Rectangle(RECT::default()));
+        history.push(Mark::Rectangle { rect: RECT::default(), width: 3, color: 0, round: false, dashed: false });
         assert!(Action::Undo.enabled(&history));
         assert!(!Action::Redo.enabled(&history));
         history.undo(&mut RECT::default());
@@ -543,7 +548,7 @@ mod tests {
         assert!(Action::Undo.enabled(&history));
         assert!(!Action::Redo.enabled(&history));
         history.undo(&mut RECT::default());
-        history.push(Mark::Rectangle(RECT::default()));
+        history.push(Mark::Rectangle { rect: RECT::default(), width: 3, color: 0, round: false, dashed: false });
         assert!(!Action::Redo.enabled(&history));
     }
 }

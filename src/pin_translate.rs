@@ -295,6 +295,7 @@ impl TranslatePane {
             Phase::Recognizing => self.paint_waiting(dc, layout, fonts, "正在识别文字…", now_ms),
             Phase::Translating { provider, .. } => {
                 let caption = match provider {
+                    Some(Provider::Free) => "正在用免费服务翻译…".to_string(),
                     Some(provider) => format!("正在用 {} 翻译…", provider.name()),
                     None => "正在翻译…".to_string(),
                 };

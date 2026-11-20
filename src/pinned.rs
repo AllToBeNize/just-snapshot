@@ -14,7 +14,7 @@ use crate::{
     ui::{self, Fonts},
 };
 use std::{
-    cell::Cell,
+    cell::{Cell, RefCell},
     io,
     mem::size_of,
     ptr::{null, null_mut},
@@ -63,7 +63,20 @@ const WM_NCMOUSELEAVE: u32 = 0x02a2;
 
 thread_local! {
     static OPACITY_STEP: Cell<u8> = const { Cell::new(DEFAULT_OPACITY_STEP) };
+    /// The group new pins join: the one last picked in a pin's menu.
+    static CURRENT_GROUP: Cell<u32> = const { Cell::new(1) };
+    /// Groups hidden from the tray or a pin's menu.
+    static HIDDEN_GROUPS: RefCell<Vec<u32>> = const { RefCell::new(Vec::new()) };
 }
+
+const MENU_COPY: usize = 1;
+const MENU_SAVE: usize = 2;
+const MENU_TOPMOST: usize = 3;
+const MENU_NEW_GROUP: usize = 4;
+const MENU_HIDE_GROUP: usize = 5;
+const MENU_CLOSE: usize = 6;
+/// "Move to group N" items start here.
+const MENU_GROUP: usize = 100;
 
 pub fn opacity_step() -> u8 {
     OPACITY_STEP.get()
@@ -96,6 +109,8 @@ enum Outcome {
 enum Badge {
     Zoom,
     Opacity,
+    /// A short confirmation such as "已复制图片", for pins without a text layer.
+    Note,
 }
 
 struct Pin {
@@ -118,6 +133,10 @@ struct Pin {
     dragged: bool,
     scale: f32,
     fonts: Fonts,
+    /// Pins are shown and hidden by group from the tray.
+    group: u32,
+    topmost: bool,
+    note: String,
 }
 
 impl Pin {
@@ -255,6 +274,16 @@ pub unsafe fn open(image: Image, bounds: RECT, mode: Mode) -> io::Result<()> {
         dragged: false,
         scale,
         fonts: Fonts::new(scale),
+        group: CURRENT_GROUP.get(),
+        topmost: true,
+        note: String::new(),
+    });
+    // A new pin in a hidden group brings the group back.
+    let group = pin.group;
+    let regrouped = HIDDEN_GROUPS.with_borrow_mut(|hidden| {
+        let before = hidden.len();
+        hidden.retain(|&other| other != group);
+        hidden.len() != before
     });
     let recognize = pin.source.is_some();
     let pin = Box::into_raw(pin);
@@ -266,6 +295,10 @@ pub unsafe fn open(image: Image, bounds: RECT, mode: Mode) -> io::Result<()> {
     }
     ShowWindow(window, SW_SHOW);
     SetForegroundWindow(window);
+    if regrouped {
+        // The rest of the group comes back with it.
+        apply_visibility();
+    }
     if (*pin).translate.is_some() {
         open_popup(window, &mut *pin);
     }
@@ -280,6 +313,166 @@ fn now_ms() -> u32 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |time| time.as_millis() as u32)
+}
+
+/// Every pin window with its state.
+unsafe fn pins() -> Vec<(HWND, *mut Pin)> {
+    let mut found = Vec::new();
+    let mut window = FindWindowExW(null_mut(), null_mut(), CLASS, null());
+    while !window.is_null() {
+        let pin = GetWindowLongPtrW(window, GWLP_USERDATA) as *mut Pin;
+        if !pin.is_null() {
+            found.push((window, pin));
+        }
+        window = FindWindowExW(null_mut(), window, CLASS, null());
+    }
+    found
+}
+
+/// Each group with its pin count and whether it is shown, in order.
+pub unsafe fn groups() -> Vec<(u32, usize, bool)> {
+    let mut groups: Vec<(u32, usize, bool)> = Vec::new();
+    for (_, pin) in pins() {
+        let group = (*pin).group;
+        match groups.iter_mut().find(|(other, ..)| *other == group) {
+            Some(entry) => entry.1 += 1,
+            None => groups.push((group, 1, !is_hidden(group))),
+        }
+    }
+    groups.sort_by_key(|&(group, ..)| group);
+    groups
+}
+
+fn is_hidden(group: u32) -> bool {
+    HIDDEN_GROUPS.with_borrow(|hidden| hidden.contains(&group))
+}
+
+/// Shows or hides every pin, with its translation popup.
+unsafe fn apply_visibility() {
+    for (window, pin) in pins() {
+        let show = if is_hidden((*pin).group) { SW_HIDE } else { SW_SHOWNOACTIVATE };
+        ShowWindow(window, show);
+        if !(*pin).popup.is_null() {
+            ShowWindow((*pin).popup, show);
+        }
+    }
+}
+
+pub unsafe fn set_all_hidden(hidden: bool) {
+    let all: Vec<u32> = if hidden { groups().into_iter().map(|(group, ..)| group).collect() } else { Vec::new() };
+    HIDDEN_GROUPS.set(all);
+    apply_visibility();
+}
+
+/// Shows a hidden group or hides a shown one.
+pub unsafe fn toggle_group(group: u32) {
+    HIDDEN_GROUPS.with_borrow_mut(|hidden| {
+        if let Some(index) = hidden.iter().position(|&other| other == group) {
+            hidden.remove(index);
+        } else {
+            hidden.push(group);
+        }
+    });
+    apply_visibility();
+}
+
+pub unsafe fn close_all() {
+    for (window, _) in pins() {
+        DestroyWindow(window);
+    }
+}
+
+/// Keeps a pin above other windows, or lets them cover it.
+unsafe fn set_topmost(window: HWND, pin: &mut Pin, topmost: bool) {
+    pin.topmost = topmost;
+    let after = if topmost { HWND_TOPMOST } else { HWND_NOTOPMOST };
+    SetWindowPos(window, after, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+    if !pin.popup.is_null() {
+        SetWindowPos(pin.popup, after, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+    }
+}
+
+/// The pin's image as shown, at its original size.
+unsafe fn pin_image(pin: &Pin) -> io::Result<Image> {
+    pin.surface.image(pin.width, pin.height)
+}
+
+unsafe fn copy_image(window: HWND, pin: &mut Pin) {
+    let result = pin_image(pin)
+        .map_err(|error| error.to_string())
+        .and_then(|image| crate::output::copy_image(window, &image));
+    match result {
+        Ok(()) => toast(window, pin, "已复制图片".into()),
+        Err(error) => show_error(window, &format!("无法复制图片。\n{error}")),
+    }
+}
+
+unsafe fn save_image(window: HWND, pin: &mut Pin) {
+    let result = pin_image(pin)
+        .map_err(|error| format!("无法保存图片。\n{error}"))
+        .and_then(|image| crate::output::deliver(window, &image, crate::output::Target::Save));
+    match result {
+        Ok(true) => toast(window, pin, "已保存".into()),
+        Ok(false) => {}
+        Err(error) => show_error(window, &error),
+    }
+}
+
+/// The right-click menu: copy, save, stay on top, groups and close.
+unsafe fn context_menu(window: HWND, pin: &mut Pin) {
+    let menu = CreatePopupMenu();
+    if menu.is_null() {
+        return;
+    }
+    AppendMenuW(menu, MF_STRING, MENU_COPY, w!("复制图片\tCtrl+C"));
+    AppendMenuW(menu, MF_STRING, MENU_SAVE, w!("保存…"));
+    AppendMenuW(menu, MF_SEPARATOR, 0, null());
+    AppendMenuW(menu, MF_STRING | if pin.topmost { MF_CHECKED } else { 0 }, MENU_TOPMOST, w!("置顶"));
+    let groups_menu = CreatePopupMenu();
+    let groups = groups();
+    let newest = groups.iter().map(|&(group, ..)| group).max().unwrap_or(1);
+    if !groups_menu.is_null() {
+        for (group, count, _) in &groups {
+            let label = crate::wide(&format!("组 {group}（{count} 张）"));
+            let flags = MF_STRING | if *group == pin.group { MF_CHECKED } else { 0 };
+            AppendMenuW(groups_menu, flags, MENU_GROUP + *group as usize, label.as_ptr());
+        }
+        AppendMenuW(groups_menu, MF_SEPARATOR, 0, null());
+        AppendMenuW(groups_menu, MF_STRING, MENU_NEW_GROUP, w!("移到新组"));
+        let label = crate::wide(&format!("分组：组 {}", pin.group));
+        AppendMenuW(menu, MF_POPUP, groups_menu as usize, label.as_ptr());
+    }
+    AppendMenuW(menu, MF_STRING, MENU_HIDE_GROUP, w!("隐藏本组"));
+    AppendMenuW(menu, MF_SEPARATOR, 0, null());
+    AppendMenuW(menu, MF_STRING, MENU_CLOSE, w!("关闭\tEsc"));
+    let mut cursor = POINT::default();
+    GetCursorPos(&mut cursor);
+    let chosen = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_NONOTIFY | TPM_RIGHTBUTTON, cursor.x, cursor.y, 0, window, null());
+    DestroyMenu(menu);
+    match chosen as usize {
+        MENU_COPY => copy_image(window, pin),
+        MENU_SAVE => save_image(window, pin),
+        MENU_TOPMOST => set_topmost(window, pin, !pin.topmost),
+        MENU_NEW_GROUP => {
+            pin.group = newest + 1;
+            CURRENT_GROUP.set(pin.group);
+            toast(window, pin, format!("已移到组 {}，新贴图也会放进这一组", pin.group));
+        }
+        MENU_HIDE_GROUP => toggle_group(pin.group),
+        MENU_CLOSE => {
+            DestroyWindow(window);
+        }
+        id if id > MENU_GROUP => {
+            let group = (id - MENU_GROUP) as u32;
+            if group != pin.group {
+                pin.group = group;
+                CURRENT_GROUP.set(group);
+                // Joining a hidden group hides the pin with it.
+                apply_visibility();
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Tells every translate pin that the translation settings changed.
@@ -530,8 +723,11 @@ unsafe fn toast(window: HWND, pin: &mut Pin, message: String) {
     if let Some(text) = &mut pin.text {
         text.toast = Some(message);
         SetTimer(window, TOAST_TIMER, TOAST_MS, None);
-        InvalidateRect(window, null(), 0);
+    } else if SetTimer(window, BADGE_TIMER, TOAST_MS, None) != 0 {
+        pin.note = message;
+        pin.badge = Some(Badge::Note);
     }
+    InvalidateRect(window, null(), 0);
 }
 
 unsafe fn copy(window: HWND, pin: &mut Pin, all: bool) {
@@ -771,7 +967,8 @@ unsafe extern "system" fn window_proc(
             drop(Box::from_raw(pin));
             return DefWindowProcW(window, message, wparam, lparam);
         }
-        WM_NCRBUTTONUP | WM_RBUTTONUP | WM_NCLBUTTONDBLCLK => {
+        WM_NCRBUTTONUP | WM_RBUTTONUP if !pin.is_null() => context_menu(window, &mut *pin),
+        WM_NCLBUTTONDBLCLK => {
             DestroyWindow(window);
         }
         WM_KEYDOWN if wparam == VK_ESCAPE as usize => {
@@ -790,6 +987,8 @@ unsafe extern "system" fn window_proc(
                     let translated = (*pin).translate.as_ref().and_then(TranslatePane::translation).is_some();
                     if translated && !selected {
                         copy_translation(window, &mut *pin);
+                    } else if (*pin).text.is_none() {
+                        copy_image(window, &mut *pin);
                     } else {
                         copy(window, &mut *pin, false);
                     }
@@ -1007,6 +1206,13 @@ unsafe fn paint_badge(dc: HDC, image: RECT, pin: &Pin, badge: Badge) {
     let (name, percent) = match badge {
         Badge::Zoom => ("大小", (pin.zoom * 100.0).round() as i32),
         Badge::Opacity => ("不透明度", pin.opacity),
+        Badge::Note => {
+            let label: Vec<u16> = pin.note.encode_utf16().chain([0]).collect();
+            let wide = (pin.note.chars().count() as i32 * 14 + 24).min(width);
+            let bounds = RECT { left: image.left, top: image.top, right: image.left + wide, bottom: image.top + HEIGHT };
+            paint_size_badge(dc, bounds, label.as_ptr());
+            return;
+        }
     };
     let text = if width >= WIDTH {
         format!("{name} {percent}%")
@@ -1035,6 +1241,51 @@ mod tests {
         assert_eq!(recognized_message(3, &[]), "识别到 3 行文字，拖动选择，Ctrl+C 复制");
         assert_eq!(recognized_message(2, &[qr.clone()]), "识别到 2 行文字、1 个二维码，拖动选择，Ctrl+C 复制");
         assert_eq!(recognized_message(0, &[qr.clone(), qr, bar]), "识别到 2 个二维码、1 个条形码，单击复制内容");
+    }
+
+    #[test]
+    fn pins_hide_and_show_by_group_and_can_leave_the_top() {
+        unsafe {
+            let _ = register(GetModuleHandleW(null()));
+            close_all();
+            HIDDEN_GROUPS.set(Vec::new());
+            CURRENT_GROUP.set(1);
+            let image = || Image { width: 40, height: 30, pixels: vec![128; 40 * 30 * 4] };
+            open(image(), RECT { left: 10, top: 10, right: 50, bottom: 40 }, Mode::Plain).unwrap();
+            CURRENT_GROUP.set(2);
+            open(image(), RECT { left: 80, top: 10, right: 120, bottom: 40 }, Mode::Plain).unwrap();
+            // The style bit: an SSH session's desktop counts as invisible itself.
+            let shown = |window: HWND| i32::from(GetWindowLongW(window, GWL_STYLE) as u32 & WS_VISIBLE != 0);
+            let all = pins();
+            assert_eq!(all.len(), 2);
+            assert_eq!(groups(), vec![(1, 1, true), (2, 1, true)]);
+            let window_of = |group: u32| all.iter().find(|(_, pin)| (**pin).group == group).unwrap().0;
+            // A process started hidden ignores its first ShowWindow; show once more.
+            set_all_hidden(false);
+            toggle_group(2);
+            assert!(shown(window_of(1)) != 0);
+            assert!(shown(window_of(2)) == 0, "group 2 is hidden");
+            assert_eq!(groups()[1], (2, 1, false));
+            set_all_hidden(true);
+            assert!(shown(window_of(1)) == 0);
+            set_all_hidden(false);
+            assert!(shown(window_of(1)) != 0 && shown(window_of(2)) != 0);
+            // A new pin in a hidden group shows that group again.
+            toggle_group(2);
+            open(image(), RECT { left: 150, top: 10, right: 190, bottom: 40 }, Mode::Plain).unwrap();
+            assert!(shown(window_of(2)) != 0);
+
+            let (window, pin) = all[0];
+            assert!(GetWindowLongW(window, GWL_EXSTYLE) as u32 & WS_EX_TOPMOST != 0);
+            set_topmost(window, &mut *pin, false);
+            assert!(GetWindowLongW(window, GWL_EXSTYLE) as u32 & WS_EX_TOPMOST == 0, "置顶 off");
+            let copy = pin_image(&*pin).unwrap();
+            assert_eq!((copy.width, copy.height), (40, 30));
+            assert_eq!(copy.pixels[..3], [128, 128, 128]);
+            close_all();
+            assert!(pins().is_empty());
+            CURRENT_GROUP.set(1);
+        }
     }
 
     /// A text pin over a QR code: recognition finds it and a click copies it.
