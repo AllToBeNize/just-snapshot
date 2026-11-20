@@ -54,6 +54,39 @@ impl Action {
         })
     }
 
+    /// The binding that triggers this action, for tooltips and hints.
+    pub fn binding(self) -> Option<Binding> {
+        Some(match self {
+            Self::Tool(Tool::Rectangle) => Binding::Rectangle,
+            Self::Tool(Tool::Text) => Binding::Text,
+            Self::Tool(Tool::Brush) => Binding::Brush,
+            Self::Tool(Tool::Mosaic) => Binding::Mosaic,
+            Self::Tool(Tool::Arrow) => Binding::Arrow,
+            Self::Tool(Tool::Number) => Binding::Number,
+            Self::Tool(Tool::Magnify) => Binding::Magnify,
+            Self::Undo => Binding::Undo,
+            Self::Redo => Binding::Redo,
+            Self::ScrollCapture => Binding::LongCapture,
+            Self::Copy => Binding::Copy,
+            Self::Save => Binding::Save,
+            Self::Pin => Binding::Pin,
+            Self::ExtractText => Binding::ExtractText,
+            Self::Translate => Binding::Translate,
+            Self::Cancel => return None,
+        })
+    }
+
+    /// "矩形  Ctrl+1": the name and its current shortcut.
+    pub fn tip(self) -> String {
+        let index = ACTIONS.iter().position(|&candidate| candidate == self).unwrap_or(0);
+        let name = unsafe { String::from_utf16_lossy(std::slice::from_raw_parts(LABELS[index], wide_len(LABELS[index]))) };
+        let key = match self.binding() {
+            Some(binding) => crate::hotkey::current().get(binding).label(),
+            None => "Esc".into(),
+        };
+        format!("{name}  {key}")
+    }
+
     pub fn enabled(self, history: &History) -> bool {
         match self {
             Self::Undo => history.draft.is_none() && history.can_undo(),
@@ -212,10 +245,11 @@ impl Toolbar {
         RestoreDC(dc, saved);
     }
 
-    pub fn tooltip(self, action: Action) -> Option<(RECT, *const u16)> {
+    pub fn tooltip(self, action: Action) -> Option<(RECT, Vec<u16>)> {
         let index = ACTIONS.iter().position(|&candidate| candidate == action)?;
         let button = self.button(index);
-        let width = 70;
+        let label = crate::wide(&action.tip());
+        let width = unsafe { measure_tip(&label) } + 22;
         let height = 28;
         let left = ((button.left + button.right - width) / 2)
             .clamp(self.area.left, self.area.right - width);
@@ -234,9 +268,25 @@ impl Toolbar {
                 right: left + width,
                 bottom: top + height,
             },
-            LABELS[index],
+            label,
         ))
     }
+}
+
+/// Length of a NUL-terminated UTF-16 string.
+unsafe fn wide_len(text: *const u16) -> usize {
+    (0..).take_while(|&index| *text.add(index) != 0).count()
+}
+
+/// Width of a tooltip label in the tooltip font, at least wide enough for a short name.
+unsafe fn measure_tip(label: &[u16]) -> i32 {
+    let dc = GetDC(std::ptr::null_mut());
+    let previous = SelectObject(dc, typography::font(TextStyle::Compact));
+    let mut size = windows_sys::Win32::Foundation::SIZE::default();
+    GetTextExtentPoint32W(dc, label.as_ptr(), label.len().saturating_sub(1) as i32, &mut size);
+    SelectObject(dc, previous);
+    ReleaseDC(std::ptr::null_mut(), dc);
+    size.cx.max(48)
 }
 
 pub unsafe fn paint_panel(dc: HDC, bounds: RECT) {
@@ -489,7 +539,7 @@ mod tests {
                 history.tool = Some(Tool::Brush);
                 toolbar.paint(surface.dc, &history, Some(Action::Save));
                 if let Some((bounds, label)) = toolbar.tooltip(Action::Save) {
-                    paint_tooltip(surface.dc, bounds, label);
+                    paint_tooltip(surface.dc, bounds, label.as_ptr());
                 }
                 let options = toolbar.options(Tool::Brush, selection).unwrap();
                 options.paint(surface.dc, Style::default(), None);

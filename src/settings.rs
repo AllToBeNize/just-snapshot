@@ -397,8 +397,9 @@ pub unsafe fn register(instance: HINSTANCE) -> io::Result<()> {
     Ok(())
 }
 
-pub fn is_open() -> bool {
-    !WINDOW.get().is_null()
+/// A shortcut field is waiting for keys; a global shortcut must not start a capture then.
+pub fn is_recording() -> bool {
+    STATE.with_borrow(|state| state.as_ref().is_some_and(|state| state.recording.is_some()))
 }
 
 pub unsafe fn open(owner: HWND, instance: HINSTANCE) -> io::Result<()> {
@@ -1852,7 +1853,7 @@ mod tests {
             .bindings
             .set(Binding::Copy, Shortcut::parse("Ctrl+S").unwrap());
         assert_eq!(draft.duplicate_of(copy), Some(save));
-        assert_eq!(draft.first_duplicate(), Some((copy, save)));
+        assert_eq!(draft.first_duplicate(), Some((save.min(copy), save.max(copy))));
         assert!(draft.preferences().is_err());
 
         let mut draft = Draft::defaults();

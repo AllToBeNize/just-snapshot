@@ -17,10 +17,13 @@ use crate::{
     typography::{self, TextStyle},
 };
 
-const PANEL_WIDTH: i32 = 360;
+const PANEL_WIDTH: i32 = 900;
 const ROW_HEIGHT: i32 = 25;
 const PANEL_INSET: i32 = 8;
-const PANEL_HEIGHT: i32 = 5 * ROW_HEIGHT + 2 * PANEL_INSET;
+/// Room for the longest column (nine rows) under its title.
+const PANEL_HEIGHT: i32 = 9 * ROW_HEIGHT + TITLE_HEIGHT + 2 * PANEL_INSET;
+const TITLE_HEIGHT: i32 = 22;
+const SECTION_GAP: i32 = 20;
 const PANEL_MARGIN: i32 = 12;
 const KEYCAP_HEIGHT: i32 = 18;
 const KEYCAP_GAP: i32 = 3;
@@ -64,132 +67,119 @@ pub enum HintMode {
     EditText,
 }
 
+/// Every toolbar action with its binding, grouped like the toolbar.
+const DRAWING: [HintRow; 9] = [
+    (HintInput::Bound(Binding::Rectangle), w!("矩形")),
+    (HintInput::Bound(Binding::Text), w!("文本")),
+    (HintInput::Bound(Binding::Brush), w!("画笔")),
+    (HintInput::Bound(Binding::Mosaic), w!("马赛克")),
+    (HintInput::Bound(Binding::Arrow), w!("箭头")),
+    (HintInput::Bound(Binding::Number), w!("序号")),
+    (HintInput::Bound(Binding::Magnify), w!("放大镜")),
+    (HintInput::Bound(Binding::Undo), w!("撤回")),
+    (HintInput::Bound(Binding::Redo), w!("重做")),
+];
+const OUTPUT: [HintRow; 7] = [
+    (HintInput::Bound(Binding::ExtractText), w!("提取文本")),
+    (HintInput::Bound(Binding::Translate), w!("翻译")),
+    (HintInput::Bound(Binding::LongCapture), w!("长截图")),
+    (HintInput::Bound(Binding::Pin), w!("贴图")),
+    (HintInput::Bound(Binding::Save), w!("保存")),
+    (HintInput::Bound(Binding::Copy), w!("复制")),
+    (HintInput::Key("Enter"), w!("复制")),
+];
+
+/// A titled column of the hint panel.
+type Section = (*const u16, Vec<HintRow>);
+
 impl HintMode {
-    fn rows(self) -> &'static [HintRow] {
-        use HintInput::{Bound, Key, Mouse};
+    /// Everything that works right now: what this mode adds first, then
+    /// the toolbar's shortcuts whenever the toolbar is up.
+    fn sections(self) -> Vec<Section> {
+        use HintInput::{Key, Mouse, MouseOrKey};
+        let toolbar = || [(w!("标注"), DRAWING.to_vec()), (w!("输出"), OUTPUT.to_vec())];
+        let drawn = (Mouse(Icon::Move), w!("拖动已画的标注调整"));
+        let wheel = (Key("滚轮"), w!("调整粗细 / 大小"));
+        let leave = (Mouse(Icon::MouseRight), w!("退出当前工具"));
+        let tool = |rows: &[HintRow]| {
+            let mut rows = rows.to_vec();
+            rows.extend([drawn, wheel, leave, (Key("Esc"), w!("退出截图"))]);
+            std::iter::once((w!("当前工具"), rows)).chain(toolbar()).collect()
+        };
         match self {
-            Self::Automatic => {
-                const {
-                    &[
-                        (Mouse(Icon::MouseLeft), w!("锁定自动选区")),
-                        (Mouse(Icon::Drag), w!("手动拖出选区")),
-                        (Key("Ctrl+A"), w!("全选当前屏幕")),
-                        (
-                            HintInput::MouseOrKey(Icon::MouseRight, "Esc"),
-                            w!("退出截图"),
-                        ),
-                    ]
-                }
-            }
-            Self::Selected => {
-                const {
-                    &[
-                        (Mouse(Icon::Move), w!("拖动框内移动")),
-                        (Mouse(Icon::Resize), w!("拖动边线缩放")),
-                        (Mouse(Icon::MouseRight), w!("返回自动框选")),
-                        (Bound(Binding::Copy), w!("复制截图")),
-                        (Key("Esc"), w!("退出截图")),
-                    ]
-                }
-            }
-            Self::Annotate(Tool::Rectangle) => {
-                const {
-                    &[
-                        (Mouse(Icon::Drag), w!("绘制矩形")),
-                        (Mouse(Icon::Move), w!("拖动已画的标注调整")),
-                        (Bound(Binding::Rectangle), w!("退出矩形工具")),
-                        (Bound(Binding::Undo), w!("撤回标注")),
-                    ]
-                }
-            }
-            Self::Annotate(Tool::Text) => {
-                const {
-                    &[
-                        (Mouse(Icon::MouseLeft), w!("插入文本框")),
-                        (Mouse(Icon::Drag), w!("指定文本框大小")),
-                        (Bound(Binding::Text), w!("退出文本工具")),
-                    ]
-                }
-            }
-            Self::Annotate(Tool::Brush) => {
-                const {
-                    &[
-                        (Mouse(Icon::Drag), w!("自由绘制")),
-                        (Mouse(Icon::Move), w!("拖动已画的标注调整")),
-                        (Bound(Binding::Brush), w!("退出画笔工具")),
-                        (Bound(Binding::Undo), w!("撤回标注")),
-                    ]
-                }
-            }
-            Self::Annotate(Tool::Mosaic) => {
-                const {
-                    &[
-                        (Mouse(Icon::Drag), w!("涂抹马赛克")),
-                        (Bound(Binding::Mosaic), w!("退出马赛克工具")),
-                        (Bound(Binding::Undo), w!("撤回标注")),
-                    ]
-                }
-            }
-            Self::Annotate(Tool::Arrow) => {
-                const {
-                    &[
-                        (Mouse(Icon::Drag), w!("从起点拖到箭头指向")),
-                        (Mouse(Icon::Move), w!("拖动已画的标注调整")),
-                        (Bound(Binding::Arrow), w!("退出箭头工具")),
-                        (Bound(Binding::Undo), w!("撤回标注")),
-                    ]
-                }
-            }
-            Self::Annotate(Tool::Number) => {
-                const {
-                    &[
-                        (Mouse(Icon::MouseLeft), w!("放下下一个序号")),
-                        (Mouse(Icon::Move), w!("拖动已画的标注调整")),
-                        (Bound(Binding::Number), w!("退出序号工具")),
-                        (Bound(Binding::Undo), w!("撤回标注")),
-                    ]
-                }
-            }
-            Self::Annotate(Tool::Magnify) => {
-                const {
-                    &[
-                        (Mouse(Icon::Drag), w!("从中心拖出放大范围")),
-                        (Mouse(Icon::Move), w!("拖动已画的标注调整")),
-                        (Mouse(Icon::MouseLeft), w!("单击放大默认范围")),
-                        (Bound(Binding::Magnify), w!("退出放大镜工具")),
-                    ]
-                }
-            }
-            Self::SelectedMark => {
-                const {
-                    &[
-                        (Mouse(Icon::Move), w!("拖动标注移动")),
-                        (Mouse(Icon::Resize), w!("拖动控制点调整")),
-                        (Key("Delete"), w!("删除标注")),
-                        (HintInput::MouseOrKey(Icon::MouseRight, "Esc"), w!("取消选中")),
-                    ]
-                }
-            }
-            Self::SelectedText => {
-                const {
-                    &[
-                        (Mouse(Icon::MouseLeft), w!("双击文本框编辑")),
-                        (Mouse(Icon::Move), w!("拖动文本框移动")),
-                        (Mouse(Icon::Resize), w!("拖动四角缩放")),
-                        (Mouse(Icon::Drag), w!("拖动旋转手柄")),
-                        (Key("Delete"), w!("删除文本框")),
-                    ]
-                }
-            }
-            Self::EditText => {
-                const {
-                    &[
-                        (Key("Enter"), w!("换行")),
-                        (Key("Ctrl+Enter"), w!("确认文本")),
-                        (Key("Esc"), w!("取消文本输入")),
-                    ]
-                }
-            }
+            Self::Automatic => vec![(
+                w!("选区"),
+                vec![
+                    (Mouse(Icon::MouseLeft), w!("锁定自动选区")),
+                    (Mouse(Icon::Drag), w!("手动拖出选区")),
+                    (Key("侧键"), w!("切换选区层级（滚轮也行）")),
+                    (Key("Ctrl+A"), w!("全选当前屏幕")),
+                    (Key("C"), w!("拖动时复制颜色")),
+                    (MouseOrKey(Icon::MouseRight, "Esc"), w!("退出截图")),
+                ],
+            )],
+            Self::Selected => std::iter::once((
+                w!("选区"),
+                vec![
+                    (Mouse(Icon::Move), w!("拖动框内移动")),
+                    (Mouse(Icon::Resize), w!("拖动边线缩放")),
+                    (Key("方向键"), w!("移动 1 像素")),
+                    (Key("Shift+方向键"), w!("移动 10 像素")),
+                    (Key("Ctrl+方向键"), w!("调整大小")),
+                    (Mouse(Icon::MouseLeft), w!("单击尺寸输入宽高")),
+                    (Key("C"), w!("复制鼠标处颜色")),
+                    (Mouse(Icon::MouseRight), w!("返回自动框选")),
+                    (Key("Esc"), w!("退出截图")),
+                ],
+            ))
+            .chain(toolbar())
+            .collect(),
+            Self::Annotate(Tool::Rectangle) => tool(&[(Mouse(Icon::Drag), w!("绘制矩形"))]),
+            Self::Annotate(Tool::Text) => tool(&[
+                (Mouse(Icon::MouseLeft), w!("插入文本框")),
+                (Mouse(Icon::Drag), w!("指定文本框大小")),
+            ]),
+            Self::Annotate(Tool::Brush) => tool(&[(Mouse(Icon::Drag), w!("自由绘制"))]),
+            Self::Annotate(Tool::Mosaic) => tool(&[(Mouse(Icon::Drag), w!("涂抹马赛克"))]),
+            Self::Annotate(Tool::Arrow) => tool(&[(Mouse(Icon::Drag), w!("从起点拖到箭头指向"))]),
+            Self::Annotate(Tool::Number) => tool(&[(Mouse(Icon::MouseLeft), w!("放下下一个序号"))]),
+            Self::Annotate(Tool::Magnify) => tool(&[
+                (Mouse(Icon::Drag), w!("从中心拖出放大范围")),
+                (Mouse(Icon::MouseLeft), w!("单击放大默认范围")),
+            ]),
+            Self::SelectedMark => std::iter::once((
+                w!("选中的标注"),
+                vec![
+                    (Mouse(Icon::Move), w!("拖动标注移动")),
+                    (Mouse(Icon::Resize), w!("拖动控制点调整")),
+                    (Key("方向键"), w!("移动标注")),
+                    wheel,
+                    (Key("Delete"), w!("删除标注")),
+                    (MouseOrKey(Icon::MouseRight, "Esc"), w!("取消选中")),
+                ],
+            ))
+            .chain(toolbar())
+            .collect(),
+            Self::SelectedText => std::iter::once((
+                w!("选中的文本框"),
+                vec![
+                    (Mouse(Icon::MouseLeft), w!("双击文本框编辑")),
+                    (Mouse(Icon::Move), w!("拖动文本框移动")),
+                    (Mouse(Icon::Resize), w!("拖动四角缩放")),
+                    (Mouse(Icon::Drag), w!("拖动旋转手柄")),
+                    (Key("Delete"), w!("删除文本框")),
+                ],
+            ))
+            .chain(toolbar())
+            .collect(),
+            Self::EditText => vec![(
+                w!("输入文字"),
+                vec![
+                    (Key("Enter"), w!("换行")),
+                    (Key("Ctrl+Enter"), w!("确认文本")),
+                    (Key("Esc"), w!("取消文本输入")),
+                ],
+            )],
         }
     }
 }
@@ -323,43 +313,54 @@ impl HintPanel {
         }
         let previous = self.bounds;
         self.mode = Some(mode);
-        let rows = mode.rows();
-        let height = (rows.len() as i32 * ROW_HEIGHT + 2 * PANEL_INSET).min(self.max_height);
-        self.bounds.top = self.bottom - height;
         let surface = &self.surface;
         let description_font = typography::font(TextStyle::HintDescription);
         let key_font = typography::font(TextStyle::Ui);
-        let previous_font = SelectObject(surface.dc, description_font);
-        let description_column = rows
-            .iter()
-            .map(|&(_, description)| text_width(surface.dc, description))
-            .max()
-            .unwrap_or_default();
-        SelectObject(surface.dc, key_font);
+        let previous_font = SelectObject(surface.dc, key_font);
         let bindings = hotkey::current();
-        let mut key_column = 0;
-        let lines: Vec<_> = rows
-            .iter()
-            .map(|&(input, description)| {
-                let caps: Vec<_> = input
-                    .keycaps(bindings)
-                    .into_iter()
-                    .map(|cap| {
-                        let width = cap.width(surface.dc);
-                        (cap, width)
-                    })
-                    .collect();
-                let cap_width = caps
-                    .iter()
-                    .map(|(_, width)| width + KEYCAP_GAP)
-                    .sum::<i32>()
-                    - KEYCAP_GAP;
-                key_column = key_column.max(cap_width);
-                (caps, cap_width, description)
-            })
-            .collect();
-        let width =
-            (2 * PANEL_INSET + key_column + COLUMN_GAP + description_column).min(self.max_width);
+        // Measure each column: keycaps right-aligned, descriptions after them.
+        struct Column {
+            title: *const u16,
+            lines: Vec<(Vec<(Keycap, i32)>, i32, *const u16)>,
+            keys: i32,
+            width: i32,
+        }
+        let mut columns = Vec::new();
+        let mut width = PANEL_INSET;
+        for (title, rows) in mode.sections() {
+            SelectObject(surface.dc, key_font);
+            let mut keys = 0;
+            let lines: Vec<_> = rows
+                .iter()
+                .map(|&(input, description)| {
+                    let caps: Vec<_> = input
+                        .keycaps(bindings)
+                        .into_iter()
+                        .map(|cap| {
+                            let width = cap.width(surface.dc);
+                            (cap, width)
+                        })
+                        .collect();
+                    let cap_width = caps.iter().map(|(_, width)| width + KEYCAP_GAP).sum::<i32>() - KEYCAP_GAP;
+                    keys = keys.max(cap_width);
+                    (caps, cap_width, description)
+                })
+                .collect();
+            SelectObject(surface.dc, description_font);
+            let descriptions = rows.iter().map(|&(_, description)| text_width(surface.dc, description)).max().unwrap_or(0);
+            let column_width = (keys + COLUMN_GAP + descriptions).max(text_width(surface.dc, title));
+            let gap = if columns.is_empty() { 0 } else { SECTION_GAP };
+            // Columns that do not fit on this screen are left out, last first.
+            if width + gap + column_width + PANEL_INSET > self.max_width && !columns.is_empty() {
+                break;
+            }
+            width += gap + column_width;
+            columns.push(Column { title, lines, keys, width: column_width });
+        }
+        let width = (width + PANEL_INSET).min(self.max_width);
+        let rows = columns.iter().map(|column| column.lines.len()).max().unwrap_or(0) as i32;
+        let height = (rows * ROW_HEIGHT + TITLE_HEIGHT + 2 * PANEL_INSET).min(self.max_height);
+        self.bounds.top = self.bottom - height;
         self.bounds.right = self.bounds.left + width;
         let panel = RECT {
             right: width,
@@ -391,13 +392,29 @@ impl HintPanel {
         SetDCBrushColor(surface.dc, mix(palette.tooltip, palette.tooltip_text, 0.3));
         FrameRect(surface.dc, &panel, brush);
         SetBkMode(surface.dc, TRANSPARENT as i32);
-        let split = (PANEL_INSET + key_column).min(width.saturating_sub(2 * PANEL_INSET));
-        for (index, (caps, cap_width, description)) in lines.into_iter().enumerate() {
-            let top = PANEL_INSET + index as i32 * ROW_HEIGHT;
-            let cap_top = top + (ROW_HEIGHT - KEYCAP_HEIGHT) / 2;
-            let mut x = split - cap_width;
-            for (cap, width) in caps {
-                if x >= PANEL_INSET {
+        let mut left = PANEL_INSET;
+        for (index, column) in columns.into_iter().enumerate() {
+            if index > 0 {
+                // A faint rule between columns.
+                let x = left - SECTION_GAP / 2;
+                SetDCBrushColor(surface.dc, mix(palette.tooltip, palette.tooltip_text, 0.18));
+                let rule = RECT { left: x, top: PANEL_INSET + 4, right: x + 1, bottom: height - PANEL_INSET - 4 };
+                FillRect(surface.dc, &rule, brush);
+            }
+            SelectObject(surface.dc, description_font);
+            SetTextColor(surface.dc, mix(palette.tooltip_text, palette.tooltip, 0.4));
+            let mut title = RECT { left, top: PANEL_INSET, right: left + column.width, bottom: PANEL_INSET + TITLE_HEIGHT - 4 };
+            DrawTextW(surface.dc, column.title, -1, &mut title, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+            let split = left + column.keys;
+            for (row, (caps, cap_width, description)) in column.lines.into_iter().enumerate() {
+                let top = PANEL_INSET + TITLE_HEIGHT + row as i32 * ROW_HEIGHT;
+                if top + ROW_HEIGHT > height {
+                    break;
+                }
+                let cap_top = top + (ROW_HEIGHT - KEYCAP_HEIGHT) / 2;
+                let mut x = split - cap_width;
+                SelectObject(surface.dc, key_font);
+                for (cap, width) in caps {
                     cap.paint(
                         surface.dc,
                         RECT {
@@ -407,25 +424,25 @@ impl HintPanel {
                             bottom: cap_top + KEYCAP_HEIGHT,
                         },
                     );
+                    x += width + KEYCAP_GAP;
                 }
-                x += width + KEYCAP_GAP;
+                let mut detail = RECT {
+                    left: split + COLUMN_GAP,
+                    top,
+                    right: left + column.width,
+                    bottom: top + ROW_HEIGHT,
+                };
+                SelectObject(surface.dc, description_font);
+                SetTextColor(surface.dc, palette.tooltip_text);
+                DrawTextW(
+                    surface.dc,
+                    description,
+                    -1,
+                    &mut detail,
+                    DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX,
+                );
             }
-            let mut detail = RECT {
-                left: split + COLUMN_GAP,
-                top,
-                right: width - PANEL_INSET,
-                bottom: top + ROW_HEIGHT,
-            };
-            SelectObject(surface.dc, description_font);
-            SetTextColor(surface.dc, palette.tooltip_text);
-            DrawTextW(
-                surface.dc,
-                description,
-                -1,
-                &mut detail,
-                DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX,
-            );
-            SelectObject(surface.dc, key_font);
+            left += column.width + SECTION_GAP;
         }
         SelectObject(surface.dc, previous_font);
         Some([previous, self.bounds])
@@ -636,12 +653,30 @@ mod tests {
             let [before, selected] = hint.set_mode(source.dc, HintMode::Selected).unwrap();
             assert_eq!(before.top, automatic.top);
             assert_eq!(selected.bottom, automatic.bottom);
-            // Automatic has 4 rows (with Ctrl+A), Selected has 5.
-            assert_eq!(automatic.top - selected.top, ROW_HEIGHT);
+            // Automatic lists 6 rows; Selected's longest column has 9, plus the toolbar's columns.
+            assert_eq!(automatic.top - selected.top, 3 * ROW_HEIGHT);
+            assert!(selected.right - selected.left > automatic.right - automatic.left + 200, "three columns");
+            if std::env::var_os("SNAPSHOT_PREVIEW").is_some() {
+                let folder = std::env::temp_dir().join("snapshot-preview");
+                std::fs::create_dir_all(&folder).unwrap();
+                for (name, mode) in [("selected", HintMode::Selected), ("rectangle", HintMode::Annotate(Tool::Rectangle)), ("automatic", HintMode::Automatic)] {
+                    let mut panel = HintPanel::new(source.dc, area).unwrap();
+                    panel.set_mode(source.dc, mode);
+                    let canvas = Surface::new(null_mut(), area.right, area.bottom).unwrap();
+                    FillRect(canvas.dc, &area, GetStockObject(GRAY_BRUSH));
+                    panel.paint(canvas.dc, area);
+                    GdiFlush();
+                    let mut image = crate::capture::Desktop { bounds: area, surface: canvas }.crop(panel.bounds).unwrap();
+                    for pixel in image.pixels.chunks_exact_mut(4) {
+                        pixel[3] = 255;
+                    }
+                    image.save_png(&folder.join(format!("hint-{name}.png"))).unwrap();
+                }
+            }
             assert!(hint.set_mode(source.dc, HintMode::Selected).is_none());
             let [_, text] = hint.set_mode(source.dc, HintMode::EditText).unwrap();
             // EditText has 3 rows; the panel stays anchored at the bottom.
-            assert_eq!(text.top - automatic.top, ROW_HEIGHT);
+            assert_eq!(text.top - automatic.top, 3 * ROW_HEIGHT);
             assert_eq!(text.bottom, automatic.bottom);
             let mut custom = hotkey::DEFAULT;
             custom.set(

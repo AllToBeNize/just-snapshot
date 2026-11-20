@@ -148,6 +148,26 @@ pub unsafe fn active_window() -> Option<RECT> {
     screen.or_else(|| intersect(rect, rect))
 }
 
+/// Rectangles under one point as distinct layers, smallest first: near
+/// duplicates (every edge within 3 px) count once.
+pub fn layers(mut rects: Vec<RECT>, point: POINT) -> Vec<RECT> {
+    rects.retain(|rect| rect.left < rect.right && rect.top < rect.bottom && contains(*rect, point));
+    rects.sort_by_key(|&rect| area(rect));
+    let mut distinct: Vec<RECT> = Vec::new();
+    for rect in rects {
+        let same = |other: &RECT| {
+            (other.left - rect.left).abs() <= 3
+                && (other.top - rect.top).abs() <= 3
+                && (other.right - rect.right).abs() <= 3
+                && (other.bottom - rect.bottom).abs() <= 3
+        };
+        if !distinct.iter().any(same) {
+            distinct.push(rect);
+        }
+    }
+    distinct
+}
+
 /// Every monitor's rectangle in screen coordinates.
 pub unsafe fn monitors() -> Vec<RECT> {
     unsafe extern "system" fn collect(_: HMONITOR, _: HDC, rect: *mut RECT, context: LPARAM) -> i32 {
@@ -173,6 +193,9 @@ pub struct Request {
 pub struct ElementMatch {
     pub request: Request,
     pub region: Option<ElementRegion>,
+    /// Every element and child window found under the point on the way
+    /// down, in screen coordinates: the layers the side buttons step through.
+    pub layers: Vec<RECT>,
 }
 
 #[derive(Clone, Copy)]
@@ -219,13 +242,13 @@ impl ElementProbe {
                         let Some(request) = request else {
                             continue;
                         };
-                        let region = find_element(request, &automation);
+                        let (region, layers) = find_element(request, &automation);
                         // Browsers can expose their web accessibility tree after the first query.
                         if seen.insert(request.window.id) && region.is_none_or(|region| region.weak)
                         {
                             retry = Some(request);
                         }
-                        if publish.send(ElementMatch { request, region }).is_err() {
+                        if publish.send(ElementMatch { request, region, layers }).is_err() {
                             break;
                         }
                         PostMessageW(overlay as HWND, ELEMENT_READY, 0, 0);
@@ -254,19 +277,29 @@ impl ElementProbe {
 unsafe fn find_element(
     request: Request,
     automation: &OnceCell<Option<Automation>>,
+) -> (Option<ElementRegion>, Vec<RECT>) {
+    let mut layers = Vec::new();
+    let region = find_element_into(request, automation, &mut layers);
+    (region, layers)
+}
+
+unsafe fn find_element_into(
+    request: Request,
+    automation: &OnceCell<Option<Automation>>,
+    layers: &mut Vec<RECT>,
 ) -> Option<ElementRegion> {
     let window = request.window.id as HWND;
     if IsHungAppWindow(window) != 0 {
         return None;
     }
     let deadline = Instant::now() + Duration::from_millis(100);
-    let child = child_at(request);
+    let child = child_at(request, layers);
     let mut hit =
-        child.and_then(|(handle, bounds)| msaa_at(handle, bounds, request.point, deadline));
+        child.and_then(|(handle, bounds)| msaa_at(handle, bounds, request.point, deadline, layers));
     if hit.is_none_or(|rect| area(rect) * 10 >= area(request.window.rect) * 9)
         && Instant::now() < deadline
     {
-        hit = msaa_at(window, request.window.rect, request.point, deadline).or(hit);
+        hit = msaa_at(window, request.window.rect, request.point, deadline, layers).or(hit);
     }
     let region = hit.map(|rect| ElementRegion {
         rect,
@@ -278,14 +311,14 @@ unsafe fn find_element(
     let uia = automation
         .get_or_init(|| Automation::new().ok())
         .as_ref()
-        .and_then(|automation| automation.find(request).ok().flatten());
+        .and_then(|automation| automation.find(request, layers).ok().flatten());
     uia.filter(|region| !region.weak)
         .or_else(|| child.map(|(_, rect)| ElementRegion { rect, weak: true }))
         .or(uia)
         .or(region)
 }
 
-unsafe fn child_at(request: Request) -> Option<(HWND, RECT)> {
+unsafe fn child_at(request: Request, layers: &mut Vec<RECT>) -> Option<(HWND, RECT)> {
     let root = request.window.id as HWND;
     let mut parent = root;
     let mut bounds = request.window.rect;
@@ -308,11 +341,18 @@ unsafe fn child_at(request: Request) -> Option<(HWND, RECT)> {
         };
         parent = child;
         bounds = clipped;
+        layers.push(clipped);
     }
     (parent != root).then_some((parent, bounds))
 }
 
-unsafe fn msaa_at(window: HWND, bounds: RECT, point: POINT, deadline: Instant) -> Option<RECT> {
+unsafe fn msaa_at(
+    window: HWND,
+    bounds: RECT,
+    point: POINT,
+    deadline: Instant,
+    layers: &mut Vec<RECT>,
+) -> Option<RECT> {
     let mut raw = null_mut();
     AccessibleObjectFromWindow(
         AutomationHwnd(window),
@@ -342,6 +382,7 @@ unsafe fn msaa_at(window: HWND, bounds: RECT, point: POINT, deadline: Instant) -
             VT_I4 => {
                 if let Some(rect) = accessible_bounds(&object, &hit, clip, point) {
                     best = Some(rect);
+                    layers.push(rect);
                 }
                 break;
             }
@@ -353,6 +394,7 @@ unsafe fn msaa_at(window: HWND, bounds: RECT, point: POINT, deadline: Instant) -
         if let Some(rect) = accessible_bounds(&next, &self_id, clip, point) {
             clip = rect;
             best = Some(rect);
+            layers.push(rect);
         }
         object = next;
     }
@@ -414,7 +456,7 @@ impl Automation {
         })
     }
 
-    unsafe fn find(&self, request: Request) -> windows::core::Result<Option<ElementRegion>> {
+    unsafe fn find(&self, request: Request, layers: &mut Vec<RECT>) -> windows::core::Result<Option<ElementRegion>> {
         let deadline = Instant::now() + Duration::from_millis(100);
         let root = self
             .client
@@ -467,6 +509,7 @@ impl Automation {
                     continue;
                 };
                 if contains(rect, request.point) {
+                    layers.push(rect);
                     let size = area(rect);
                     let weak = size * 10 >= area(request.window.rect) * 9
                         || child
@@ -491,6 +534,25 @@ fn area(rect: RECT) -> i64 {
 #[cfg(test)]
 mod desktop_tests {
     use super::*;
+
+    #[test]
+    fn layers_are_distinct_contain_the_point_and_grow() {
+        let rect = |left, top, right, bottom| RECT { left, top, right, bottom };
+        let point = POINT { x: 50, y: 50 };
+        let found = layers(
+            vec![
+                rect(0, 0, 1920, 1080),
+                rect(40, 40, 60, 60),
+                rect(0, 0, 400, 300),
+                rect(41, 39, 61, 60),
+                rect(100, 100, 200, 200),
+                rect(10, 10, 300, 200),
+            ],
+            point,
+        );
+        let edges: Vec<_> = found.iter().map(|r| (r.left, r.top, r.right, r.bottom)).collect();
+        assert_eq!(edges, vec![(40, 40, 60, 60), (10, 10, 300, 200), (0, 0, 400, 300), (0, 0, 1920, 1080)]);
+    }
 
     /// Needs a real desktop session: `<test binary> desktop --ignored --nocapture`.
     #[test]

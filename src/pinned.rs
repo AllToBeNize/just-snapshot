@@ -39,6 +39,8 @@ use windows_sys::{
 };
 
 const CLASS: *const u16 = w!("Snapshot.Pinned");
+const TOGGLE_ORIGINAL: &str = "显示原文";
+const TOGGLE_TRANSLATION: &str = "显示译文";
 const POPUP_CLASS: *const u16 = w!("Snapshot.Translation");
 /// Gap between a pin and its translation popup.
 const POPUP_GAP: i32 = 8;
@@ -137,6 +139,10 @@ struct Pin {
     group: u32,
     topmost: bool,
     note: String,
+    /// The image with the translation drawn over the original lines.
+    translated: Option<Surface>,
+    /// Showing the original even though a translation is ready.
+    show_original: bool,
 }
 
 impl Pin {
@@ -196,6 +202,33 @@ impl Pin {
             zoom: (image.right - image.left) as f32 / self.width as f32,
             scale: self.scale,
         }
+    }
+
+    /// Whether the translation covers the original right now.
+    fn showing_translation(&self) -> bool {
+        self.translated.is_some() && !self.show_original
+    }
+
+    /// The 显示原文 / 显示译文 switch in the top-left corner of the image.
+    unsafe fn toggle_button(&self, dc: HDC) -> Option<RECT> {
+        self.translated.as_ref()?;
+        let image = self.image_rect();
+        let width = ui::measure(dc, TOGGLE_ORIGINAL, self.fonts.small) + self.s(20);
+        let (height, margin) = (self.s(26), self.s(6));
+        let rect = RECT {
+            left: image.left + margin,
+            top: image.top + margin,
+            right: image.left + margin + width,
+            bottom: image.top + margin + height,
+        };
+        (rect.right <= image.right && rect.bottom <= image.bottom).then_some(rect)
+    }
+
+    unsafe fn over_toggle(&self, window: HWND, point: POINT) -> bool {
+        let dc = GetDC(window);
+        let button = self.toggle_button(dc);
+        ReleaseDC(window, dc);
+        button.is_some_and(|button| contains(button, point))
     }
 
     unsafe fn over_button(&self, window: HWND, point: POINT) -> bool {
@@ -277,6 +310,8 @@ pub unsafe fn open(image: Image, bounds: RECT, mode: Mode) -> io::Result<()> {
         group: CURRENT_GROUP.get(),
         topmost: true,
         note: String::new(),
+        translated: None,
+        show_original: false,
     });
     // A new pin in a hidden group brings the group back.
     let group = pin.group;
@@ -573,6 +608,10 @@ unsafe fn start_recognition(window: HWND, pin: &mut Pin) {
 
 /// Translates the recognized text into the chosen language in the background.
 unsafe fn start_translation(window: HWND, pin: &mut Pin) {
+    // Back to the original until the new translation arrives.
+    if pin.translated.take().is_some() {
+        InvalidateRect(window, null(), 0);
+    }
     let Some(pane) = &mut pin.translate else { return };
     let lines = pin.text.as_ref().map_or(&[][..], TextLayer::lines);
     pane.scroll = 0;
@@ -779,6 +818,17 @@ unsafe extern "system" fn window_proc(
     let pin = GetWindowLongPtrW(window, GWLP_USERDATA) as *mut Pin;
     match message {
         WM_NCHITTEST => {
+            if !pin.is_null() && (*pin).translated.is_some() {
+                let mut point = mouse_point(lparam);
+                ScreenToClient(window, &mut point);
+                if (*pin).over_toggle(window, point) {
+                    return HTCLIENT as LRESULT;
+                }
+                // Over the translation the whole image drags; the original text is hidden.
+                if (*pin).showing_translation() {
+                    return HTCAPTION as LRESULT;
+                }
+            }
             if !pin.is_null() && (*pin).text.is_some() {
                 let mut point = mouse_point(lparam);
                 ScreenToClient(window, &mut point);
@@ -796,7 +846,11 @@ unsafe extern "system" fn window_proc(
             ScreenToClient(window, &mut point);
             let view = (*pin).view(window);
             let over_code = (*pin).text.as_ref().is_some_and(|text| text.code_at(view, point).is_some());
-            let cursor = if over_code || (*pin).over_button(window, point) { IDC_HAND } else { IDC_IBEAM };
+            let cursor = if over_code || (*pin).over_button(window, point) || (*pin).over_toggle(window, point) {
+                IDC_HAND
+            } else {
+                IDC_IBEAM
+            };
             SetCursor(LoadCursorW(null_mut(), cursor));
             return 1;
         }
@@ -838,6 +892,10 @@ unsafe extern "system" fn window_proc(
                     }
                 }
             }
+        }
+        WM_LBUTTONDOWN if !pin.is_null() && (*pin).over_toggle(window, mouse_point(lparam)) => {
+            (*pin).show_original = !(*pin).show_original;
+            InvalidateRect(window, null(), 0);
         }
         WM_LBUTTONDOWN if !pin.is_null() => {
             let point = mouse_point(lparam);
@@ -924,6 +982,18 @@ unsafe extern "system" fn window_proc(
                     _ => return 0,
                 };
                 pane.scroll = 0;
+                if let Outcome::Done(text) = &outcome {
+                    let lines = (*pin).text.as_ref().map_or(&[][..], TextLayer::lines);
+                    let overlay = (*pin)
+                        .source
+                        .as_ref()
+                        .and_then(|source| crate::translate_overlay::render(source, lines, text).ok())
+                        .and_then(|image| image.into_surface().ok());
+                    (*pin).translated = overlay.map(|(surface, _, _)| surface);
+                    (*pin).show_original = false;
+                    InvalidateRect(window, null(), 0);
+                }
+                let pane = (*pin).translate.as_mut().unwrap();
                 pane.phase = match outcome {
                     Outcome::Done(text) => Phase::Done { text, to },
                     Outcome::Unconfigured => Phase::Unconfigured,
@@ -1078,15 +1148,23 @@ unsafe extern "system" fn window_proc(
                 bounds.top,
                 bounds.right - bounds.left,
                 bounds.bottom - bounds.top,
-                (*pin).surface.dc,
+                match &(*pin).translated {
+                    Some(translated) if !(*pin).show_original => translated.dc,
+                    _ => (*pin).surface.dc,
+                },
                 0,
                 0,
                 (*pin).width,
                 (*pin).height,
                 SRCCOPY,
             );
-            if let Some(text) = &(*pin).text {
+            if let Some(text) = (*pin).text.as_ref().filter(|_| !(*pin).showing_translation()) {
                 text.paint(dc, (*pin).view(window), bounds, &(*pin).fonts);
+            }
+            if let Some(button) = (*pin).toggle_button(dc) {
+                let palette = theme::palette();
+                let label = if (*pin).show_original { TOGGLE_TRANSLATION } else { TOGGLE_ORIGINAL };
+                ui::button(dc, button, label, (*pin).fonts.small, palette, false, palette.card, 7.0 * (*pin).scale);
             }
             if let Some(badge) = (*pin).badge {
                 paint_badge(dc, bounds, &*pin, badge);

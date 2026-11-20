@@ -19,7 +19,7 @@ use windows_sys::{
                 IMN_OPENCANDIDATE,
             },
             Input::KeyboardAndMouse::{
-                GetKeyState, ReleaseCapture, SetCapture, SetFocus, TrackMouseEvent, MOD_CONTROL, MOD_SHIFT,
+                GetKeyState, ReleaseCapture, SetCapture, SetFocus, TrackMouseEvent, MOD_ALT, MOD_CONTROL, MOD_SHIFT,
                 TME_LEAVE, TRACKMOUSEEVENT, VK_BACK, VK_CONTROL, VK_DELETE, VK_DOWN, VK_ESCAPE, VK_LEFT,
                 VK_RETURN, VK_RIGHT, VK_UP,
             },
@@ -53,6 +53,7 @@ use crate::{
 mod annotate;
 mod chrome;
 mod export;
+mod layers;
 mod marks;
 mod paint;
 mod pointer;
@@ -69,6 +70,7 @@ mod tests {
 use annotate::*;
 use chrome::*;
 use export::*;
+use layers::*;
 use marks::*;
 use paint::*;
 use pointer::*;
@@ -131,6 +133,10 @@ struct Selection {
     mark_drag: Option<MarkDrag>,
     /// The box for typing an exact size, over the size badge.
     size_input: Option<HWND>,
+    /// Elements under the pointer from the last probe, in screen coordinates.
+    element_layers: Vec<RECT>,
+    /// A layer chosen with the side buttons, kept until the pointer moves.
+    layer: Option<LayerPick>,
     editor: Option<Editor>,
     brush_cursor: Option<Cursor>,
     mosaic_cursor: Option<(i32, Cursor)>,
@@ -376,6 +382,8 @@ unsafe fn open_selection(instance: HINSTANCE, start: Start) -> io::Result<()> {
         selected_mark: None,
         mark_drag: None,
         size_input: None,
+        element_layers: Vec::new(),
+        layer: None,
         editor: None,
         brush_cursor: None,
         mosaic_cursor: None,
@@ -579,10 +587,18 @@ unsafe extern "system" fn window_proc(
         }
         WM_MOUSEWHEEL => {
             let delta = i32::from((wparam >> 16) as i16);
-            if delta.abs() >= 120 {
+            // Choosing automatically, the wheel steps through layers like the side buttons.
+            if delta.abs() >= 120 && !step_layer(window, delta > 0) {
                 change_option(window, Choice::Primary(delta / 120));
             }
         }
+        WM_XBUTTONDOWN | WM_XBUTTONDBLCLK => {
+            // Back (XBUTTON1) widens to the enclosing layer, forward narrows.
+            step_layer(window, (wparam >> 16) & 0xffff == 1);
+            return 1;
+        }
+        // Swallowed so the button never reaches anything as "back".
+        WM_XBUTTONUP => return 1,
         WM_MOUSELEAVE => {
             update_toolbar_hover(window, None);
             update_options_hover(window, None);
@@ -632,6 +648,11 @@ unsafe extern "system" fn window_proc(
                 }
             } else if modifiers == 0 && (key == u32::from(VK_DELETE) || key == u32::from(VK_BACK)) {
                 delete_selected(window);
+            } else if modifiers == MOD_ALT
+                && (key == u32::from(VK_LEFT) || key == u32::from(VK_RIGHT))
+                && step_layer(window, key == u32::from(VK_LEFT))
+            {
+                // Mouse software often sends the side buttons as Alt+←/→.
             } else if nudge(window, key, modifiers, lparam & (1 << 30) != 0) {
             } else if let Some(action) = hotkey::current()
                 .resolve(Shortcut { modifiers, key })

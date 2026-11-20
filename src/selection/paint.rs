@@ -51,7 +51,7 @@ pub(super) unsafe fn size_badge(rect: RECT, desktop: RECT, canvas: RECT) -> Opti
     })
     .and_then(|info| overlay_rect(info.rcMonitor, desktop))
     .unwrap_or(canvas);
-    let width = 146;
+    let width = 176;
     let height = 24;
     if monitor.right - monitor.left < width || monitor.bottom - monitor.top < height {
         return None;
@@ -219,8 +219,9 @@ pub(super) unsafe fn paint(window: HWND) {
         if let Some(badge) = size_badge(rect, selection.desktop.bounds, selection.canvas)
             .filter(|badge| intersect(*badge, area).is_some())
         {
+            let layer = selection.layer.as_ref().map(|pick| format!(" · 层 {}", pick.label())).unwrap_or_default();
             let size = crate::wide(&format!(
-                "{} × {} px",
+                "{} × {} px{layer}",
                 rect.right - rect.left,
                 rect.bottom - rect.top
             ));
@@ -240,7 +241,7 @@ pub(super) unsafe fn paint(window: HWND) {
                         .is_none_or(|options| intersect(*bounds, options.bounds).is_none())
                 })
             {
-                paint_tooltip(dc, bounds, label);
+                paint_tooltip(dc, bounds, label.as_ptr());
             }
         }
         if let Some(options) = selection

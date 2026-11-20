@@ -36,6 +36,7 @@ mod text_render;
 mod theme;
 mod toolbar;
 mod translate;
+mod translate_overlay;
 mod translate_settings;
 mod typography;
 mod ui;
@@ -383,7 +384,8 @@ unsafe fn open_settings(window: HWND) {
 }
 
 unsafe fn begin_capture(window: HWND) {
-    if settings::is_open() {
+    // Only while a shortcut is being recorded; with settings open you can still capture them.
+    if settings::is_recording() {
         return;
     }
     let instance: HINSTANCE = GetModuleHandleW(null());
@@ -394,7 +396,8 @@ unsafe fn begin_capture(window: HWND) {
 
 /// Opens the capture with the active window already selected.
 unsafe fn capture_window(window: HWND) {
-    if settings::is_open() {
+    // Only while a shortcut is being recorded; with settings open you can still capture them.
+    if settings::is_recording() {
         return;
     }
     let instance: HINSTANCE = GetModuleHandleW(null());
@@ -409,7 +412,8 @@ unsafe fn capture_window(window: HWND) {
 
 /// Brings back the last capture: the same frozen screen, selection and annotations.
 unsafe fn restore_last(window: HWND) {
-    if settings::is_open() {
+    // Only while a shortcut is being recorded; with settings open you can still capture them.
+    if settings::is_recording() {
         return;
     }
     match selection::restore_last(GetModuleHandleW(null())) {

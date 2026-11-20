@@ -37,7 +37,7 @@ Build and test on Windows only. `snapshot.ps1` locates Cargo and the Visual Stud
 | --- | --- |
 | `main.rs` | Tray icon and menu (capture, capture window, last capture, the 贴图 submenu), first-run setup, applying settings |
 | `global_hotkey.rs` | The global shortcuts registered on the tray window, each with a `hotkey::Global` action (capture main + optional second, capture window, last capture), with conflict tracking and retry |
-| `hotkey.rs` | Binding list, defaults (capture `Ctrl+Alt+A`), parsing, `shortcuts.txt` load/save, `first_run()` |
+| `hotkey.rs` | Binding list in toolbar order, defaults (capture `Ctrl+Alt+A`; drawing tools `Ctrl+1`… in order; from undo on, mnemonic keys), migration of old default layouts (`layout=2`), parsing, `shortcuts.txt` load/save, `first_run()` |
 | `settings.rs` | Settings window: frameless and custom-drawn (GDI + GDI+), DPI-scaled, key recording, live hotkey probe, theme picker |
 | `app_icon.rs` | Tray icon drawn in code, with an amber warning badge variant |
 | `startup.rs` | Start-at-login value under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\Snapshot` |
@@ -45,7 +45,7 @@ Build and test on Windows only. `snapshot.ps1` locates Cargo and the Visual Stud
 | `output.rs` | The only exit for captures: `deliver` copies (opaque bottom-up DIB + PNG), saves or pins, then auto-saves when enabled. Normal and long captures both use it |
 | `output_settings.rs` | `output.txt` (folder, file name template, auto-save, shadow, border), template expansion, the shadow/border decoration (real alpha, saved with `save_png_alpha`), and the 保存设置 window |
 | `selection/mod.rs` | The capture session: state, window creation and message dispatch. A locked session is kept in `LAST` when it closes; `restore_last` reopens it on the same frozen desktop |
-| `selection/chrome.rs`, `annotate.rs`, `marks.rs`, `text.rs`, `pointer.rs`, `size.rs`, `paint.rs`, `export.rs` | Toolbar/option/hint state and commands; strokes; picking drawn shapes again (move, handles, restyle, delete); text editing; dragging, snapping, loupe and cursors; typed sizes and arrow-key nudging; painting; leaving the overlay |
+| `selection/chrome.rs`, `annotate.rs`, `layers.rs`, `marks.rs`, `text.rs`, `pointer.rs`, `size.rs`, `paint.rs`, `export.rs` | Toolbar/option/hint state and commands; strokes; side-button layer stepping over `targets::layers` (the probe reports every element under the point; moving the mouse drops the choice); picking drawn shapes again (move, handles, restyle, delete); text editing; dragging, snapping, loupe and cursors; typed sizes and arrow-key nudging; painting; leaving the overlay |
 | `selection_geometry.rs`, `targets.rs`, `panel_edges.rs` | Rect math, window/UIA target snapping, content-column edge detection |
 | `toolbar.rs` | Main toolbar layout, painting, hit testing; shared `paint_panel` / `paint_button` |
 | `annotation_options.rs` | Secondary option bar (width, font size, zoom, on/off toggles such as 圆角 / 虚线 / 描边 / 底色, colors) |
@@ -62,6 +62,7 @@ Build and test on Windows only. `snapshot.ps1` locates Cargo and the Visual Stud
 | `clipboard_data.rs` | Our own `IDataObject` put on the clipboard with `OleSetClipboard`, so `FileContents` can be read at `lindex` 0 (Explorer's paste-as-file). `output::tests::explorer_can_paste_the_copy_as_a_file` reads it back the way Explorer does |
 | `pin_translate.rs` | Translation popup beside a translate pin (owned by the pin, follows it, sized to its content): language picker, copy, settings, skeleton while waiting, full error with retry. `<test binary> pin_translate --ignored` renders previews to `%TEMP%\snapshot-preview` |
 | `translate.rs` | Providers (free MyMemory, the default with no key; OpenAI-compatible, DeepL, Baidu, Youdao), auto language, chunking, retries (network / 429 / 5xx only), `translate.txt`. Tests run every provider against a local mock server (`http::tests::serve`) |
+| `translate_overlay.rs` | Renders a translate pin's translation over its recognized lines (background median, ink color, fitted font); one line per line, or one wrapped block when the counts differ |
 | `translate_settings.rs` | Translation service window with native EDIT boxes (Tab via `IsDialogMessageW` in the main loop). Keys are written to the Credential Manager and never read back into the window |
 | `http.rs` | Blocking HTTPS POST over WinHTTP (system proxy and TLS); call off the UI thread |
 | `credential.rs` | Windows Credential Manager secrets named `Snapshot/<name>`. The ignored round-trip test needs the desktop session |

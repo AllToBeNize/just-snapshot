@@ -48,12 +48,10 @@ pub(super) unsafe fn update_drag(window: HWND, point: POINT, end: bool) -> bool 
 pub(super) unsafe fn hover(window: HWND, point: POINT) {
     let change = SESSION.with_borrow_mut(|session| {
         let selection = session.as_mut()?;
-        if !selection.automatic
-            || selection.drag.is_some()
-            || selection
-                .pointer
-                .is_some_and(|last| last.x == point.x && last.y == point.y)
-        {
+        if !selection.automatic || selection.drag.is_some() || hold_layer(selection, point) {
+            return None;
+        }
+        if selection.pointer.is_some_and(|last| last.x == point.x && last.y == point.y) {
             return None;
         }
         selection.pointer = Some(point);
@@ -71,6 +69,7 @@ pub(super) unsafe fn hover(window: HWND, point: POINT) {
         let id = target.map(|target| target.id);
         if id != selection.target {
             selection.visual_probe = None;
+            selection.element_layers.clear();
         }
         if id != selection.target || !contains(selection.rect, point) {
             selection.rect = target
@@ -125,6 +124,11 @@ pub(super) unsafe fn refine_target(window: HWND) {
             || selection.drag.is_some()
             || selection.target != Some(found.request.window.id)
         {
+            return None;
+        }
+        selection.element_layers = found.layers;
+        // A layer picked with the side buttons stays until the pointer moves.
+        if selection.layer.is_some() {
             return None;
         }
         let same_point =
@@ -205,6 +209,7 @@ pub(super) unsafe fn reset_automatic(window: HWND, point: POINT) {
         selection.automatic = true;
         selection.target = None;
         selection.pointer = None;
+        selection.layer = None;
         selection.visual_probe = None;
         selection.rect = RECT::default();
         selection.annotations = History::default();

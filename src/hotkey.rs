@@ -21,17 +21,17 @@ pub enum Binding {
     Text,
     Brush,
     Mosaic,
-    Undo,
-    Redo,
-    LongCapture,
-    Copy,
-    Save,
-    Pin,
-    ExtractText,
-    Translate,
     Arrow,
     Number,
     Magnify,
+    Undo,
+    Redo,
+    ExtractText,
+    Translate,
+    LongCapture,
+    Pin,
+    Save,
+    Copy,
     /// Global: capture the active window.
     CaptureWindow,
     /// Global: bring back the last capture with its annotations.
@@ -46,23 +46,24 @@ pub enum Global {
     Last,
 }
 
+/// In toolbar order, so the settings list reads like the toolbar.
 pub const BINDINGS: [Binding; 18] = [
     Binding::Capture,
     Binding::Rectangle,
     Binding::Text,
     Binding::Brush,
     Binding::Mosaic,
-    Binding::Undo,
-    Binding::Redo,
-    Binding::LongCapture,
-    Binding::Copy,
-    Binding::Save,
-    Binding::Pin,
-    Binding::ExtractText,
-    Binding::Translate,
     Binding::Arrow,
     Binding::Number,
     Binding::Magnify,
+    Binding::Undo,
+    Binding::Redo,
+    Binding::ExtractText,
+    Binding::Translate,
+    Binding::LongCapture,
+    Binding::Pin,
+    Binding::Save,
+    Binding::Copy,
     Binding::CaptureWindow,
     Binding::LastCapture,
 ];
@@ -72,17 +73,17 @@ const NAMES: [&str; BINDINGS.len()] = [
     "text",
     "brush",
     "mosaic",
-    "undo",
-    "redo",
-    "long_capture",
-    "copy",
-    "save",
-    "pin",
-    "extract_text",
-    "translate",
     "arrow",
     "number",
     "magnify",
+    "undo",
+    "redo",
+    "extract_text",
+    "translate",
+    "long_capture",
+    "pin",
+    "save",
+    "copy",
     "capture_window",
     "last_capture",
 ];
@@ -92,17 +93,17 @@ const LABELS: [&str; BINDINGS.len()] = [
     "文本",
     "画笔",
     "马赛克",
-    "撤回",
-    "重做",
-    "长截图",
-    "复制",
-    "保存",
-    "贴图",
-    "提取文本",
-    "翻译",
     "箭头",
     "序号",
     "放大镜",
+    "撤回",
+    "重做",
+    "提取文本",
+    "翻译",
+    "长截图",
+    "贴图",
+    "保存",
+    "复制",
     "截取窗口",
     "上次截图",
 ];
@@ -151,6 +152,8 @@ const fn ctrl(key: u8) -> Shortcut {
     }
 }
 
+/// Drawing tools take Ctrl+1… in toolbar order; from 撤回 on, each action
+/// has its own mnemonic key.
 pub const DEFAULT: Bindings = Bindings([
     Shortcut {
         modifiers: MOD_CONTROL | MOD_ALT,
@@ -163,14 +166,14 @@ pub const DEFAULT: Bindings = Bindings([
     ctrl(b'5'),
     ctrl(b'6'),
     ctrl(b'7'),
-    ctrl(b'C'),
-    ctrl(b'S'),
+    ctrl(b'Z'),
+    ctrl(b'Y'),
+    ctrl(b'E'),
+    ctrl(b'F'),
+    ctrl(b'L'),
     ctrl(b'T'),
-    ctrl(b'8'),
-    ctrl(b'9'),
-    ctrl(b'R'),
-    ctrl(b'N'),
-    ctrl(b'M'),
+    ctrl(b'S'),
+    ctrl(b'C'),
     Shortcut {
         modifiers: MOD_CONTROL | MOD_ALT,
         key: b'W' as u32,
@@ -180,6 +183,28 @@ pub const DEFAULT: Bindings = Bindings([
         key: b'R' as u32,
     },
 ]);
+
+/// Defaults before the layout above (files without `layout=2`). A binding
+/// still on its old default moves to the new one.
+const OLD_DEFAULTS: [(&str, u8); 15] = [
+    ("rectangle", b'1'),
+    ("text", b'2'),
+    ("brush", b'3'),
+    ("mosaic", b'4'),
+    ("undo", b'5'),
+    ("redo", b'6'),
+    ("long_capture", b'7'),
+    ("copy", b'C'),
+    ("save", b'S'),
+    ("pin", b'T'),
+    ("extract_text", b'8'),
+    ("translate", b'9'),
+    ("arrow", b'R'),
+    ("number", b'N'),
+    ("magnify", b'M'),
+];
+const LAYOUT_KEY: &str = "layout";
+const LAYOUT: &str = "2";
 
 thread_local! {
     static CURRENT: Cell<Bindings> = const { Cell::new(DEFAULT) };
@@ -227,14 +252,10 @@ impl Bindings {
         }
         match shortcut {
             Shortcut { modifiers: 0, key } if key == u32::from(VK_RETURN) => Some(Binding::Copy),
-            Shortcut {
-                modifiers: MOD_CONTROL,
-                key: 0x5a,
-            } if self.get(Binding::Undo) == DEFAULT.get(Binding::Undo) => Some(Binding::Undo),
             Shortcut { modifiers, key }
                 if self.get(Binding::Redo) == DEFAULT.get(Binding::Redo)
-                    && ((modifiers == MOD_CONTROL && key == u32::from(b'Y'))
-                        || (modifiers == MOD_CONTROL | MOD_SHIFT && key == u32::from(b'Z'))) =>
+                    && modifiers == MOD_CONTROL | MOD_SHIFT
+                    && key == u32::from(b'Z') =>
             {
                 Some(Binding::Redo)
             }
@@ -351,6 +372,8 @@ fn load_from(path: &Path) -> Result<Preferences, String> {
     let mut opacity_step = DEFAULT_OPACITY_STEP;
     let mut theme = Theme::default();
     let mut capture_secondary = None;
+    let mut layout = None;
+    let mut stored: Vec<(usize, Shortcut)> = Vec::new();
     match fs::read_to_string(path) {
         Ok(contents) => {
             for line in contents
@@ -374,14 +397,15 @@ fn load_from(path: &Path) -> Result<Preferences, String> {
                                 .ok_or_else(|| format!("快捷键格式有误：{line}"))?,
                         )
                     };
+                } else if name == LAYOUT_KEY {
+                    layout = Some(value.trim().to_string());
                 } else if name == THEME_KEY {
                     // An unknown theme falls back to the default instead of failing startup.
                     theme = Theme::parse(value).unwrap_or_default();
                 } else if let Some(index) = NAMES.iter().position(|&key| key == name) {
-                    bindings.set(
-                        BINDINGS[index],
-                        Shortcut::parse(value).ok_or_else(|| format!("快捷键格式有误：{line}"))?,
-                    );
+                    let shortcut = Shortcut::parse(value).ok_or_else(|| format!("快捷键格式有误：{line}"))?;
+                    bindings.set(BINDINGS[index], shortcut);
+                    stored.push((index, shortcut));
                 }
             }
         }
@@ -410,6 +434,19 @@ fn load_from(path: &Path) -> Result<Preferences, String> {
             }
         }
         Err(error) => return Err(format!("无法读取 {}。\n{error}", path.display())),
+    }
+    if !stored.is_empty() && layout.as_deref() != Some(LAYOUT) {
+        let mut migrated = bindings;
+        for (index, shortcut) in &stored {
+            let old = OLD_DEFAULTS.iter().find(|(name, _)| *name == NAMES[*index]);
+            if old.is_some_and(|&(_, key)| ctrl(key) == *shortcut) {
+                migrated.set(BINDINGS[*index], DEFAULT.get(BINDINGS[*index]));
+            }
+        }
+        // Keys the user picked that now collide keep the old layout instead.
+        if migrated.validate().is_ok() {
+            bindings = migrated;
+        }
     }
     let preferences = Preferences {
         bindings: bindings.validate()?,
@@ -470,7 +507,7 @@ fn save_to(path: &Path, preferences: Preferences) -> Result<(), String> {
         })
         .collect();
     contents.push_str(&format!(
-        "{SECONDARY_KEY}={}\r\n{OPACITY_STEP_KEY}={}\r\n{THEME_KEY}={}\r\n",
+        "{SECONDARY_KEY}={}\r\n{OPACITY_STEP_KEY}={}\r\n{THEME_KEY}={}\r\n{LAYOUT_KEY}={LAYOUT}\r\n",
         preferences
             .capture_secondary
             .map(Shortcut::label)
@@ -516,12 +553,45 @@ mod tests {
     }
 
     #[test]
+    fn old_default_layouts_move_to_the_toolbar_order() {
+        let folder = env::temp_dir().join(format!("snapshot-layout-test-{}", std::process::id()));
+        fs::create_dir_all(&folder).unwrap();
+        let file = folder.join("shortcuts.txt");
+        // An old file: defaults everywhere except a custom brush key.
+        fs::write(&file, "capture=Ctrl+Alt+A\r\nrectangle=Ctrl+1\r\nbrush=Ctrl+Shift+B\r\nundo=Ctrl+5\r\nredo=Ctrl+6\r\nlong_capture=Ctrl+7\r\nextract_text=Ctrl+8\r\ntranslate=Ctrl+9\r\narrow=Ctrl+R\r\nnumber=Ctrl+N\r\n").unwrap();
+        let bindings = load_from(&file).unwrap().bindings;
+        assert_eq!(bindings.get(Binding::Arrow), ctrl(b'5'));
+        assert_eq!(bindings.get(Binding::Number), ctrl(b'6'));
+        assert_eq!(bindings.get(Binding::Undo), ctrl(b'Z'));
+        assert_eq!(bindings.get(Binding::ExtractText), ctrl(b'E'));
+        assert_eq!(bindings.get(Binding::Brush), Shortcut::parse("Ctrl+Shift+B").unwrap(), "custom keys stay");
+        // Once saved with the new layout, Ctrl+5 for undo is a real choice.
+        let mut preferences = Preferences::default();
+        preferences.bindings.set(Binding::Arrow, ctrl(b'R'));
+        preferences.bindings.set(Binding::Undo, ctrl(b'5'));
+        save_to(&file, preferences).unwrap();
+        assert_eq!(load_from(&file).unwrap().bindings.get(Binding::Undo), ctrl(b'5'));
+        fs::remove_dir_all(&folder).unwrap();
+    }
+
+    #[test]
+    fn tools_count_up_from_ctrl_1_in_toolbar_order() {
+        let tools = [Binding::Rectangle, Binding::Text, Binding::Brush, Binding::Mosaic, Binding::Arrow, Binding::Number, Binding::Magnify];
+        for (index, tool) in tools.into_iter().enumerate() {
+            assert_eq!(DEFAULT.get(tool), ctrl(b'1' + index as u8));
+            assert_eq!(BINDINGS[index + 1], tool);
+        }
+        assert_eq!(DEFAULT.get(Binding::Undo).label(), "Ctrl+Z");
+        assert!(DEFAULT.validate().is_ok());
+    }
+
+    #[test]
     fn explicit_bindings_take_priority_and_duplicates_are_rejected() {
         let mut bindings = DEFAULT;
-        bindings.set(Binding::Copy, ctrl(b'Y'));
-        assert_eq!(bindings.resolve(ctrl(b'Y')), Some(Binding::Copy));
+        bindings.set(Binding::Copy, ctrl(b'J'));
+        assert_eq!(bindings.resolve(ctrl(b'J')), Some(Binding::Copy));
         assert!(bindings.validate().is_ok());
-        bindings.set(Binding::Save, ctrl(b'Y'));
+        bindings.set(Binding::Save, ctrl(b'J'));
         assert!(bindings.validate().is_err());
     }
 

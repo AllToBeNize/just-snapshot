@@ -67,6 +67,8 @@ fn new_text_can_be_resized_before_typing_and_reopened_after_moving() {
         selected_mark: None,
         mark_drag: None,
         size_input: None,
+        element_layers: Vec::new(),
+        layer: None,
             editor: None,
             brush_cursor: None,
             mosaic_cursor: None,
