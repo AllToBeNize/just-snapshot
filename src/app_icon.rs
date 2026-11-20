@@ -21,7 +21,7 @@ const SIZES: [(i32, &[u8]); 8] = [
 ];
 
 /// Premultiplied BGRA pixels of an embedded RGBA PNG.
-fn decode(bytes: &[u8]) -> Option<Image> {
+pub fn decode(bytes: &[u8]) -> Option<Image> {
     let mut decoder = png::Decoder::new(std::io::Cursor::new(bytes));
     decoder.set_transformations(png::Transformations::EXPAND);
     let mut reader = decoder.read_info().ok()?;

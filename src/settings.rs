@@ -25,6 +25,7 @@ use windows_sys::{
 };
 
 use crate::{
+    capture::Image,
     apply_preferences, global_hotkey, hotkey,
     hotkey::{Binding, Bindings, Preferences, Shortcut, BINDINGS, DEFAULT_OPACITY_STEP},
     icons::{self, Icon},
@@ -47,7 +48,11 @@ const EASE: f32 = 0.32;
 const PULSE_MS: f32 = 1100.0;
 
 // Layout in 96-DPI pixels.
+/// The settings themselves; the mascot stands in a column to their right.
 const WIDTH: i32 = 820;
+const MASCOT: i32 = 236;
+const TOTAL: i32 = WIDTH + MASCOT;
+const MASCOT_ART: &[u8] = include_bytes!("../assets/character/settings.png");
 const PAD: i32 = 24;
 const HEADER: i32 = 52;
 const LABEL: i32 = 22;
@@ -186,6 +191,8 @@ struct State {
     fonts: Fonts,
     tracking: bool,
     animating: bool,
+    /// The mascot art, decoded once per window.
+    mascot: Option<Image>,
 }
 
 thread_local! {
@@ -211,6 +218,8 @@ struct Layout {
     keys: [RECT; FIELDS],
     rows: [RECT; BINDINGS.len()],
     clear: RECT,
+    /// The column the mascot stands in.
+    mascot: RECT,
     service: RECT,
     toggle: RECT,
     output: RECT,
@@ -232,8 +241,8 @@ impl Layout {
             right: s(right),
             bottom: s(bottom),
         };
-        let header = rect(0, 0, WIDTH, HEADER);
-        let close = rect(WIDTH - 12 - 36, 10, WIDTH - 12, 46);
+        let header = rect(0, 0, TOTAL, HEADER);
+        let close = rect(TOTAL - 12 - 36, 10, TOTAL - 12, 46);
         let mut y = HEADER;
         let capture_label = rect(PAD, y, WIDTH - PAD, y + LABEL);
         y += LABEL;
@@ -314,17 +323,19 @@ impl Layout {
         }
 
         let button_top = y + (FOOTER - 34) / 2;
-        let save = rect(WIDTH - PAD - 84, button_top, WIDTH - PAD, button_top + 34);
+        let mascot = rect(WIDTH - 4, HEADER + 4, TOTAL - PAD / 2, y);
+        let save = rect(TOTAL - PAD - 84, button_top, TOTAL - PAD, button_top + 34);
         let cancel = rect(
-            WIDTH - PAD - 84 * 2 - 10,
+            TOTAL - PAD - 84 * 2 - 10,
             button_top,
-            WIDTH - PAD - 84 - 10,
+            TOTAL - PAD - 84 - 10,
             button_top + 34,
         );
         let reset = rect(PAD - 8, button_top, PAD - 8 + 92, button_top + 34);
         Self {
             scale,
-            width: s(WIDTH),
+            width: s(TOTAL),
+            mascot,
             height,
             header,
             close,
@@ -467,6 +478,7 @@ unsafe fn install(window: HWND, owner: HWND, draft: Draft) {
         fonts: Fonts::new(scale),
         tracking: false,
         animating: false,
+        mascot: crate::app_icon::decode(MASCOT_ART),
     }));
     refresh_capture_status(window);
 }
@@ -981,10 +993,36 @@ impl<'a> Painter<'a> {
         for card in [layout.hero, layout.toolbar, layout.general] {
             self.card(card);
         }
+        self.mascot();
         self.hero();
         self.toolbar_rows();
         self.general();
         self.footer();
+    }
+
+    /// The mascot, as tall as her column allows, standing on the footer line.
+    unsafe fn mascot(&self) {
+        let Some(art) = &self.state.mascot else { return };
+        let column = self.layout.mascot;
+        let Some(graphics) = Graphics::new(self.dc) else { return };
+        // A soft shadow on the floor under her feet.
+        let (cx, floor) = ((column.left + column.right) as f32 / 2.0, column.bottom as f32 - self.f(3.0));
+        for step in 0..4 {
+            let (rx, ry) = (self.f(58.0 - step as f32 * 10.0), self.f(7.0 - step as f32 * 1.2));
+            graphics.fill_ellipse([cx - rx, floor - ry, cx + rx, floor + ry], argb(0, 18));
+        }
+        let height = (column.bottom - column.top) as f32;
+        let width = height * art.width as f32 / art.height as f32;
+        let (width, height) = if width > (column.right - column.left) as f32 {
+            let width = (column.right - column.left) as f32;
+            (width, width * art.height as f32 / art.width as f32)
+        } else {
+            (width, height)
+        };
+        let left = (column.left + column.right) as f32 / 2.0 - width / 2.0;
+        let top = column.bottom as f32 - height;
+        let point = |x: f32, y: f32| windows_sys::Win32::Graphics::GdiPlus::PointF { X: x, Y: y };
+        graphics.image(art, [point(left, top), point(left + width, top), point(left, top + height)], true);
     }
 
     unsafe fn close_button(&self) {
@@ -1791,6 +1829,7 @@ mod tests {
                     fonts: Fonts::new(scale),
                     tracking: false,
                     animating: false,
+                    mascot: crate::app_icon::decode(MASCOT_ART),
                 };
                 let layout = Layout::new(scale);
                 let bounds = RECT {
