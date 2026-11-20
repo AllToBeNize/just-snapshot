@@ -182,6 +182,7 @@ impl Editor {
             let mut frame = TextMark::new(self.rect, self.text.size, self.text.color);
             frame.look = self.text.look;
             frame.align = self.text.align;
+            frame.valign = self.text.valign;
             Cow::Owned(frame)
         }
     }
@@ -221,6 +222,7 @@ impl Selection {
             style.text_color = text.color;
             style.text_look = text.look;
             style.text_align = text.align;
+            style.text_valign = text.valign;
         }
         if let Some(mark) = self.selected_mark_frame() {
             mark.style_into(&mut style);

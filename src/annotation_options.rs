@@ -8,7 +8,7 @@ use windows_sys::{
 
 use crate::{
     annotation::{Style, Tool, INK},
-    text_mark::{Align, Look},
+    text_mark::{Align, Look, VAlign},
     selection_geometry::contains,
     gdiplus::Graphics,
     theme::{self, argb},
@@ -24,6 +24,7 @@ const PADDING: i32 = 5;
 const FIELD: i32 = 104;
 /// A labeled on/off button such as 圆角 or 底色.
 const TOGGLE: i32 = 42;
+const ICON_TOGGLE: i32 = 28;
 const COLORS: [u32; 8] = [
     INK,
     0x0031_91ff,
@@ -52,6 +53,9 @@ pub enum Flag {
     Left,
     Center,
     Right,
+    Top,
+    Middle,
+    Bottom,
 }
 
 impl Flag {
@@ -64,7 +68,19 @@ impl Flag {
             Self::Left => w!("居左"),
             Self::Center => w!("居中"),
             Self::Right => w!("居右"),
+            Self::Top => w!("靠上"),
+            Self::Middle => w!("垂直居中"),
+            Self::Bottom => w!("靠下"),
         }
+    }
+
+    /// Alignment buttons are small icons; the rest carry a two-character label.
+    fn width(self) -> i32 {
+        if self.is_alignment() { ICON_TOGGLE } else { TOGGLE }
+    }
+
+    fn is_alignment(self) -> bool {
+        matches!(self, Self::Left | Self::Center | Self::Right | Self::Top | Self::Middle | Self::Bottom)
     }
 
     fn on(self, style: &Style) -> bool {
@@ -76,6 +92,9 @@ impl Flag {
             Self::Left => style.text_align == Align::Left,
             Self::Center => style.text_align == Align::Center,
             Self::Right => style.text_align == Align::Right,
+            Self::Top => style.text_valign == VAlign::Top,
+            Self::Middle => style.text_valign == VAlign::Middle,
+            Self::Bottom => style.text_valign == VAlign::Bottom,
         }
     }
 }
@@ -84,7 +103,7 @@ impl Flag {
 fn flags(tool: Tool) -> &'static [Flag] {
     match tool {
         Tool::Rectangle => &[Flag::Round, Flag::Dashed],
-        Tool::Text => &[Flag::Left, Flag::Center, Flag::Right, Flag::Outline, Flag::Fill],
+        Tool::Text => &[Flag::Left, Flag::Center, Flag::Right, Flag::Top, Flag::Middle, Flag::Bottom, Flag::Outline, Flag::Fill],
         _ => &[],
     }
 }
@@ -126,6 +145,9 @@ impl Choice {
             (Tool::Text, Self::Toggle(Flag::Left)) => style.text_align = Align::Left,
             (Tool::Text, Self::Toggle(Flag::Center)) => style.text_align = Align::Center,
             (Tool::Text, Self::Toggle(Flag::Right)) => style.text_align = Align::Right,
+            (Tool::Text, Self::Toggle(Flag::Top)) => style.text_valign = VAlign::Top,
+            (Tool::Text, Self::Toggle(Flag::Middle)) => style.text_valign = VAlign::Middle,
+            (Tool::Text, Self::Toggle(Flag::Bottom)) => style.text_valign = VAlign::Bottom,
             (Tool::Rectangle, Self::Color(color)) => style.rect_color = color,
             (Tool::Magnify, Self::Color(color)) => style.magnify_color = color,
             (Tool::Text, Self::Color(color)) => style.text_color = color,
@@ -148,7 +170,7 @@ impl Options {
     pub fn new(tool: Tool, toolbar: RECT, area: RECT, selection: RECT) -> Option<Self> {
         // No wider than the toolbar it hangs under; swatches shrink first.
         let available = (area.right - area.left).min(toolbar.right - toolbar.left);
-        let toggles = TOGGLE * flags(tool).len() as i32;
+        let toggles: i32 = flags(tool).iter().map(|flag| flag.width()).sum();
         let swatch = ((available - FIELD - toggles - PADDING * 2) / COLORS.len() as i32).min(26);
         let width = match tool {
             Tool::Select => return None,
@@ -207,13 +229,12 @@ impl Options {
             (self.cell(FIELD + 81, 22), Choice::Block(1)),
         ];
         let flags = flags(self.tool);
-        let toggles = flags.iter().enumerate().map(move |(index, &flag)| {
-            (
-                self.cell(FIELD + TOGGLE * index as i32 + 2, TOGGLE - 4),
-                Choice::Toggle(flag),
-            )
+        let toggles = flags.iter().scan(FIELD, move |left, &flag| {
+            let cell = self.cell(*left + 2, flag.width() - 4);
+            *left += flag.width();
+            Some((cell, Choice::Toggle(flag)))
         });
-        let offset = FIELD + TOGGLE * flags.len() as i32;
+        let offset = FIELD + flags.iter().map(|flag| flag.width()).sum::<i32>();
         let colors = COLORS.into_iter().enumerate().map(move |(index, color)| {
             (
                 self.cell(offset + self.swatch * index as i32, self.swatch),
@@ -299,9 +320,16 @@ impl Options {
                             graphics.stroke_round(ui_inset(to_f(rect)), 6.0, argb(palette.accent, 255), 1.0);
                         }
                     }
-                    SetTextColor(dc, if on { palette.accent } else { palette.text });
-                    label(dc, rect, flag.label());
-                    SetTextColor(dc, palette.text);
+                    let ink = if on { palette.accent } else { palette.text };
+                    if flag.is_alignment() {
+                        if let Some(graphics) = &graphics {
+                            alignment_glyph(graphics, rect, flag, ink);
+                        }
+                    } else {
+                        SetTextColor(dc, ink);
+                        label(dc, rect, flag.label());
+                        SetTextColor(dc, palette.text);
+                    }
                 }
                 Choice::Primary(step) | Choice::Block(step) => {
                     if hover {
@@ -315,6 +343,35 @@ impl Options {
         }
         drop(graphics);
         RestoreDC(dc, saved);
+    }
+}
+
+/// Lines of text aligned left, center or right; or a bar at the top, middle
+/// or bottom of a frame.
+unsafe fn alignment_glyph(graphics: &Graphics, rect: RECT, flag: Flag, color: u32) {
+    let (cx, cy) = ((rect.left + rect.right) as f32 / 2.0, (rect.top + rect.bottom) as f32 / 2.0);
+    let ink = argb(color, 255);
+    let bar = |left: f32, top: f32, width: f32, height: f32| graphics.fill_round([left, top, left + width, top + height], 0.8, ink);
+    match flag {
+        Flag::Left | Flag::Center | Flag::Right => {
+            for (row, width) in [(0, 12.0), (1, 8.0), (2, 12.0), (3, 6.0)] {
+                let left = match flag {
+                    Flag::Left => cx - 6.0,
+                    Flag::Center => cx - width / 2.0,
+                    _ => cx + 6.0 - width,
+                };
+                bar(left, cy - 6.0 + row as f32 * 3.6, width, 1.6);
+            }
+        }
+        _ => {
+            graphics.stroke_round([cx - 6.5, cy - 6.5, cx + 6.5, cy + 6.5], 2.0, argb(color, 150), 1.0);
+            let top = match flag {
+                Flag::Top => cy - 4.5,
+                Flag::Middle => cy - 1.0,
+                _ => cy + 2.5,
+            };
+            bar(cx - 4.0, top, 8.0, 2.0);
+        }
     }
 }
 

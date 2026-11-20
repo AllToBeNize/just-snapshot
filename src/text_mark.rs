@@ -38,6 +38,15 @@ pub enum Align {
     Right,
 }
 
+/// Where the block of lines sits between the top and bottom of the box.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum VAlign {
+    #[default]
+    Top,
+    Middle,
+    Bottom,
+}
+
 impl Align {
     /// The `DrawTextW` flag.
     pub fn format(self) -> u32 {
@@ -56,6 +65,7 @@ pub struct TextMark {
     pub color: u32,
     pub look: Look,
     pub align: Align,
+    pub valign: VAlign,
     center: (f64, f64),
     width: i32,
     height: i32,
@@ -108,6 +118,7 @@ impl TextMark {
             color,
             look: Look::Plain,
             align: Align::Left,
+            valign: VAlign::Top,
             center: (
                 f64::from(rect.left + rect.right) / 2.0,
                 f64::from(rect.top + rect.bottom) / 2.0,
@@ -459,28 +470,92 @@ impl TextMark {
         if SetGraphicsMode(dc, GM_ADVANCED) != 0 && SetWorldTransform(dc, &transform) != 0 {
             SelectObject(dc, typography::annotation_font(self.size));
             SetBkMode(dc, TRANSPARENT as i32);
-            let mut rect = self.local_rect();
-            InflateRect(&mut rect, -3, -3);
-            let draw = |rect: &mut RECT, color: u32| {
-                SetTextColor(dc, color);
-                DrawTextW(
-                    dc,
-                    self.text.as_ptr(),
-                    self.text.len() as i32,
-                    rect,
-                    DT_WORDBREAK | DT_NOPREFIX | DT_EDITCONTROL | self.align.format(),
-                );
-            };
+            let rect = self.layout_rect(dc);
             if self.look == Look::Outline {
-                let halo = contrast(self.color);
-                let reach = (self.size / 12).clamp(1, 4);
-                for (dx, dy) in [(-1, -1), (0, -1), (1, -1), (-1, 0), (1, 0), (-1, 1), (0, 1), (1, 1)] {
-                    let mut offset = rect;
-                    OffsetRect(&mut offset, dx * reach, dy * reach);
-                    draw(&mut offset, halo);
-                }
+                self.draw_halo(dc, rect);
             }
-            draw(&mut rect, self.ink());
+            let mut rect = rect;
+            self.draw_lines(dc, &mut rect, self.ink());
+        }
+        RestoreDC(dc, saved);
+    }
+
+    fn draw_lines(&self, dc: HDC, rect: &mut RECT, color: u32) {
+        unsafe {
+            SetTextColor(dc, color);
+            DrawTextW(
+                dc,
+                self.text.as_ptr(),
+                self.text.len() as i32,
+                rect,
+                DT_WORDBREAK | DT_NOPREFIX | DT_EDITCONTROL | self.align.format(),
+            );
+        }
+    }
+
+    /// Where the lines go in the box's own coordinates, moved down for
+    /// middle and bottom alignment. The font must be selected.
+    unsafe fn layout_rect(&self, dc: HDC) -> RECT {
+        let mut rect = self.local_rect();
+        InflateRect(&mut rect, -3, -3);
+        if self.valign != VAlign::Top {
+            let mut measure = RECT { right: rect.right - rect.left, ..Default::default() };
+            DrawTextW(
+                dc,
+                self.text.as_ptr(),
+                self.text.len() as i32,
+                &mut measure,
+                DT_WORDBREAK | DT_NOPREFIX | DT_EDITCONTROL | DT_CALCRECT,
+            );
+            let spare = (rect.bottom - rect.top - measure.bottom).max(0);
+            rect.top += if self.valign == VAlign::Middle { spare / 2 } else { spare };
+        }
+        rect
+    }
+
+    /// A two-tone sticker outline: a ring in the text's contrast inside a
+    /// thin ring in the opposite tone, so it shows on light and dark captures.
+    unsafe fn draw_halo(&self, dc: HDC, rect: RECT) {
+        let inner = contrast(self.color);
+        let outer = contrast(inner);
+        let reach = (self.size / 10).clamp(1, 5);
+        for (ring, color) in [(reach + 1, outer), (reach, inner)] {
+            for step in 0..16 {
+                let angle = f64::from(step) * std::f64::consts::TAU / 16.0;
+                let mut offset = rect;
+                OffsetRect(
+                    &mut offset,
+                    (angle.cos() * f64::from(ring)).round() as i32,
+                    (angle.sin() * f64::from(ring)).round() as i32,
+                );
+                self.draw_lines(dc, &mut offset, color);
+            }
+        }
+    }
+
+    /// Only the outline, for drawing under the live edit box while typing.
+    pub unsafe fn paint_halo(&self, dc: HDC) {
+        if self.look != Look::Outline || self.text.is_empty() {
+            return;
+        }
+        let saved = SaveDC(dc);
+        if saved == 0 {
+            return;
+        }
+        let (sin, cos) = self.angle.sin_cos();
+        let transform = XFORM {
+            eM11: cos as f32,
+            eM12: sin as f32,
+            eM21: -sin as f32,
+            eM22: cos as f32,
+            eDx: self.center.0 as f32,
+            eDy: self.center.1 as f32,
+        };
+        if SetGraphicsMode(dc, GM_ADVANCED) != 0 && SetWorldTransform(dc, &transform) != 0 {
+            SelectObject(dc, typography::annotation_font(self.size));
+            SetBkMode(dc, TRANSPARENT as i32);
+            let rect = self.layout_rect(dc);
+            self.draw_halo(dc, rect);
         }
         RestoreDC(dc, saved);
     }
@@ -631,6 +706,63 @@ mod tests {
         assert_eq!(thin.width, 26);
         assert_eq!(Align::Right.format(), DT_RIGHT);
         assert_eq!(handle_cursor(TextHandle::Edge(0, 1), 0.0), IDC_SIZENS);
+    }
+
+    /// Outlined text on light and dark backgrounds and the three vertical
+    /// alignments. Run with `<test binary> text_mark --ignored`.
+    #[test]
+    #[ignore]
+    fn preview_looks() {
+        unsafe {
+            let bounds = RECT { right: 520, bottom: 200, ..Default::default() };
+            let surface = Surface::new(null_mut(), bounds.right, bounds.bottom).unwrap();
+            FillRect(surface.dc, &RECT { right: 260, ..bounds }, GetStockObject(WHITE_BRUSH));
+            SetDCBrushColor(surface.dc, 0x0030_2a28);
+            FillRect(surface.dc, &RECT { left: 260, ..bounds }, GetStockObject(DC_BRUSH));
+            for (index, (left, color)) in [(20, 0x0045_45ff), (280, 0x0045_45ff)].into_iter().enumerate() {
+                let mut mark = TextMark::new(RECT { left, top: 10, right: left + 220, bottom: 60 }, 26, color);
+                mark.text = "描边 Outline".encode_utf16().collect();
+                mark.look = Look::Outline;
+                mark.paint(surface.dc);
+                let _ = index;
+            }
+            for (index, valign) in [VAlign::Top, VAlign::Middle, VAlign::Bottom].into_iter().enumerate() {
+                let left = 20 + index as i32 * 160;
+                let mut mark = TextMark::new(RECT { left, top: 80, right: left + 140, bottom: 190 }, 18, 0x0022_2222);
+                mark.text = "垂直对齐".encode_utf16().collect();
+                mark.align = Align::Center;
+                mark.valign = valign;
+                mark.look = Look::Fill;
+                mark.color = 0x00d0_e8ff;
+                mark.paint(surface.dc);
+                mark.paint_frame(surface.dc);
+            }
+            GdiFlush();
+            let mut image = Desktop { bounds, surface }.crop(bounds).unwrap();
+            for pixel in image.pixels.chunks_exact_mut(4) {
+                pixel[3] = 255;
+            }
+            let folder = std::env::temp_dir().join("snapshot-preview");
+            std::fs::create_dir_all(&folder).unwrap();
+            image.save_png(&folder.join("text-looks.png")).unwrap();
+        }
+    }
+
+    #[test]
+    fn vertical_alignment_moves_the_lines_down() {
+        unsafe {
+            let surface = Surface::new(null_mut(), 300, 200).unwrap();
+            let mut mark = TextMark::new(RECT { left: 0, top: 0, right: 200, bottom: 120 }, 20, 0);
+            mark.text = "一行".encode_utf16().collect();
+            SelectObject(surface.dc, typography::annotation_font(20));
+            let top = mark.layout_rect(surface.dc).top;
+            mark.valign = VAlign::Middle;
+            let middle = mark.layout_rect(surface.dc).top;
+            mark.valign = VAlign::Bottom;
+            let bottom = mark.layout_rect(surface.dc).top;
+            assert!(top < middle && middle < bottom, "{top} {middle} {bottom}");
+            assert!((middle - top - (bottom - middle)).abs() <= 1, "middle is halfway");
+        }
     }
 
     #[test]

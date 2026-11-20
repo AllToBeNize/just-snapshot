@@ -161,6 +161,11 @@ pub(super) unsafe fn paint(window: HWND) {
                         let mut filled = frame.into_owned();
                         filled.look = editor.text.look;
                         filled.paint_background(dc);
+                        // The outline follows what is being typed.
+                        filled.text = read_editor_text(editor.window);
+                        // The edit box always lays out from the top.
+                        filled.valign = crate::text_mark::VAlign::Top;
+                        filled.paint_halo(dc);
                     }
                     if let Some(drag) = &selection.text_drag {
                         if let Some(preview) = &editor.preview {

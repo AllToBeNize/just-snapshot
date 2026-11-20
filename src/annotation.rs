@@ -12,7 +12,7 @@ use crate::{
     icons::Seg,
     mosaic::Mosaic,
     selection_geometry::BORDER_BLUE,
-    text_mark::{contrast, Align, Look, TextMark},
+    text_mark::{contrast, Align, Look, TextMark, VAlign},
     theme::argb,
     wide,
 };
@@ -51,6 +51,7 @@ pub struct Style {
     pub text_color: u32,
     pub text_look: Look,
     pub text_align: Align,
+    pub text_valign: VAlign,
     pub arrow_width: i32,
     pub arrow_color: u32,
     /// Diameter of a step number.
@@ -75,6 +76,7 @@ impl Default for Style {
             text_color: INK,
             text_look: Look::Plain,
             text_align: Align::Left,
+            text_valign: VAlign::Top,
             arrow_width: 4,
             arrow_color: INK,
             number_size: 28,

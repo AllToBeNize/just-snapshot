@@ -115,6 +115,7 @@ pub(super) unsafe fn change_option(window: HWND, choice: Choice) {
             text.look = style.text_look;
             realign = text.align != style.text_align;
             text.align = style.text_align;
+            text.valign = style.text_valign;
             let rect = text_editor_bounds(selection, &text);
             let resized = (EqualRect(&editor.rect, &rect) == 0).then_some(rect);
             let editor = selection.editor.as_mut().unwrap();
@@ -136,6 +137,7 @@ pub(super) unsafe fn change_option(window: HWND, choice: Choice) {
                 text.color = style.text_color;
                 text.look = style.text_look;
                 text.align = style.text_align;
+                text.valign = style.text_valign;
                 text.fit_text(selection.desktop.surface.dc);
                 dirty[1] = Some(text.bounds());
                 selection.annotations.replace_text(index, text);

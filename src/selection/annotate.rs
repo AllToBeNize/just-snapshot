@@ -54,6 +54,7 @@ pub(super) unsafe fn update_annotation(window: HWND, point: POINT, end: bool) ->
             let mut text = TextMark::new(draft.text_rect(clip), style.text_size, style.text_color);
             text.look = style.text_look;
             text.align = style.text_align;
+            text.valign = style.text_valign;
             open_text(window, None, text);
         } else {
             let added = SESSION.with_borrow_mut(|session| {
