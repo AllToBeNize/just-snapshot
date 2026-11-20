@@ -43,6 +43,10 @@ pub enum Target {
     Save(&'static str),
     /// Pin on screen at the capture's screen position.
     Pin(RECT),
+    /// Pin, then recognize its text so it can be selected and copied.
+    TextPin(RECT),
+    /// Pin, recognize its text and show a translation beside it.
+    TranslatePin(RECT),
 }
 
 /// Delivers a capture. `Ok(true)` means it left Snapshot and the capture UI
@@ -57,14 +61,21 @@ pub unsafe fn deliver(window: HWND, image: &Image, target: Target) -> Result<boo
                 .map_err(|error| error.to_string()),
             None => Ok(false),
         },
-        Target::Pin(screen) => pinned::open(image.clone(), screen)
-            .map(|()| true)
-            .map_err(|error| error.to_string()),
+        Target::Pin(screen) | Target::TextPin(screen) | Target::TranslatePin(screen) => {
+            let mode = match target {
+                Target::TextPin(_) => pinned::Mode::Text,
+                Target::TranslatePin(_) => pinned::Mode::Translate,
+                _ => pinned::Mode::Plain,
+            };
+            pinned::open(image.clone(), screen, mode)
+                .map(|()| true)
+                .map_err(|error| error.to_string())
+        }
     };
     result.map_err(|error| match target {
         Target::Copy => format!("无法复制到剪贴板。\n{error}"),
         Target::Save(_) => format!("无法保存图片。\n{error}"),
-        Target::Pin(_) => format!("无法贴图。\n{error}"),
+        Target::Pin(_) | Target::TextPin(_) | Target::TranslatePin(_) => format!("无法贴图。\n{error}"),
     })
 }
 

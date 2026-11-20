@@ -84,6 +84,8 @@ pub(super) unsafe fn output(window: HWND, action: Action) {
     let target = match action {
         Action::Save => output::Target::Save("Snapshot.png"),
         Action::Pin => output::Target::Pin(screen),
+        Action::ExtractText => output::Target::TextPin(screen),
+        Action::Translate => output::Target::TranslatePin(screen),
         _ => output::Target::Copy,
     };
     let result = image

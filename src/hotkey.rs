@@ -27,9 +27,11 @@ pub enum Binding {
     Copy,
     Save,
     Pin,
+    ExtractText,
+    Translate,
 }
 
-pub const BINDINGS: [Binding; 11] = [
+pub const BINDINGS: [Binding; 13] = [
     Binding::Capture,
     Binding::Rectangle,
     Binding::Text,
@@ -41,6 +43,8 @@ pub const BINDINGS: [Binding; 11] = [
     Binding::Copy,
     Binding::Save,
     Binding::Pin,
+    Binding::ExtractText,
+    Binding::Translate,
 ];
 const NAMES: [&str; BINDINGS.len()] = [
     "capture",
@@ -54,6 +58,8 @@ const NAMES: [&str; BINDINGS.len()] = [
     "copy",
     "save",
     "pin",
+    "extract_text",
+    "translate",
 ];
 const LABELS: [&str; BINDINGS.len()] = [
     "开始截图（全局）",
@@ -67,6 +73,8 @@ const LABELS: [&str; BINDINGS.len()] = [
     "复制",
     "保存",
     "贴图",
+    "提取文本",
+    "翻译",
 ];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -128,6 +136,8 @@ pub const DEFAULT: Bindings = Bindings([
     ctrl(b'C'),
     ctrl(b'S'),
     ctrl(b'T'),
+    ctrl(b'8'),
+    ctrl(b'9'),
 ]);
 
 thread_local! {

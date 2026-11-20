@@ -26,6 +26,8 @@ pub enum Action {
     Copy,
     Save,
     Pin,
+    ExtractText,
+    Translate,
     Cancel,
 }
 
@@ -43,6 +45,8 @@ impl Action {
             Binding::Copy => Self::Copy,
             Binding::Save => Self::Save,
             Binding::Pin => Self::Pin,
+            Binding::ExtractText => Self::ExtractText,
+            Binding::Translate => Self::Translate,
         })
     }
 
@@ -55,14 +59,16 @@ impl Action {
     }
 }
 
-// Snipaste-style order: drawing tools | history | output, ending with exit and copy.
-pub const ACTIONS: [Action; 11] = [
+// Snipaste-style order: drawing tools | history | text | output, ending with exit and copy.
+pub const ACTIONS: [Action; 13] = [
     Action::Tool(Tool::Rectangle),
     Action::Tool(Tool::Text),
     Action::Tool(Tool::Brush),
     Action::Tool(Tool::Mosaic),
     Action::Undo,
     Action::Redo,
+    Action::ExtractText,
+    Action::Translate,
     Action::ScrollCapture,
     Action::Pin,
     Action::Save,
@@ -76,6 +82,8 @@ const LABELS: [*const u16; ACTIONS.len()] = [
     w!("马赛克"),
     w!("撤回"),
     w!("重做"),
+    w!("提取文本"),
+    w!("翻译"),
     w!("长截图"),
     w!("贴图"),
     w!("保存"),
@@ -83,7 +91,7 @@ const LABELS: [*const u16; ACTIONS.len()] = [
     w!("复制"),
 ];
 /// Indexes of the first button in every group after the first.
-const GROUP_STARTS: [usize; 2] = [4, 6];
+const GROUP_STARTS: [usize; 3] = [4, 6, 8];
 const OFFSET: i32 = 8;
 const GROUP_GAP: i32 = 11;
 const PADDING: i32 = 4;
@@ -352,6 +360,8 @@ fn action_icon(action: Action) -> Icon {
         Action::Copy => Icon::Copy,
         Action::Save => Icon::Save,
         Action::Pin => Icon::Pin,
+        Action::ExtractText => Icon::ExtractText,
+        Action::Translate => Icon::Translate,
         Action::Cancel => Icon::Close,
     }
 }

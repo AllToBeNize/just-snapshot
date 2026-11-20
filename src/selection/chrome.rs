@@ -228,7 +228,7 @@ pub(super) unsafe fn command(window: HWND, action: Action) {
         start_scroll_capture(window);
         return;
     }
-    if matches!(action, Action::Copy | Action::Save | Action::Pin) {
+    if matches!(action, Action::Copy | Action::Save | Action::Pin | Action::ExtractText | Action::Translate) {
         output(window, action);
         return;
     }

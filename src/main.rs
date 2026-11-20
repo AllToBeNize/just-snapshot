@@ -4,15 +4,21 @@ mod annotation;
 mod app_icon;
 mod annotation_options;
 mod capture;
+mod credential;
 mod dialog;
+mod digest;
 mod gdiplus;
 mod global_hotkey;
 mod hotkey;
+mod http;
 mod icons;
 mod mosaic;
+mod ocr;
 mod output;
 mod overlay_ui;
 mod panel_edges;
+mod pin_text;
+mod pin_translate;
 mod pinned;
 mod scroll_capture;
 mod scroll_input;
@@ -26,6 +32,8 @@ mod text_mark;
 mod text_render;
 mod theme;
 mod toolbar;
+mod translate;
+mod translate_settings;
 mod typography;
 mod ui;
 
@@ -97,6 +105,7 @@ unsafe fn run() -> Result<(), String> {
     scroll_capture::register(instance).map_err(|error| error.to_string())?;
     pinned::register(instance).map_err(|error| error.to_string())?;
     settings::register(instance).map_err(|error| error.to_string())?;
+    translate_settings::register().map_err(|error| error.to_string())?;
     TASKBAR_CREATED.get_or_init(|| RegisterWindowMessageW(w!("TaskbarCreated")));
     let class = WNDCLASSW {
         lpfnWndProc: Some(tray_proc),
@@ -144,6 +153,7 @@ unsafe fn run() -> Result<(), String> {
                 return Err(error.to_string());
             }
             0 => return Ok(()),
+            _ if translate_settings::dialog_message(&message) => {}
             _ => {
                 TranslateMessage(&message);
                 DispatchMessageW(&message);

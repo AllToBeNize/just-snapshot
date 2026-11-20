@@ -32,6 +32,7 @@ use crate::{
     pinned, retry_hotkey,
     selection_geometry::{contains, mouse_point},
     startup,
+    translate_settings,
     gdiplus::Graphics,
     theme::{self, argb, mix, Palette, Theme, THEMES},
     ui::{self, Badge, Fonts},
@@ -52,10 +53,10 @@ const HEADER: i32 = 52;
 const LABEL: i32 = 22;
 const SECTION_GAP: i32 = 14;
 const HERO: i32 = 124;
-const ROW: i32 = 38;
-const ROWS: i32 = 5;
+const ROW: i32 = 35;
+const ROWS: i32 = 6;
 const CARD_INSET: i32 = 6;
-const GENERAL_ROW: i32 = 52;
+const GENERAL_ROW: i32 = 48;
 const GENERAL_ROWS: i32 = 3;
 const FOOTER: i32 = 60;
 const HERO_KEYS: i32 = 220;
@@ -74,6 +75,8 @@ enum Target {
     Plus,
     Theme(usize),
     ClearSecondary,
+    /// "服务设置" beside the translate shortcut.
+    Service,
     Close,
     Reset,
     Cancel,
@@ -205,6 +208,7 @@ struct Layout {
     keys: [RECT; FIELDS],
     rows: [RECT; BINDINGS.len()],
     clear: RECT,
+    service: RECT,
     toggle: RECT,
     stepper: RECT,
     minus: RECT,
@@ -274,6 +278,17 @@ impl Layout {
             keys[index] = rect(right - ROW_KEYS, top + 6, right, top + ROW - 6);
         }
 
+        // After the "翻译" label: icon 12 + 20, gap 10, two 14 px characters, gap 6.
+        let translate_row = rows[Binding::Translate as usize];
+        let service_left = translate_row.left + s(12 + 20 + 10 + 28 + 6);
+        let service_top = (translate_row.top + translate_row.bottom) / 2 - s(12);
+        let service = RECT {
+            left: service_left,
+            top: service_top,
+            right: service_left + s(64),
+            bottom: service_top + s(24),
+        };
+
         let right = WIDTH - PAD - 18;
         let row_top = |row: i32, height: i32| general_top + GENERAL_ROW * row + (GENERAL_ROW - height) / 2;
         let toggle_top = row_top(0, 24);
@@ -315,6 +330,7 @@ impl Layout {
             keys,
             rows,
             clear,
+            service,
             toggle,
             stepper,
             minus,
@@ -333,7 +349,7 @@ impl Layout {
     fn targets(&self) -> impl Iterator<Item = (Target, RECT)> + '_ {
         (0..FIELDS)
             .map(|index| (Target::Key(index), self.keys[index]))
-            .chain([(Target::ClearSecondary, self.clear)])
+            .chain([(Target::ClearSecondary, self.clear), (Target::Service, self.service)])
             .chain((0..THEMES.len()).map(|index| (Target::Theme(index), self.themes[index])))
             .chain([
                 (Target::Toggle, self.toggle),
@@ -607,6 +623,11 @@ unsafe fn activate(window: HWND, target: Target) {
             });
             refresh_capture_status(window);
             animate(window);
+        }
+        Target::Service => {
+            if let Err(error) = translate_settings::open(window) {
+                crate::show_error(window, &format!("无法打开翻译设置。\n{error}"));
+            }
         }
         Target::Close | Target::Cancel => {
             DestroyWindow(window);
@@ -967,6 +988,20 @@ impl<'a> Painter<'a> {
         icons::paint(self.dc, icon, Icon::Close, color);
     }
 
+    /// A small link to the translation service window, after the "翻译" label.
+    unsafe fn service_link(&self) {
+        let rect = self.layout.service;
+        let hover = self.hover(Target::Service);
+        if hover > 0.0 || self.state.pressed == Some(Target::Service) {
+            if let Some(graphics) = Graphics::new(self.dc) {
+                let face = self.face(Target::Service, self.palette.card);
+                graphics.fill_round(ui::to_f(rect), self.f(6.0), argb(face, 255));
+            }
+        }
+        let color = mix(self.palette.accent, self.palette.accent_hover, hover);
+        self.text(rect, "服务设置", self.state.fonts.small, color, DT_CENTER | DT_VCENTER);
+    }
+
     unsafe fn card(&self, rect: RECT) {
         let Some(graphics) = Graphics::new(self.dc) else {
             ui::fill(self.dc, rect, self.palette.card);
@@ -1185,6 +1220,7 @@ impl<'a> Painter<'a> {
             );
             self.key_field(index, self.s(24));
         }
+        self.service_link();
     }
 
     /// A shortcut drawn as keycaps, right-aligned in its field.
@@ -1584,6 +1620,8 @@ fn binding_icon(binding: Binding) -> Icon {
         Binding::Copy => Icon::Copy,
         Binding::Save => Icon::Save,
         Binding::Pin => Icon::Pin,
+        Binding::ExtractText => Icon::ExtractText,
+        Binding::Translate => Icon::Translate,
     }
 }
 
@@ -1783,7 +1821,8 @@ mod tests {
             }
             assert!(
                 layout.height < (720.0 * scale) as i32,
-                "fits a 1080p screen"
+                "fits a 1080p screen: {} at {scale}",
+                layout.height
             );
         }
     }

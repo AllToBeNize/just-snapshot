@@ -55,7 +55,15 @@ Build and test on Windows only. `snapshot.ps1` locates Cargo and the Visual Stud
 | `theme.rs` | Color themes (Graphite default, Midnight, Forest, Light) and color helpers |
 | `ui.rs`, `dialog.rs` | Shared drawing helpers for custom-drawn windows; the themed dialog that replaces `MessageBox` |
 | `scroll_capture.rs`, `scroll_input.rs`, `scroll_stitch.rs` | Long capture session, wheel forwarding, frame stitching |
-| `pinned.rs` | Pinned image windows |
+| `pinned.rs` | Pinned image windows (`Mode::Plain` / `Text` / `Translate`). Text and translate pins carry a `pin_text::TextLayer` and recognize in a background thread that posts `OCR_DONE`; translate pins add a `pin_translate::TranslatePane` and post `TRANSLATE_DONE` with a request id so stale replies are dropped. `translation_settings_changed()` makes waiting pins retry |
+| `ocr.rs` | Windows built-in OCR (`Windows.Media.Ocr`). Recognizes at 1×, and again on a 2× Catmull-Rom enlargement when the median word is under 18 px; tall images go in overlapping strips. `<test binary> ocr --ignored --nocapture` prints accuracy by font size |
+| `pin_translate.rs` | Translation panel beside a translate pin: language picker, copy, settings, skeleton while waiting, full error with retry. `<test binary> pin_translate --ignored` renders previews to `%TEMP%\snapshot-preview` |
+| `translate.rs` | Providers (OpenAI-compatible, DeepL, Baidu, Youdao), auto language, chunking, retries (network / 429 / 5xx only), `translate.txt`. Tests run every provider against a local mock server (`http::tests::serve`) |
+| `translate_settings.rs` | Translation service window with native EDIT boxes (Tab via `IsDialogMessageW` in the main loop). Keys are written to the Credential Manager and never read back into the window |
+| `http.rs` | Blocking HTTPS POST over WinHTTP (system proxy and TLS); call off the UI thread |
+| `credential.rs` | Windows Credential Manager secrets named `Snapshot/<name>`. The ignored round-trip test needs the desktop session |
+| `digest.rs` | MD5 / SHA-256 from CNG for request signatures |
+| `pin_text.rs` | Text layer of a pin: word selection in reading order, hit testing (text selects, the rest drags the pin), copy, painting. `<test binary> pin_text --ignored` renders previews; `<test binary> pinned --ignored --nocapture` runs a real pin through recognition |
 
 ## UI Conventions
 
@@ -74,8 +82,12 @@ The overlay follows Snipaste's layout:
 | Location | Content |
 | --- | --- |
 | `%LOCALAPPDATA%\Snapshot\shortcuts.txt` | Shortcuts (`capture_secondary=` is the optional second capture key, empty when unset), pin opacity step and theme. Its absence (together with no legacy `hotkey.txt`) marks the first run, which enables start at login |
+| `%LOCALAPPDATA%\Snapshot\translate.txt` | Translation provider, OpenAI-compatible address and model, Baidu/Youdao app IDs. Never secrets |
+| Credential Manager `Snapshot/translate/<provider>/<field>` | Translation API keys and secrets |
 | `%LOCALAPPDATA%\Snapshot\hotkey.txt` | Legacy capture shortcut, migrated on first run |
 | `HKCU\...\Run\Snapshot` | Start-at-login command, pointing at the running executable |
+
+API keys and other secrets live only in the Credential Manager: never in `translate.txt`, the repo, logs, error messages or command lines. Before every commit, check the file list for anything key-like.
 
 Launch Snapshot for testing through the shell (`explorer.exe <path to snapshot.exe>`), never as a direct child of a packaged (MSIX) app such as the Codex desktop app. A child of a packaged app inherits its package identity, so its `%LOCALAPPDATA%` and `HKCU` writes go into the package's private store (`%LOCALAPPDATA%\Packages\<package>\LocalCache\...`): the settings it saves are invisible to a normal launch and the start-at-login entry never reaches the real `Run` key.
 
