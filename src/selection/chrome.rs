@@ -98,6 +98,7 @@ pub(super) unsafe fn change_option(window: HWND, choice: Choice) {
         choice.adjust(tool, &mut style);
         let mut dirty = [None, None];
         let mut editor_font = None;
+        let mut realign = false;
         if let Some(index) = selection.selected_mark {
             // Restyle the picked shape; new shapes keep using the same style.
             let mark = selection.annotations.mark(index)?;
@@ -112,6 +113,8 @@ pub(super) unsafe fn change_option(window: HWND, choice: Choice) {
             text.size = style.text_size;
             text.color = style.text_color;
             text.look = style.text_look;
+            realign = text.align != style.text_align;
+            text.align = style.text_align;
             let rect = text_editor_bounds(selection, &text);
             let resized = (EqualRect(&editor.rect, &rect) == 0).then_some(rect);
             let editor = selection.editor.as_mut().unwrap();
@@ -132,6 +135,7 @@ pub(super) unsafe fn change_option(window: HWND, choice: Choice) {
                 text.size = style.text_size;
                 text.color = style.text_color;
                 text.look = style.text_look;
+                text.align = style.text_align;
                 text.fit_text(selection.desktop.surface.dc);
                 dirty[1] = Some(text.bounds());
                 selection.annotations.replace_text(index, text);
@@ -139,9 +143,12 @@ pub(super) unsafe fn change_option(window: HWND, choice: Choice) {
         } else {
             selection.style = style;
         }
-        Some((dirty, editor_font, selection.options))
+        Some((dirty, editor_font, selection.options, realign))
     });
-    if let Some((dirty, editor_font, options)) = changed {
+    if let Some((dirty, editor_font, options, realign)) = changed {
+        if realign {
+            realign_editor(window);
+        }
         for rect in dirty.into_iter().flatten() {
             InvalidateRect(window, &rect, 0);
         }
@@ -256,9 +263,12 @@ pub(super) unsafe fn command(window: HWND, action: Action) {
         {
             return None;
         }
-        if selection.mark_drag.is_some() {
+        if selection.mark_drag.is_some() || selection.pick_drag.is_some() {
             return None;
         }
+        // Undo and tool changes renumber or leave the picked marks.
+        let picks = pick_bounds(selection);
+        selection.picked.clear();
         let previous = selection
             .selected_text()
             .map(TextMark::bounds)
@@ -285,6 +295,16 @@ pub(super) unsafe fn command(window: HWND, action: Action) {
         if selection.selected_text().is_none() {
             selection.selected_text = None;
         }
+        let picks_union = picks.into_iter().reduce(|a, b| RECT {
+            left: a.left.min(b.left),
+            top: a.top.min(b.top),
+            right: a.right.max(b.right),
+            bottom: a.bottom.max(b.bottom),
+        });
+        let previous = match (previous, picks_union) {
+            (Some(a), Some(b)) => Some(RECT { left: a.left.min(b.left), top: a.top.min(b.top), right: a.right.max(b.right), bottom: a.bottom.max(b.bottom) }),
+            (a, b) => a.or(b),
+        };
         Some((
             selection.rect,
             toolbar.bounds,

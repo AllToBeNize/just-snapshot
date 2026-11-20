@@ -12,7 +12,7 @@ use crate::{
     icons::Seg,
     mosaic::Mosaic,
     selection_geometry::BORDER_BLUE,
-    text_mark::{contrast, Look, TextMark},
+    text_mark::{contrast, Align, Look, TextMark},
     theme::argb,
     wide,
 };
@@ -33,6 +33,8 @@ pub enum Tool {
     Number,
     /// A circle of the capture shown enlarged in a lens beside it.
     Magnify,
+    /// Not a drawing tool: picks marks, one by one or in a box, to move together.
+    Select,
 }
 
 #[derive(Clone, Copy)]
@@ -48,6 +50,7 @@ pub struct Style {
     pub text_size: i32,
     pub text_color: u32,
     pub text_look: Look,
+    pub text_align: Align,
     pub arrow_width: i32,
     pub arrow_color: u32,
     /// Diameter of a step number.
@@ -71,6 +74,7 @@ impl Default for Style {
             text_size: 20,
             text_color: INK,
             text_look: Look::Plain,
+            text_align: Align::Left,
             arrow_width: 4,
             arrow_color: INK,
             number_size: 28,
@@ -292,6 +296,8 @@ impl Lens {
 
 #[derive(Clone)]
 enum Edit {
+    /// Several edits undone and redone as one step.
+    Batch(Vec<Edit>),
     Remove(usize),
     Insert(usize, Mark),
     /// The mark that was at the index before a change.
@@ -389,6 +395,52 @@ impl History {
         }
     }
 
+    /// The topmost mark under `point` that the select tool can pick.
+    pub fn hit_any(&self, point: POINT) -> Option<usize> {
+        self.marks.iter().enumerate().rev().find_map(|(index, mark)| mark.touches(point).then_some(index))
+    }
+
+    /// Indices of the marks whose drawing overlaps `area`.
+    pub fn in_area(&self, area: RECT) -> Vec<usize> {
+        self.marks
+            .iter()
+            .enumerate()
+            .filter(|(_, mark)| mark.movable())
+            .filter(|(_, mark)| crate::selection_geometry::intersect(mark.extent(), area).is_some())
+            .map(|(index, _)| index)
+            .collect()
+    }
+
+    /// Replaces several marks as one undo step.
+    pub fn replace_many(&mut self, changes: Vec<(usize, Mark)>) {
+        let mut edits = Vec::new();
+        for (index, mark) in changes {
+            if let Some(slot) = self.marks.get_mut(index) {
+                edits.push(Edit::Replace(index, std::mem::replace(slot, mark)));
+            }
+        }
+        if !edits.is_empty() {
+            self.redo.clear();
+            self.undo.push(Edit::Batch(edits));
+        }
+    }
+
+    /// Removes several marks as one undo step.
+    pub fn remove_many(&mut self, indices: &[usize]) {
+        let mut indices = indices.to_vec();
+        indices.sort_unstable_by(|a, b| b.cmp(a));
+        indices.dedup();
+        let count = self.marks.len();
+        let mut edits = Vec::new();
+        for index in indices.into_iter().filter(|&index| index < count) {
+            edits.push(Edit::Insert(index, self.marks.remove(index)));
+        }
+        if !edits.is_empty() {
+            self.redo.clear();
+            self.undo.push(Edit::Batch(edits));
+        }
+    }
+
     pub fn remove(&mut self, index: usize) {
         if index < self.marks.len() {
             let mark = self.marks.remove(index);
@@ -461,6 +513,13 @@ impl History {
             }
             Edit::Replace(index, previous) => Edit::Replace(index, std::mem::replace(&mut self.marks[index], previous)),
             Edit::Region(previous) => Edit::Region(std::mem::replace(region, previous)),
+            Edit::Batch(edits) => {
+                let mut inverse = Vec::with_capacity(edits.len());
+                for edit in edits.into_iter().rev() {
+                    inverse.push(self.apply(edit, region));
+                }
+                Edit::Batch(inverse)
+            }
         }
     }
 
@@ -497,6 +556,7 @@ impl History {
                     }
                 }
                 Tool::Text => outline(dc, draft.rect()),
+                Tool::Select => {}
             }
         }
         RestoreDC(dc, saved);
@@ -556,7 +616,7 @@ impl Draft {
             Tool::Arrow => padded(join(old_rect, self.rect()), arrow_head(self.style.arrow_width) + 2),
             Tool::Rectangle => padded(join(old_rect, self.rect()), self.style.rect_width / 2 + 3),
             Tool::Magnify => padded(between(self.start, self.start), old_radius.max(self.magnify_radius()) + 3),
-            Tool::Text => padded(join(old_rect, self.rect()), 3),
+            Tool::Text | Tool::Select => padded(join(old_rect, self.rect()), 3),
         }
     }
 
@@ -583,7 +643,7 @@ impl Draft {
             Tool::Arrow => arrow_head(self.style.arrow_width) + 2,
             Tool::Magnify => self.magnify_radius() + 3,
             Tool::Rectangle => self.style.rect_width / 2 + 3,
-            Tool::Text => 3,
+            Tool::Text | Tool::Select => 3,
         };
         padded(between(a, b), pad)
     }
@@ -644,7 +704,7 @@ impl Draft {
                 clip,
                 source,
             ))),
-            Tool::Text => None,
+            Tool::Text | Tool::Select => None,
         }
     }
 }
@@ -671,6 +731,40 @@ impl Mark {
             Self::Arrow { .. } => Tool::Arrow,
             Self::Number { .. } => Tool::Number,
             Self::Magnify(_) => Tool::Magnify,
+        }
+    }
+
+    /// Everything but a mosaic, which belongs to the pixels under it.
+    pub fn movable(&self) -> bool {
+        !matches!(self, Self::Mosaic(_))
+    }
+
+    /// Whether a click at `point` lands on this mark, text boxes included.
+    pub fn touches(&self, point: POINT) -> bool {
+        match self {
+            Self::Text(text) => text.contains(point),
+            Self::Mosaic(_) => false,
+            _ => self.hit(point, false).is_some(),
+        }
+    }
+
+    /// The area the mark itself paints, without selection chrome.
+    pub fn extent(&self) -> RECT {
+        let bounds = self.bounds();
+        let pad = HANDLE_HALF as i32 + 4;
+        RECT { left: bounds.left + pad, top: bounds.top + pad, right: bounds.right - pad, bottom: bounds.bottom - pad }
+    }
+
+    /// The mark shifted by (`dx`, `dy`).
+    pub fn moved(&self, dx: i32, dy: i32, clip: RECT, source: &Desktop) -> Self {
+        match self {
+            Self::Text(text) => Self::Text(text.transform_drag(
+                crate::text_mark::TextHandle::Move,
+                POINT::default(),
+                POINT { x: dx, y: dy },
+            )),
+            Self::Mosaic(_) => self.clone(),
+            _ => self.dragged(Grip::Move, POINT::default(), POINT { x: dx, y: dy }, clip, source),
         }
     }
 

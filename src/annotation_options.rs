@@ -8,7 +8,7 @@ use windows_sys::{
 
 use crate::{
     annotation::{Style, Tool, INK},
-    text_mark::Look,
+    text_mark::{Align, Look},
     selection_geometry::contains,
     gdiplus::Graphics,
     theme::{self, argb},
@@ -49,6 +49,9 @@ pub enum Flag {
     Dashed,
     Outline,
     Fill,
+    Left,
+    Center,
+    Right,
 }
 
 impl Flag {
@@ -58,6 +61,9 @@ impl Flag {
             Self::Dashed => w!("虚线"),
             Self::Outline => w!("描边"),
             Self::Fill => w!("底色"),
+            Self::Left => w!("居左"),
+            Self::Center => w!("居中"),
+            Self::Right => w!("居右"),
         }
     }
 
@@ -67,6 +73,9 @@ impl Flag {
             Self::Dashed => style.rect_dashed,
             Self::Outline => style.text_look == Look::Outline,
             Self::Fill => style.text_look == Look::Fill,
+            Self::Left => style.text_align == Align::Left,
+            Self::Center => style.text_align == Align::Center,
+            Self::Right => style.text_align == Align::Right,
         }
     }
 }
@@ -75,7 +84,7 @@ impl Flag {
 fn flags(tool: Tool) -> &'static [Flag] {
     match tool {
         Tool::Rectangle => &[Flag::Round, Flag::Dashed],
-        Tool::Text => &[Flag::Outline, Flag::Fill],
+        Tool::Text => &[Flag::Left, Flag::Center, Flag::Right, Flag::Outline, Flag::Fill],
         _ => &[],
     }
 }
@@ -114,6 +123,9 @@ impl Choice {
                 let look = if flag == Flag::Outline { Look::Outline } else { Look::Fill };
                 style.text_look = if style.text_look == look { Look::Plain } else { look };
             }
+            (Tool::Text, Self::Toggle(Flag::Left)) => style.text_align = Align::Left,
+            (Tool::Text, Self::Toggle(Flag::Center)) => style.text_align = Align::Center,
+            (Tool::Text, Self::Toggle(Flag::Right)) => style.text_align = Align::Right,
             (Tool::Rectangle, Self::Color(color)) => style.rect_color = color,
             (Tool::Magnify, Self::Color(color)) => style.magnify_color = color,
             (Tool::Text, Self::Color(color)) => style.text_color = color,
@@ -134,10 +146,12 @@ pub struct Options {
 
 impl Options {
     pub fn new(tool: Tool, toolbar: RECT, area: RECT, selection: RECT) -> Option<Self> {
-        let available = area.right - area.left;
+        // No wider than the toolbar it hangs under; swatches shrink first.
+        let available = (area.right - area.left).min(toolbar.right - toolbar.left);
         let toggles = TOGGLE * flags(tool).len() as i32;
         let swatch = ((available - FIELD - toggles - PADDING * 2) / COLORS.len() as i32).min(26);
         let width = match tool {
+            Tool::Select => return None,
             Tool::Mosaic => FIELD * 2,
             _ if swatch >= 12 => FIELD + toggles + swatch * COLORS.len() as i32,
             _ => return None,
@@ -237,6 +251,7 @@ impl Options {
             Tool::Number => (w!("大小"), style.number_size, style.number_color),
             Tool::Rectangle => (w!("粗细"), style.rect_width, style.rect_color),
             Tool::Magnify => (w!("倍数"), style.magnify_zoom, style.magnify_color),
+            Tool::Select => return,
         };
         label(dc, self.cell(0, 31), name);
         label(dc, self.cell(53, 28), wide(&value.to_string()).as_ptr());
@@ -353,16 +368,17 @@ mod tests {
     #[ignore]
     fn preview() {
         unsafe {
-            let area = RECT { right: 520, bottom: 170, ..Default::default() };
+            let area = RECT { right: 620, bottom: 170, ..Default::default() };
             let surface = Surface::new(null_mut(), area.right, area.bottom).unwrap();
             SetDCBrushColor(surface.dc, 0x00d8_d8d8);
             FillRect(surface.dc, &area, GetStockObject(DC_BRUSH));
             let mut style = Style::default();
             style.rect_round = true;
             style.text_look = Look::Fill;
+            style.text_align = Align::Center;
             for (index, tool) in [Tool::Rectangle, Tool::Text, Tool::Magnify].into_iter().enumerate() {
                 let top = 10 + index as i32 * 52;
-                let toolbar = RECT { left: 10, top: top - 50, right: 510, bottom: top - 4 };
+                let toolbar = RECT { left: 0, top: top - 50, right: 620, bottom: top - 4 };
                 let options = Options::new(tool, toolbar, area, RECT { bottom: 0, ..area }).unwrap();
                 options.paint(surface.dc, style, (index == 0).then_some(Choice::Toggle(Flag::Dashed)));
             }

@@ -21,7 +21,7 @@ const PANEL_WIDTH: i32 = 900;
 const ROW_HEIGHT: i32 = 25;
 const PANEL_INSET: i32 = 8;
 /// Room for the longest column (nine rows) under its title.
-const PANEL_HEIGHT: i32 = 9 * ROW_HEIGHT + TITLE_HEIGHT + 2 * PANEL_INSET;
+const PANEL_HEIGHT: i32 = 10 * ROW_HEIGHT + TITLE_HEIGHT + 2 * PANEL_INSET;
 const TITLE_HEIGHT: i32 = 22;
 const SECTION_GAP: i32 = 20;
 const PANEL_MARGIN: i32 = 12;
@@ -68,7 +68,7 @@ pub enum HintMode {
 }
 
 /// Every toolbar action with its binding, grouped like the toolbar.
-const DRAWING: [HintRow; 9] = [
+const DRAWING: [HintRow; 10] = [
     (HintInput::Bound(Binding::Rectangle), w!("矩形")),
     (HintInput::Bound(Binding::Text), w!("文本")),
     (HintInput::Bound(Binding::Brush), w!("画笔")),
@@ -76,6 +76,7 @@ const DRAWING: [HintRow; 9] = [
     (HintInput::Bound(Binding::Arrow), w!("箭头")),
     (HintInput::Bound(Binding::Number), w!("序号")),
     (HintInput::Bound(Binding::Magnify), w!("放大镜")),
+    (HintInput::Bound(Binding::Select), w!("选择")),
     (HintInput::Bound(Binding::Undo), w!("撤回")),
     (HintInput::Bound(Binding::Redo), w!("重做")),
 ];
@@ -147,6 +148,20 @@ impl HintMode {
                 (Mouse(Icon::Drag), w!("从中心拖出放大范围")),
                 (Mouse(Icon::MouseLeft), w!("单击放大默认范围")),
             ]),
+            Self::Annotate(Tool::Select) => std::iter::once((
+                w!("选择"),
+                vec![
+                    (Mouse(Icon::MouseLeft), w!("单击选中标注")),
+                    (Key("Ctrl"), w!("按住单击加选 / 取消")),
+                    (Mouse(Icon::Drag), w!("拖出方框框选")),
+                    (Mouse(Icon::Move), w!("拖动选中的一起移动")),
+                    (Key("方向键"), w!("一起移动")),
+                    (Key("Delete"), w!("删除选中的标注")),
+                    (MouseOrKey(Icon::MouseRight, "Esc"), w!("取消选中")),
+                ],
+            ))
+            .chain(toolbar())
+            .collect(),
             Self::SelectedMark => std::iter::once((
                 w!("选中的标注"),
                 vec![
@@ -653,8 +668,8 @@ mod tests {
             let [before, selected] = hint.set_mode(source.dc, HintMode::Selected).unwrap();
             assert_eq!(before.top, automatic.top);
             assert_eq!(selected.bottom, automatic.bottom);
-            // Automatic lists 6 rows; Selected's longest column has 9, plus the toolbar's columns.
-            assert_eq!(automatic.top - selected.top, 3 * ROW_HEIGHT);
+            // Automatic lists 6 rows; Selected's longest column (标注) has 10.
+            assert_eq!(automatic.top - selected.top, 4 * ROW_HEIGHT);
             assert!(selected.right - selected.left > automatic.right - automatic.left + 200, "three columns");
             if std::env::var_os("SNAPSHOT_PREVIEW").is_some() {
                 let folder = std::env::temp_dir().join("snapshot-preview");

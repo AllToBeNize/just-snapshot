@@ -205,6 +205,7 @@ pub(super) unsafe fn paint(window: HWND) {
             mark.paint_frame(dc);
             RestoreDC(dc, saved);
         }
+        paint_picks(selection, dc);
         if let Some(text) = selection.text_frame() {
             if intersect(text.bounds(), area).is_some() {
                 text.paint_frame(dc);

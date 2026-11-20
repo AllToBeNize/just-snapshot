@@ -69,6 +69,8 @@ fn new_text_can_be_resized_before_typing_and_reopened_after_moving() {
         size_input: None,
         element_layers: Vec::new(),
         layer: None,
+        picked: Vec::new(),
+        pick_drag: None,
             editor: None,
             brush_cursor: None,
             mosaic_cursor: None,
@@ -129,7 +131,9 @@ fn new_text_can_be_resized_before_typing_and_reopened_after_moving() {
         });
         assert!(
             options.left >= toolbar.left && options.right <= toolbar.right,
-            "text settings hang centered under the toolbar"
+            "text settings hang centered under the toolbar: {:?} in {:?}",
+            (options.left, options.right),
+            (toolbar.left, toolbar.right)
         );
         assert!(options.top >= toolbar.bottom || options.bottom <= toolbar.top);
         let composed = surface();

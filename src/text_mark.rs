@@ -29,12 +29,33 @@ pub fn contrast(color: u32) -> u32 {
     }
 }
 
+/// Where lines sit inside the box, like a word processor's paragraph alignment.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Align {
+    #[default]
+    Left,
+    Center,
+    Right,
+}
+
+impl Align {
+    /// The `DrawTextW` flag.
+    pub fn format(self) -> u32 {
+        match self {
+            Self::Left => DT_LEFT,
+            Self::Center => DT_CENTER,
+            Self::Right => DT_RIGHT,
+        }
+    }
+}
+
 #[derive(Clone, PartialEq)]
 pub struct TextMark {
     pub text: Vec<u16>,
     pub size: i32,
     pub color: u32,
     pub look: Look,
+    pub align: Align,
     center: (f64, f64),
     width: i32,
     height: i32,
@@ -44,9 +65,14 @@ pub struct TextMark {
 #[derive(Clone, Copy)]
 pub enum TextHandle {
     Move,
+    /// A corner: scales the box and its font together.
     Scale(i32, i32),
+    /// The middle of an edge: resizes the box, the text reflows (one axis is 0).
+    Edge(i32, i32),
     Rotate,
 }
+
+const EDGES: [(i32, i32); 4] = [(0, -1), (1, 0), (0, 1), (-1, 0)];
 
 const CORNERS: [(i32, i32); 4] = [(-1, -1), (1, -1), (1, 1), (-1, 1)];
 const RESIZE_CURSORS: [*const u16; 4] = [IDC_SIZEWE, IDC_SIZENWSE, IDC_SIZENS, IDC_SIZENESW];
@@ -58,7 +84,7 @@ pub fn handle_cursor(handle: TextHandle, angle: f64) -> *const u16 {
     match handle {
         TextHandle::Move => IDC_SIZEALL,
         TextHandle::Rotate => IDC_HAND,
-        TextHandle::Scale(x, y) => {
+        TextHandle::Scale(x, y) | TextHandle::Edge(x, y) => {
             let (sin, cos) = angle.sin_cos();
             let (x, y) = (f64::from(x), f64::from(y));
             let (dx, dy) = (x * cos - y * sin, x * sin + y * cos);
@@ -81,6 +107,7 @@ impl TextMark {
             size,
             color,
             look: Look::Plain,
+            align: Align::Left,
             center: (
                 f64::from(rect.left + rect.right) / 2.0,
                 f64::from(rect.top + rect.bottom) / 2.0,
@@ -229,6 +256,22 @@ impl TextMark {
         )
     }
 
+    /// The middle of an edge: (0, -1) is the top, (1, 0) the right.
+    fn edge(&self, x: i32, y: i32) -> POINT {
+        let rect = self.local_rect();
+        let ex = match x {
+            -1 => rect.left,
+            1 => rect.right,
+            _ => (rect.left + rect.right) / 2,
+        };
+        let ey = match y {
+            -1 => rect.top,
+            1 => rect.bottom,
+            _ => (rect.top + rect.bottom) / 2,
+        };
+        self.screen_point(ex, ey)
+    }
+
     fn screen_point(&self, x: i32, y: i32) -> POINT {
         let (x, y) = self.transform(f64::from(x), f64::from(y));
         POINT {
@@ -285,6 +328,11 @@ impl TextMark {
                 return Some(TextHandle::Scale(x, y));
             }
         }
+        for (x, y) in EDGES {
+            if near(self.edge(x, y)) {
+                return Some(TextHandle::Edge(x, y));
+            }
+        }
         let (x, y) = self.local_point(point);
         let rect = self.local_rect();
         let distance = [
@@ -323,6 +371,26 @@ impl TextMark {
                     (f64::from(point.y) - frame.center.1).atan2(f64::from(point.x) - frame.center.0)
                 };
                 next.angle += angle(point) - angle(anchor);
+            }
+            TextHandle::Edge(x, y) => {
+                // The delta along the box's own axes; the opposite edge stays put.
+                let (sin, cos) = frame.angle.sin_cos();
+                let (dx, dy) = (f64::from(point.x - anchor.x), f64::from(point.y - anchor.y));
+                let (local_x, local_y) = (dx * cos + dy * sin, -dx * sin + dy * cos);
+                let minimum = f64::from(self.size + 6);
+                let mut shift = (0.0, 0.0);
+                if x != 0 {
+                    let width = (f64::from(self.width) + f64::from(x) * local_x).max(minimum);
+                    shift.0 = f64::from(x) * (width - f64::from(self.width)) / 2.0;
+                    next.width = width.round() as i32;
+                }
+                if y != 0 {
+                    let height = (f64::from(self.height) + f64::from(y) * local_y).max(minimum);
+                    shift.1 = f64::from(y) * (height - f64::from(self.height)) / 2.0;
+                    next.height = height.round() as i32;
+                }
+                next.center.0 += shift.0 * cos - shift.1 * sin;
+                next.center.1 += shift.0 * sin + shift.1 * cos;
             }
             TextHandle::Scale(x, y) => {
                 let fixed = self.corner(-x, -y);
@@ -400,7 +468,7 @@ impl TextMark {
                     self.text.as_ptr(),
                     self.text.len() as i32,
                     rect,
-                    DT_WORDBREAK | DT_NOPREFIX | DT_EDITCONTROL,
+                    DT_WORDBREAK | DT_NOPREFIX | DT_EDITCONTROL | self.align.format(),
                 );
             };
             if self.look == Look::Outline {
@@ -495,6 +563,11 @@ impl TextMark {
         for corner in corners {
             graphics.square_handle(&solid, corner, HANDLE_HALF);
         }
+        // Edge handles resize the box like a word processor's text box.
+        let middle = |a: PointF, b: PointF| PointF { X: (a.X + b.X) / 2.0, Y: (a.Y + b.Y) / 2.0 };
+        for (a, b) in [(0, 1), (1, 2), (2, 3), (3, 0)] {
+            graphics.square_handle(&solid, middle(corners[a], corners[b]), HANDLE_HALF - 0.5);
+        }
         graphics.handle(&solid, rotation, ROTATE_RADIUS as f32);
         graphics.rotation_arrow(&solid, rotation);
         true
@@ -528,6 +601,7 @@ mod tests {
                 let mut mark = TextMark::new(frame, 24, 0x0045_45ff);
                 mark.text = "Snapshot 文本".encode_utf16().collect();
                 mark.angle = angle;
+                mark.align = Align::Center;
                 mark.paint(surface.dc);
                 mark.paint_frame(surface.dc);
             }
@@ -538,6 +612,25 @@ mod tests {
             }
             image.save_png(&folder.join("text-frame.png")).unwrap();
         }
+    }
+
+    #[test]
+    fn edge_handles_resize_the_box_without_scaling_the_font() {
+        let mut text = TextMark::new(RECT { left: 100, top: 100, right: 300, bottom: 160 }, 20, 0);
+        text.align = Align::Center;
+        let right = text.edge(1, 0);
+        assert!(matches!(text.hit_chrome(right), Some(TextHandle::Edge(1, 0))));
+        let wider = text.transform_drag(TextHandle::Edge(1, 0), right, POINT { x: right.x + 50, y: right.y + 30 });
+        assert_eq!((wider.width, wider.height, wider.size), (250, 60, 20), "only the width follows the right edge");
+        assert_eq!(wider.local_rect().left + wider.center.0 as i32, 100, "the left edge stays");
+        let bottom = text.edge(0, 1);
+        let taller = text.transform_drag(TextHandle::Edge(0, 1), bottom, POINT { x: bottom.x, y: bottom.y + 40 });
+        assert_eq!((taller.width, taller.height), (200, 100));
+        // Never thinner than one line.
+        let thin = text.transform_drag(TextHandle::Edge(-1, 0), text.edge(-1, 0), POINT { x: 400, y: 130 });
+        assert_eq!(thin.width, 26);
+        assert_eq!(Align::Right.format(), DT_RIGHT);
+        assert_eq!(handle_cursor(TextHandle::Edge(0, 1), 0.0), IDC_SIZENS);
     }
 
     #[test]

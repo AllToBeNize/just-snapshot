@@ -134,7 +134,8 @@ pub(super) unsafe fn update_text_drag(window: HWND, point: POINT, end: bool) -> 
                 .original
                 .transform_drag(drag.handle, drag.anchor, point),
         };
-        if matches!(drag.handle, TextHandle::Scale(_, _)) && next.size != drag.original.size {
+        let reflow = matches!(drag.handle, TextHandle::Edge(_, _));
+        if reflow || (matches!(drag.handle, TextHandle::Scale(_, _)) && next.size != drag.original.size) {
             next.fit_text(selection.desktop.surface.dc);
         }
         let current = next.bounds();
@@ -213,7 +214,7 @@ pub(super) unsafe fn open_text(window: HWND, index: Option<usize>, text: TextMar
         0,
         w!("EDIT"),
         content.as_ptr(),
-        WS_CHILD | ES_MULTILINE as u32 | ES_AUTOVSCROLL as u32,
+        WS_CHILD | ES_MULTILINE as u32 | ES_AUTOVSCROLL as u32 | edit_alignment(text.align),
         0,
         -height - 1,
         width,
@@ -261,6 +262,34 @@ pub(super) unsafe fn open_text(window: HWND, index: Option<usize>, text: TextMar
     InvalidateRect(window, &frame, 0);
     refresh_options(window);
     refresh_hint(window);
+}
+
+/// The edit box's alignment style; it cannot change after creation.
+pub(super) fn edit_alignment(align: crate::text_mark::Align) -> u32 {
+    match align {
+        crate::text_mark::Align::Left => ES_LEFT as u32,
+        crate::text_mark::Align::Center => ES_CENTER as u32,
+        crate::text_mark::Align::Right => ES_RIGHT as u32,
+    }
+}
+
+/// Rebuilds the edit box with the text's new alignment, keeping what was typed.
+pub(super) unsafe fn realign_editor(window: HWND) {
+    let state = SESSION.with_borrow(|session| {
+        let editor = session.as_ref()?.editor.as_ref()?;
+        Some((editor.window, editor.index, editor.text.clone()))
+    });
+    let Some((input, index, mut text)) = state else { return };
+    text.text = read_editor_text(input);
+    let start = SendMessageW(input, EM_GETSEL, 0, 0);
+    SESSION.with_borrow_mut(|session| session.as_mut().and_then(|selection| selection.editor.take()));
+    KillTimer(window, TEXT_CARET_TIMER);
+    DestroyWindow(input);
+    open_text(window, index, text);
+    // Keep the caret where it was.
+    if let Some(editor) = SESSION.with_borrow(|session| Some(session.as_ref()?.editor.as_ref()?.window)) {
+        SendMessageW(editor, EM_SETSEL, start as usize & 0xffff, (start as isize >> 16) & 0xffff);
+    }
 }
 
 pub(super) unsafe fn resume_editor(window: HWND) {

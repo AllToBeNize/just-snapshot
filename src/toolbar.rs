@@ -50,6 +50,7 @@ impl Action {
             Binding::Arrow => Self::Tool(Tool::Arrow),
             Binding::Number => Self::Tool(Tool::Number),
             Binding::Magnify => Self::Tool(Tool::Magnify),
+            Binding::Select => Self::Tool(Tool::Select),
             Binding::CaptureWindow | Binding::LastCapture => return None,
         })
     }
@@ -64,6 +65,7 @@ impl Action {
             Self::Tool(Tool::Arrow) => Binding::Arrow,
             Self::Tool(Tool::Number) => Binding::Number,
             Self::Tool(Tool::Magnify) => Binding::Magnify,
+            Self::Tool(Tool::Select) => Binding::Select,
             Self::Undo => Binding::Undo,
             Self::Redo => Binding::Redo,
             Self::ScrollCapture => Binding::LongCapture,
@@ -97,7 +99,7 @@ impl Action {
 }
 
 // Snipaste-style order: drawing tools | history | text | output, ending with exit and copy.
-pub const ACTIONS: [Action; 16] = [
+pub const ACTIONS: [Action; 17] = [
     Action::Tool(Tool::Rectangle),
     Action::Tool(Tool::Text),
     Action::Tool(Tool::Brush),
@@ -105,6 +107,7 @@ pub const ACTIONS: [Action; 16] = [
     Action::Tool(Tool::Arrow),
     Action::Tool(Tool::Number),
     Action::Tool(Tool::Magnify),
+    Action::Tool(Tool::Select),
     Action::Undo,
     Action::Redo,
     Action::ExtractText,
@@ -123,6 +126,7 @@ const LABELS: [*const u16; ACTIONS.len()] = [
     w!("箭头"),
     w!("序号"),
     w!("放大镜"),
+    w!("选择"),
     w!("撤回"),
     w!("重做"),
     w!("提取文本"),
@@ -134,7 +138,7 @@ const LABELS: [*const u16; ACTIONS.len()] = [
     w!("复制"),
 ];
 /// Indexes of the first button in every group after the first.
-const GROUP_STARTS: [usize; 3] = [7, 9, 11];
+const GROUP_STARTS: [usize; 3] = [8, 10, 12];
 const OFFSET: i32 = 8;
 const GROUP_GAP: i32 = 11;
 const PADDING: i32 = 4;
@@ -417,6 +421,7 @@ fn action_icon(action: Action) -> Icon {
         Action::Tool(Tool::Arrow) => Icon::Arrow,
         Action::Tool(Tool::Number) => Icon::Number,
         Action::Tool(Tool::Magnify) => Icon::Magnify,
+        Action::Tool(Tool::Select) => Icon::Select,
         Action::Undo => Icon::Undo,
         Action::Redo => Icon::Redo,
         Action::ScrollCapture => Icon::LongCapture,

@@ -8,7 +8,7 @@ pub(super) unsafe fn begin_annotation(window: HWND, point: POINT) -> bool {
         if selection.automatic || !contains(selection.rect, point) {
             return None;
         }
-        let tool = selection.annotations.tool?;
+        let tool = selection.annotations.tool.filter(|&tool| tool != Tool::Select)?;
         let previous = selection
             .selected_text()
             .map(TextMark::bounds)
@@ -53,6 +53,7 @@ pub(super) unsafe fn update_annotation(window: HWND, point: POINT, end: bool) ->
         if draft.tool == Tool::Text {
             let mut text = TextMark::new(draft.text_rect(clip), style.text_size, style.text_color);
             text.look = style.text_look;
+            text.align = style.text_align;
             open_text(window, None, text);
         } else {
             let added = SESSION.with_borrow_mut(|session| {
@@ -77,6 +78,8 @@ pub(super) unsafe fn leave_tool(window: HWND, point: POINT) -> bool {
     let changed = SESSION.with_borrow_mut(|session| {
         let selection = session.as_mut()?;
         selection.annotations.tool.take()?;
+        selection.picked.clear();
+        selection.pick_drag = None;
         let frame = selection
             .selected_text()
             .map(TextMark::bounds)

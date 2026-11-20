@@ -24,6 +24,7 @@ pub enum Binding {
     Arrow,
     Number,
     Magnify,
+    Select,
     Undo,
     Redo,
     ExtractText,
@@ -47,7 +48,7 @@ pub enum Global {
 }
 
 /// In toolbar order, so the settings list reads like the toolbar.
-pub const BINDINGS: [Binding; 18] = [
+pub const BINDINGS: [Binding; 19] = [
     Binding::Capture,
     Binding::Rectangle,
     Binding::Text,
@@ -56,6 +57,7 @@ pub const BINDINGS: [Binding; 18] = [
     Binding::Arrow,
     Binding::Number,
     Binding::Magnify,
+    Binding::Select,
     Binding::Undo,
     Binding::Redo,
     Binding::ExtractText,
@@ -76,6 +78,7 @@ const NAMES: [&str; BINDINGS.len()] = [
     "arrow",
     "number",
     "magnify",
+    "select",
     "undo",
     "redo",
     "extract_text",
@@ -96,6 +99,7 @@ const LABELS: [&str; BINDINGS.len()] = [
     "箭头",
     "序号",
     "放大镜",
+    "选择",
     "撤回",
     "重做",
     "提取文本",
@@ -166,6 +170,7 @@ pub const DEFAULT: Bindings = Bindings([
     ctrl(b'5'),
     ctrl(b'6'),
     ctrl(b'7'),
+    ctrl(b'8'),
     ctrl(b'Z'),
     ctrl(b'Y'),
     ctrl(b'E'),
@@ -448,6 +453,24 @@ fn load_from(path: &Path) -> Result<Preferences, String> {
             bindings = migrated;
         }
     }
+    // A binding added in a newer version takes its default unless the user
+    // already uses that key; then it gets the first free one.
+    for binding in BINDINGS {
+        let index = binding as usize;
+        if stored.iter().any(|(stored, _)| *stored == index) {
+            continue;
+        }
+        let taken = |shortcut: Shortcut| BINDINGS.iter().any(|&other| other != binding && bindings.get(other) == shortcut);
+        if taken(bindings.get(binding)) {
+            let spare = (b'0'..=b'9')
+                .map(ctrl)
+                .chain((b'0'..=b'9').map(|key| Shortcut { modifiers: MOD_CONTROL | MOD_SHIFT, key: u32::from(key) }))
+                .find(|&shortcut| !taken(shortcut));
+            if let Some(spare) = spare {
+                bindings.set(binding, spare);
+            }
+        }
+    }
     let preferences = Preferences {
         bindings: bindings.validate()?,
         opacity_step,
@@ -575,8 +598,22 @@ mod tests {
     }
 
     #[test]
+    fn a_new_binding_never_collides_with_a_saved_key() {
+        let folder = env::temp_dir().join(format!("snapshot-new-binding-{}", std::process::id()));
+        fs::create_dir_all(&folder).unwrap();
+        let file = folder.join("shortcuts.txt");
+        // Saved before 选择 existed, with Ctrl+8 given to copy.
+        fs::write(&file, "copy=Ctrl+8\r\nlayout=2\r\n").unwrap();
+        let bindings = load_from(&file).unwrap().bindings;
+        assert_eq!(bindings.get(Binding::Copy), ctrl(b'8'));
+        assert_ne!(bindings.get(Binding::Select), ctrl(b'8'));
+        assert!(bindings.validate().is_ok());
+        fs::remove_dir_all(&folder).unwrap();
+    }
+
+    #[test]
     fn tools_count_up_from_ctrl_1_in_toolbar_order() {
-        let tools = [Binding::Rectangle, Binding::Text, Binding::Brush, Binding::Mosaic, Binding::Arrow, Binding::Number, Binding::Magnify];
+        let tools = [Binding::Rectangle, Binding::Text, Binding::Brush, Binding::Mosaic, Binding::Arrow, Binding::Number, Binding::Magnify, Binding::Select];
         for (index, tool) in tools.into_iter().enumerate() {
             assert_eq!(DEFAULT.get(tool), ctrl(b'1' + index as u8));
             assert_eq!(BINDINGS[index + 1], tool);

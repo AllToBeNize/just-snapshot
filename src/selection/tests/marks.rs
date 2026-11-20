@@ -153,3 +153,66 @@ fn the_last_capture_comes_back_with_its_annotations() {
         assert!(has_last(), "closing it again keeps it");
     }
 }
+
+#[test]
+fn the_select_tool_boxes_marks_and_moves_them_together() {
+    unsafe {
+        let instance = GetModuleHandleW(null());
+        let _ = register(instance);
+        let window = session(instance);
+        // Two numbers and a box.
+        command(window, Action::Tool(Tool::Number));
+        for x in [120, 200] {
+            mouse(window, WM_LBUTTONDOWN, x, 100);
+            mouse(window, WM_LBUTTONUP, x, 100);
+        }
+        command(window, Action::Tool(Tool::Rectangle));
+        mouse(window, WM_LBUTTONDOWN, 300, 150);
+        mouse(window, WM_MOUSEMOVE, 400, 220);
+        mouse(window, WM_LBUTTONUP, 400, 220);
+        command(window, Action::Tool(Tool::Select));
+        let center = |index: usize| {
+            SESSION.with_borrow(|s| match s.as_ref().unwrap().annotations.mark(index) {
+                Some(Mark::Number { center, .. }) => (center.x, center.y),
+                Some(Mark::Rectangle { rect, .. }) => (rect.left, rect.top),
+                _ => panic!("mark {index}"),
+            })
+        };
+        let picked = || SESSION.with_borrow(|s| {
+            let mut picked = s.as_ref().unwrap().picked.clone();
+            picked.sort();
+            picked
+        });
+        // A box around the two numbers picks just them.
+        mouse(window, WM_LBUTTONDOWN, 90, 70);
+        mouse(window, WM_MOUSEMOVE, 230, 130);
+        mouse(window, WM_LBUTTONUP, 230, 130);
+        assert_eq!(picked(), vec![0, 1]);
+        // Ctrl+click adds the box.
+        SendMessageW(window, WM_LBUTTONDOWN, 0x0008, ((150 << 16) | 350) as LPARAM);
+        mouse(window, WM_LBUTTONUP, 350, 150);
+        assert_eq!(picked(), vec![0, 1, 2]);
+        // Dragging one moves all three.
+        mouse(window, WM_LBUTTONDOWN, 120, 100);
+        mouse(window, WM_MOUSEMOVE, 130, 120);
+        mouse(window, WM_LBUTTONUP, 130, 120);
+        assert_eq!((center(0), center(1), center(2)), ((130, 120), (210, 120), (310, 170)));
+        key(window, VK_RIGHT);
+        assert_eq!(center(1), (211, 120), "arrow keys move them together");
+        // One undo per step.
+        command(window, Action::Undo);
+        command(window, Action::Undo);
+        assert_eq!((center(0), center(2)), ((120, 100), (300, 150)));
+        assert!(picked().is_empty(), "undo drops the picks");
+        // Pick all and delete in one step.
+        mouse(window, WM_LBUTTONDOWN, 80, 60);
+        mouse(window, WM_MOUSEMOVE, 450, 250);
+        mouse(window, WM_LBUTTONUP, 450, 250);
+        assert_eq!(picked().len(), 3);
+        key(window, VK_DELETE);
+        assert!(first_mark().is_none());
+        command(window, Action::Undo);
+        assert_eq!((center(0), center(1), center(2)), ((120, 100), (200, 100), (300, 150)));
+        DestroyWindow(window);
+    }
+}

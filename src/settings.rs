@@ -1680,6 +1680,7 @@ fn binding_icon(binding: Binding) -> Icon {
         Binding::Arrow => Icon::Arrow,
         Binding::Number => Icon::Number,
         Binding::Magnify => Icon::Magnify,
+        Binding::Select => Icon::Select,
         Binding::CaptureWindow => Icon::Window,
         Binding::LastCapture => Icon::History,
     }

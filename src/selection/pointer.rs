@@ -216,6 +216,8 @@ pub(super) unsafe fn reset_automatic(window: HWND, point: POINT) {
         selection.selected_text = None;
         selection.selected_mark = None;
         selection.mark_drag = None;
+        selection.picked.clear();
+        selection.pick_drag = None;
         Some((previous, selection.rect, selection.canvas, was_dragging))
     });
     if let Some((old, new, canvas, was_dragging)) = change {
@@ -401,6 +403,11 @@ pub(super) unsafe fn update_cursor(point: POINT) {
                     } else {
                         IDC_IBEAM
                     });
+                }
+                Some(Tool::Select) => {
+                    let over = matches!(selection.pick_drag, Some(PickDrag::Move { .. }))
+                        || selection.annotations.hit_any(point).is_some();
+                    return system(if over { IDC_SIZEALL } else { IDC_ARROW });
                 }
                 None if selection.annotations.hit_text(point).is_some() => {
                     return system(IDC_SIZEALL)

@@ -188,6 +188,9 @@ pub(super) unsafe fn nudge(window: HWND, key: u32, modifiers: u32, repeat: bool)
     }
     let step = if modifiers & MOD_SHIFT != 0 { 10 } else { 1 };
     let (dx, dy) = (dx * step, dy * step);
+    if nudge_picks(window, dx, dy) {
+        return true;
+    }
     let moved_mark = SESSION.with_borrow_mut(|session| {
         let selection = session.as_mut()?;
         let index = selection.selected_mark?;

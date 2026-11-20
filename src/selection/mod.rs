@@ -12,7 +12,7 @@ use windows_sys::{
         Graphics::Gdi::*,
         System::LibraryLoader::GetModuleHandleW,
         UI::{
-            Controls::{EM_SETRECT, EM_SETSEL, WM_MOUSELEAVE},
+            Controls::{EM_GETSEL, EM_SETRECT, EM_SETSEL, WM_MOUSELEAVE},
             Input::Ime::{
                 ImmGetContext, ImmReleaseContext, ImmSetCandidateWindow, ImmSetCompositionWindow,
                 CANDIDATEFORM, CFS_CANDIDATEPOS, CFS_FORCE_POSITION, COMPOSITIONFORM,
@@ -56,6 +56,7 @@ mod export;
 mod layers;
 mod marks;
 mod paint;
+mod pick;
 mod pointer;
 mod size;
 mod text;
@@ -73,6 +74,7 @@ use export::*;
 use layers::*;
 use marks::*;
 use paint::*;
+use pick::*;
 use pointer::*;
 use size::*;
 use text::*;
@@ -137,6 +139,9 @@ struct Selection {
     element_layers: Vec<RECT>,
     /// A layer chosen with the side buttons, kept until the pointer moves.
     layer: Option<LayerPick>,
+    /// Marks picked with the select tool, moved together.
+    picked: Vec<usize>,
+    pick_drag: Option<PickDrag>,
     editor: Option<Editor>,
     brush_cursor: Option<Cursor>,
     mosaic_cursor: Option<(i32, Cursor)>,
@@ -174,7 +179,10 @@ impl Editor {
         if self.text.is_rotated() {
             Cow::Borrowed(&self.text)
         } else {
-            Cow::Owned(TextMark::new(self.rect, self.text.size, self.text.color))
+            let mut frame = TextMark::new(self.rect, self.text.size, self.text.color);
+            frame.look = self.text.look;
+            frame.align = self.text.align;
+            Cow::Owned(frame)
         }
     }
 }
@@ -212,6 +220,7 @@ impl Selection {
             style.text_size = text.size;
             style.text_color = text.color;
             style.text_look = text.look;
+            style.text_align = text.align;
         }
         if let Some(mark) = self.selected_mark_frame() {
             mark.style_into(&mut style);
@@ -384,6 +393,8 @@ unsafe fn open_selection(instance: HINSTANCE, start: Start) -> io::Result<()> {
         size_input: None,
         element_layers: Vec::new(),
         layer: None,
+        picked: Vec::new(),
+        pick_drag: None,
         editor: None,
         brush_cursor: None,
         mosaic_cursor: None,
@@ -466,6 +477,10 @@ unsafe extern "system" fn window_proc(
                 hide_loupe(window);
                 return 0;
             }
+            if begin_pick(window, point, wparam & 0x0008 != 0) {
+                hide_loupe(window);
+                return 0;
+            }
             if begin_mark_drag(window, point) {
                 hide_loupe(window);
                 return 0;
@@ -502,6 +517,7 @@ unsafe extern "system" fn window_proc(
         WM_MOUSEMOVE => {
             let point = mouse_point(lparam);
             if update_text_drag(window, point, false)
+                || update_pick(window, point, false)
                 || update_mark_drag(window, point, false)
                 || update_annotation(window, point, false)
             {
@@ -518,6 +534,7 @@ unsafe extern "system" fn window_proc(
         WM_LBUTTONUP => {
             let point = mouse_point(lparam);
             if update_text_drag(window, point, true)
+                || update_pick(window, point, true)
                 || update_mark_drag(window, point, true)
                 || update_annotation(window, point, true)
             {
@@ -533,7 +550,7 @@ unsafe extern "system" fn window_proc(
             let editing =
                 SESSION.with_borrow(|session| session.as_ref().is_some_and(|s| s.editor.is_some()));
             finish_text(window, false);
-            if editing || deselect_mark(window) || leave_tool(window, mouse_point(lparam)) {
+            if editing || clear_picks(window) || deselect_mark(window) || leave_tool(window, mouse_point(lparam)) {
                 return 0;
             }
             if SESSION.with_borrow(|session| session.as_ref().is_some_and(|s| s.automatic)) {
@@ -621,6 +638,7 @@ unsafe extern "system" fn window_proc(
         WM_CAPTURECHANGED => {
             cancel_text_drag(window);
             cancel_mark_drag(window);
+            cancel_pick(window);
             let (interrupted, draft) = SESSION.with_borrow_mut(|session| {
                 let Some(selection) = session else {
                     return (false, None);
@@ -643,11 +661,13 @@ unsafe extern "system" fn window_proc(
             let modifiers = hotkey::modifiers();
             if key == u32::from(VK_ESCAPE) && modifiers == 0 {
                 // A selected shape is let go first; the next Esc leaves.
-                if !deselect_mark(window) {
+                if !clear_picks(window) && !deselect_mark(window) {
                     DestroyWindow(window);
                 }
             } else if modifiers == 0 && (key == u32::from(VK_DELETE) || key == u32::from(VK_BACK)) {
-                delete_selected(window);
+                if !delete_picks(window) {
+                    delete_selected(window);
+                }
             } else if modifiers == MOD_ALT
                 && (key == u32::from(VK_LEFT) || key == u32::from(VK_RIGHT))
                 && step_layer(window, key == u32::from(VK_LEFT))
