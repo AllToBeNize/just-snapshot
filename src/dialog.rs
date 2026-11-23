@@ -183,7 +183,7 @@ pub unsafe fn show(owner: HWND, kind: Kind, message: &str) {
     let window = CreateWindowExW(
         WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
         CLASS,
-        w!("Snapshot"),
+        w!("just-snapshot"),
         WS_POPUP,
         0,
         0,

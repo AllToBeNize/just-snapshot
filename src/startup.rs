@@ -44,6 +44,19 @@ pub fn save_with(
     Ok(())
 }
 
+/// Points an existing start-at-login entry at this executable when the
+/// program was moved or renamed (snapshot.exe became just-snapshot.exe).
+pub fn follow_executable() -> Result<(), String> {
+    let Some(previous) = read_command()? else {
+        return Ok(());
+    };
+    let current = current_command()?;
+    if previous != current {
+        write_command(Some(&current))?;
+    }
+    Ok(())
+}
+
 fn current_command() -> Result<Vec<u16>, String> {
     let executable = env::current_exe().map_err(|error| format!("无法获取程序路径。\n{error}"))?;
     let command: Vec<_> = std::iter::once(u16::from(b'"'))

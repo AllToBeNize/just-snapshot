@@ -121,6 +121,8 @@ unsafe fn run() -> Result<(), String> {
                 &format!("无法设置开机自动启动，可在托盘「设置」中重试。\n{error}"),
             );
         }
+    } else {
+        let _ = startup::follow_executable();
     }
     let bindings = preferences.bindings;
     hotkey::activate(bindings);
@@ -150,7 +152,7 @@ unsafe fn run() -> Result<(), String> {
     let window = CreateWindowExW(
         0,
         class.lpszClassName,
-        w!("Snapshot"),
+        w!("just-snapshot"),
         WS_OVERLAPPED,
         0,
         0,
@@ -170,7 +172,7 @@ unsafe fn run() -> Result<(), String> {
     let conflicts = global_hotkey::set(window, &preferences.globals(false));
     if !tray_icon(window, NIM_ADD) {
         DestroyWindow(window);
-        return Err("无法创建 Snapshot 托盘图标。".into());
+        return Err("无法创建 just-snapshot 托盘图标。".into());
     }
     // A conflict is not fatal: the tray shows a warning badge and stays usable.
     if !conflicts.is_empty() {
@@ -248,8 +250,8 @@ unsafe fn tray_icon(window: HWND, message: u32) -> bool {
         ..Default::default()
     };
     let label = match conflicts {
-        None => format!("Snapshot · {}", global_hotkey::label()),
-        Some(taken) => format!("Snapshot · {taken} 被其他程序占用\n双击截图，右键换快捷键"),
+        None => format!("just-snapshot · {}", global_hotkey::label()),
+        Some(taken) => format!("just-snapshot · {taken} 被其他程序占用\n双击截图，右键换快捷键"),
     };
     copy_text(&mut icon.szTip, &label);
     Shell_NotifyIconW(message, &icon) != 0

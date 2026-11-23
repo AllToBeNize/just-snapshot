@@ -595,7 +595,7 @@ pub unsafe fn open(owner: HWND, instance: HINSTANCE) -> io::Result<()> {
     let window = CreateWindowExW(
         0,
         CLASS,
-        w!("Snapshot 设置"),
+        w!("just-snapshot 设置"),
         WS_POPUP | WS_SYSMENU,
         CW_USEDEFAULT,
         CW_USEDEFAULT,
@@ -1205,7 +1205,7 @@ impl<'a> Painter<'a> {
         };
         self.text(
             version,
-            &format!("Snapshot v{}", env!("CARGO_PKG_VERSION")),
+            &format!("just-snapshot v{}", env!("CARGO_PKG_VERSION")),
             fonts.small,
             palette.tertiary,
             DT_LEFT | DT_VCENTER,

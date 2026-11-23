@@ -274,7 +274,7 @@ pub unsafe fn open(image: Image, bounds: RECT, mode: Mode) -> io::Result<()> {
     let window = CreateWindowExW(
         WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_LAYERED,
         CLASS,
-        w!("Snapshot 贴图"),
+        w!("just-snapshot 贴图"),
         WS_POPUP,
         bounds.left - GLOW,
         bounds.top - GLOW,
@@ -524,7 +524,7 @@ unsafe fn open_popup(window: HWND, pin: &mut Pin) {
     let popup = CreateWindowExW(
         WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
         POPUP_CLASS,
-        w!("Snapshot 翻译"),
+        w!("just-snapshot 翻译"),
         WS_POPUP,
         0,
         0,

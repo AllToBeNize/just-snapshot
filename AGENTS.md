@@ -1,10 +1,10 @@
 # Repository Rules
 
-Guide for AI coding agents working on Snapshot. The user-facing feature overview lives in `README.md`; the architecture rationale lives in `docs/technical-plan.md`.
+Guide for AI coding agents working on just-snapshot (renamed from Snapshot in 0.4.0). The user-facing feature overview lives in `README.md`; the architecture rationale lives in `docs/technical-plan.md`.
 
 ## Project Overview
 
-Snapshot is a Windows 10/11 x64 screenshot tool written in Rust on raw Win32 (`windows` / `windows-sys` crates, GDI drawing, no UI framework). It idles in the tray with a blocking message loop; every capture buffer, GPU resource, and helper thread is created per capture session and released afterwards. Keep idle CPU, wake-ups, and memory at zero growth.
+just-snapshot is a Windows 10/11 x64 screenshot tool written in Rust on raw Win32 (`windows` / `windows-sys` crates, GDI drawing, no UI framework). It idles in the tray with a blocking message loop; every capture buffer, GPU resource, and helper thread is created per capture session and released afterwards. Keep idle CPU, wake-ups, and memory at zero growth.
 
 UI strings, error messages, and user-facing docs are Simplified Chinese. Code, identifiers, and comments are English.
 
@@ -14,14 +14,14 @@ Build and test on Windows only. `snapshot.ps1` locates Cargo and the Visual Stud
 
 | Command | Purpose |
 | --- | --- |
-| `.\snapshot.ps1 build` | Release build: `target/x86_64-pc-windows-msvc/release/snapshot.exe` |
+| `.\snapshot.ps1 build` | Release build: `target/x86_64-pc-windows-msvc/release/just-snapshot.exe` |
 | `.\snapshot.ps1 test` | Run all unit tests |
-| `.\snapshot.ps1 package` | Test, build, then write `dist/snapshot-v<version>-windows-x64.zip` and `.sha256` |
+| `.\snapshot.ps1 package` | Test, build, then write `dist/just-snapshot-v<version>-windows-x64.zip` and `.sha256` |
 | `.\snapshot.ps1 release -Tag vX.Y.Z` | Package and create a draft GitHub Release (needs `gh auth login`) |
 
 - The script writes rustup progress to stderr. In a remote or non-interactive PowerShell session that is turned into a terminating error; run it from `cmd` instead (`powershell -NoProfile -ExecutionPolicy Bypass -File snapshot.ps1 test > log 2>&1`).
 - Run `.\snapshot.ps1 test` before reporting a change as done. The build must stay warning-free.
-- A running `snapshot.exe` locks the release binary; exit it from the tray before rebuilding.
+- A running `just-snapshot.exe` locks the release binary; exit it from the tray before rebuilding.
 - UI previews without a desktop session: run the test binary in `target/x86_64-pc-windows-msvc/release/deps/snapshot-*.exe` with `preview --ignored`. It renders the settings window (every theme and main states), the toolbar and option bar in every theme, the dialog, the text frame and the tray icons to `%TEMP%\snapshot-preview\*.png`. Look at them after any UI change.
 
 ## Release Flow
@@ -40,7 +40,7 @@ Build and test on Windows only. `snapshot.ps1` locates Cargo and the Visual Stud
 | `hotkey.rs` | Binding list in toolbar order, defaults (capture `Ctrl+Alt+A`; drawing tools `Ctrl+1`… in order; from undo on, mnemonic keys), migration of old default layouts (`layout=2`), parsing, `shortcuts.txt` load/save, `first_run()` |
 | `settings.rs` | Settings window: frameless and custom-drawn (GDI + GDI+), DPI-scaled, key recording, live hotkey probe, theme picker |
 | `app_icon.rs` | Tray icon from the embedded `assets/icon/png` sizes, with an amber warning badge variant. The executable icon is `assets/icon/snapshot.ico`, compiled in by `build.rs` with rc.exe (see `assets/README.md`) |
-| `startup.rs` | Start-at-login value under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\Snapshot` |
+| `startup.rs` | Start-at-login value under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\Snapshot`; `follow_executable` repoints an existing entry at the running exe on every start (covers the snapshot.exe → just-snapshot.exe rename) |
 | `capture.rs` | Desktop grab, cropping, the `Surface` bitmap helper and PNG encoding |
 | `output.rs` | The only exit for captures: `deliver` copies (opaque bottom-up DIB + PNG), saves or pins, then auto-saves when enabled. Normal and long captures both use it |
 | `output_settings.rs` | `output.txt` (folder, file name template, auto-save, shadow, border), template expansion, the shadow/border decoration (real alpha, saved with `save_png_alpha`), and the 保存设置 window |
@@ -59,9 +59,10 @@ Build and test on Windows only. `snapshot.ps1` locates Cargo and the Visual Stud
 | `selection` pointer layer | `PointerLayer`: the pointer at capture time; the `ShowPointer` binding (single key P; `Binding::allows_single_key`) draws it into `desktop` (and `dimmed`) and restores the pixels under it, so output carries it only while shown |
 | `pinned.rs` | Pinned image windows (`Mode::Plain` / `Text` / `Translate`). Right-click menu: copy, save, topmost, group, hide group, close; groups are shown/hidden together (`groups`, `toggle_group`, `set_all_hidden`). Text and translate pins carry a `pin_text::TextLayer` and recognize in a background thread that posts `OCR_DONE`; translate pins add a `pin_translate::TranslatePane` shown in an owned popup window (`popup_proc`, keys forwarded to the pin) and post `TRANSLATE_DONE` with a request id so stale replies are dropped. `translation_settings_changed()` makes waiting pins retry |
 | `recorder.rs` | Recording to MP4 on a worker thread: DXGI desktop duplication with double-buffered readback and D3D11 video-processor scaling (GDI fallback), Media Foundation sink writer (hardware H.264 first, software in session 0 or on failure), WASAPI loopback + microphone mixed on the recording clock, pause. `<test binary> full_hd_at_60 --ignored --nocapture` prints dropped frames (`SNAPSHOT_TEST_SIZE`, `SNAPSHOT_TEST_QUALITY`, `SNAPSHOT_PROFILE`) and must run in the desktop session |
-| `recording_ui.rs` | `Kind::Area` (picked area, red frame, optional 3-second `Phase::Countdown` drawn in the frame) or `Kind::Screen` (Alt+F8: the active window's monitor, no frame, bar in its top-right corner). Recording frame and control bar (excluded from capture with `WDA_EXCLUDEFROMCAPTURE`), result card (open, folder, GIF), `recording.txt` options and folder (default `Videos` next to snapshot.exe). The frame and bar show at once in `Phase::Starting` while `recorder::start` runs on a helper thread (posts `STARTED`). `Ctrl+Alt+Z` starts and stops; the pause key is registered only while recording (`main::refresh_shortcuts`, `Preferences::globals(recording)`). The area picker is the selection overlay with `Selection::record` set and `Toolbar::recording` (start, sound, mic, key panel, pad panel, exit). The picker does not freeze the screen: `Desktop::blank` + `Selection::live`, a layered window painted in marker colors (`paint::LIVE_INSIDE` / `LIVE_DIM`) that `present_live` turns into alpha. Such a window never gets WM_PAINT and keeps no invalid region, so every invalidation in `selection` goes through `invalidate` / `invalidate_region`, which collect `LIVE_DIRTY`; `window_proc` paints it after each message (`paint_live`). Panels switched on in that toolbar are an `input_overlay` session (`show_in` / `end_session`): placed at their anchor inside the area, ended with the recording |
+| `recording_ui.rs` | `Kind::Area` (picked area, red frame, optional 3-second `Phase::Countdown` drawn in the frame) or `Kind::Screen` (Alt+F8: the active window's monitor, no frame, bar in its top-right corner). Recording frame and control bar (excluded from capture with `WDA_EXCLUDEFROMCAPTURE`), result card (open, folder, GIF), `recording.txt` options and folder (default `Videos` next to just-snapshot.exe). The frame and bar show at once in `Phase::Starting` while `recorder::start` runs on a helper thread (posts `STARTED`). `Ctrl+Alt+Z` starts and stops; the pause key is registered only while recording (`main::refresh_shortcuts`, `Preferences::globals(recording)`). The area picker is the selection overlay with `Selection::record` set and `Toolbar::recording` (start, sound, mic, key panel, pad panel, exit). The picker does not freeze the screen: `Desktop::blank` + `Selection::live`, a layered window painted in marker colors (`paint::LIVE_INSIDE` / `LIVE_DIM`) that `present_live` turns into alpha. Such a window never gets WM_PAINT and keeps no invalid region, so every invalidation in `selection` goes through `invalidate` / `invalidate_region`, which collect `LIVE_DIRTY`; `window_proc` paints it after each message (`paint_live`). Panels switched on in that toolbar are an `input_overlay` session (`show_in` / `end_session`): placed at their anchor inside the area, ended with the recording |
 | `gif_export.rs` | MP4 → looping GIF via Media Foundation decoding and the `gif` crate, 10 fps, at most 720 px wide |
 | `input_overlay.rs` | Key/mouse and Xbox gamepad panels: layered click-through windows, Raw Input on a message-only window (only while shown), XInput polling (only while shown), a nine-place anchor picked in the settings or a free dragged position (`x`/`y`, which wins; old files' anchor + offset still load) / scale / opacity in `overlay.txt`. Each panel owns a grip window under it (three bars, excluded from capture), only for dragging (wheel resizes, Ctrl+wheel fades); a redraw mid-drag keeps the panel where the mouse put it. In the recording picker, `panel_options::PanelBar` hangs under the record toolbar with each switched-on panel's places and opacity (`pick_anchor`, `step_opacity`). Opacity lives in the pixels (`colors`), not `SourceConstantAlpha` |
+| `panel_options.rs` | The option bar under the recording toolbar: a 录像 row (frame rate, quality; saved to recording.txt) always, plus one row per key / gamepad panel switched on (nine places, opacity). The toolbar tooltip is placed clear of it (`Toolbar::tooltip_clear_of`) |
 | `ocr.rs` | Windows built-in OCR (`Windows.Media.Ocr`). Recognizes at 1×, and again on a 2× Catmull-Rom enlargement when the median word is under 18 px; tall images go in overlapping strips. `<test binary> ocr --ignored --nocapture` prints accuracy by font size |
 | `codes.rs` | QR codes and barcodes via rxing (decoders only, no image formats), run on the recognition thread. `codes::tests::render` draws codes for tests |
 | `clipboard_data.rs` | Our own `IDataObject` put on the clipboard with `OleSetClipboard`, so `FileContents` can be read at `lindex` 0 (Explorer's paste-as-file). `output::tests::explorer_can_paste_the_copy_as_a_file` reads it back the way Explorer does |
@@ -90,9 +91,9 @@ The overlay follows Snipaste's layout:
 
 | Location | Content |
 | --- | --- |
-| `%LOCALAPPDATA%\Snapshot\shortcuts.txt` | Shortcuts (`capture_secondary=` is the optional second capture key, empty when unset), pin opacity step and theme. Its absence (together with no legacy `hotkey.txt`) marks the first run, which enables start at login |
+| `%LOCALAPPDATA%\Snapshot\shortcuts.txt` (the folder, the Run value, credential names, `Pictures\Snapshot` and the default file name keep the old name so existing settings and keys survive the rename) | Shortcuts (`capture_secondary=` is the optional second capture key, empty when unset), pin opacity step and theme. Its absence (together with no legacy `hotkey.txt`) marks the first run, which enables start at login |
 | `%LOCALAPPDATA%\Snapshot\translate.txt` | Translation provider (none means the free service), OpenAI-compatible address and model, Baidu/Youdao app IDs, the optional email for the free service. Never secrets |
-| `%LOCALAPPDATA%\Snapshot\recording.txt` | Recording folder (empty means `Videos` next to snapshot.exe), frame rate, quality, sound and cursor defaults |
+| `%LOCALAPPDATA%\Snapshot\recording.txt` | Recording folder (empty means `Videos` next to just-snapshot.exe), frame rate, quality, sound and cursor defaults |
 | `%LOCALAPPDATA%\Snapshot\overlay.txt` | Input panels: visible, position (x, y; old files: anchor + offset), size, opacity |
 | `%LOCALAPPDATA%\Snapshot\output.txt` | Save folder (empty means Pictures\Snapshot), file name template, auto-save, shadow, border |
 | Credential Manager `Snapshot/translate/<provider>/<field>` | Translation API keys and secrets |
@@ -101,7 +102,7 @@ The overlay follows Snipaste's layout:
 
 API keys and other secrets live only in the Credential Manager: never in `translate.txt`, the repo, logs, error messages or command lines. Before every commit, check the file list for anything key-like.
 
-Launch Snapshot for testing through the shell (`explorer.exe <path to snapshot.exe>`), never as a direct child of a packaged (MSIX) app such as the Codex desktop app. A child of a packaged app inherits its package identity, so its `%LOCALAPPDATA%` and `HKCU` writes go into the package's private store (`%LOCALAPPDATA%\Packages\<package>\LocalCache\...`): the settings it saves are invisible to a normal launch and the start-at-login entry never reaches the real `Run` key.
+Launch just-snapshot for testing through the shell (`explorer.exe <path to just-snapshot.exe>`), never as a direct child of a packaged (MSIX) app such as the Codex desktop app. A child of a packaged app inherits its package identity, so its `%LOCALAPPDATA%` and `HKCU` writes go into the package's private store (`%LOCALAPPDATA%\Packages\<package>\LocalCache\...`): the settings it saves are invisible to a normal launch and the start-at-login entry never reaches the real `Run` key.
 
 A capture hotkey conflict must never stop the app or open a modal dialog. The tray icon switches to the warning badge, the tooltip names the conflict, one non-modal notification is shown (clicking it opens settings), and the tray menu gets a "change shortcut" item. Registration is retried whenever the tray menu or settings opens. Saving an occupied shortcut is allowed; the settings window shows the conflict live before saving.
 

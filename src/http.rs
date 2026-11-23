@@ -87,7 +87,7 @@ pub fn post(url: &str, headers: &[(&str, &str)], body: &[u8]) -> Result<Response
         let secure = parts.nScheme == WINHTTP_INTERNET_SCHEME_HTTPS;
 
         let mut session = WinHttpOpen(
-            w!("Snapshot"),
+            w!("just-snapshot"),
             WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
             null(),
             null(),
@@ -95,7 +95,7 @@ pub fn post(url: &str, headers: &[(&str, &str)], body: &[u8]) -> Result<Response
         );
         if session.is_null() {
             // Windows before 8.1 has no automatic proxy mode.
-            session = WinHttpOpen(w!("Snapshot"), WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, null(), null(), 0);
+            session = WinHttpOpen(w!("just-snapshot"), WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, null(), null(), 0);
         }
         let session = check(session, "打开会话")?;
         WinHttpSetTimeouts(session.0, RESOLVE_MS, CONNECT_MS, SEND_MS, RECEIVE_MS);

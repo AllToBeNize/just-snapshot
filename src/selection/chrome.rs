@@ -28,7 +28,7 @@ pub(super) unsafe fn refresh_toolbar(window: HWND) {
         }
         let old_tip = previous
             .zip(selection.toolbar_hover.take())
-            .and_then(|(toolbar, action)| toolbar.tooltip(action).map(|(bounds, _)| bounds));
+            .and_then(|(toolbar, action)| tooltip(selection, toolbar, action).map(|(bounds, _)| bounds));
         Some([
             previous.map(|toolbar| toolbar.bounds),
             selection.toolbar.map(|toolbar| toolbar.bounds),
@@ -43,9 +43,26 @@ pub(super) unsafe fn refresh_toolbar(window: HWND) {
     refresh_options(window);
 }
 
+/// The tooltip of `action` on `toolbar`, kept clear of the option bars
+/// stacked against the toolbar.
+pub(super) fn tooltip(selection: &Selection, toolbar: Toolbar, action: Action) -> Option<(RECT, Vec<u16>)> {
+    let obstacles: Vec<RECT> = selection
+        .options
+        .map(|options| options.bounds)
+        .into_iter()
+        .chain(selection.panel_bar.map(|bar| bar.bounds))
+        .collect();
+    toolbar.tooltip_clear_of(action, &obstacles)
+}
+
 pub(super) unsafe fn refresh_options(window: HWND) {
     let changed = SESSION.with_borrow_mut(|session| {
         let selection = session.as_mut()?;
+        let old_tip = selection
+            .toolbar
+            .zip(selection.toolbar_hover)
+            .and_then(|(toolbar, action)| tooltip(selection, toolbar, action))
+            .map(|(bounds, _)| bounds);
         let previous = selection.options.take();
         let rotating = selection
             .text_drag
@@ -60,17 +77,18 @@ pub(super) unsafe fn refresh_options(window: HWND) {
         let previous_bar = selection.panel_bar.take();
         selection.panel_bar = selection.toolbar.zip(selection.record).and_then(|(toolbar, options)| {
             let area = toolbar.area();
-            crate::panel_options::PanelBar::new([options.show_keys, options.show_pad], toolbar.bounds, area, selection.rect)
+            crate::panel_options::PanelBar::new(options, toolbar.bounds, area, selection.rect)
         });
         selection.panel_bar_hover = None;
         let tip = selection
             .toolbar
             .zip(selection.toolbar_hover)
-            .and_then(|(toolbar, action)| toolbar.tooltip(action))
+            .and_then(|(toolbar, action)| tooltip(selection, toolbar, action))
             .map(|(bounds, _)| bounds);
         Some([
             previous.map(|options| options.bounds),
             selection.options.map(|options| options.bounds),
+            old_tip,
             tip,
             previous_bar.map(|bar| bar.bounds),
             selection.panel_bar.map(|bar| bar.bounds),
@@ -112,10 +130,31 @@ pub(super) unsafe fn update_options_hover(window: HWND, point: Option<POINT>) {
     }
 }
 
-/// A click in the recording picker's panel bar: a place or the opacity of a panel.
+/// A click in the recording picker's option bar: the frame rate, the
+/// quality, or a place or the opacity of a panel.
 pub(super) unsafe fn change_panel(window: HWND, choice: crate::panel_options::PanelChoice) {
     use crate::panel_options::{PanelChoice, STEP};
     match choice {
+        PanelChoice::Fps(_) | PanelChoice::Quality(_) => {
+            SESSION.with_borrow_mut(|session| {
+                let Some(options) = session.as_mut().and_then(|selection| selection.record.as_mut()) else {
+                    return;
+                };
+                match choice {
+                    PanelChoice::Fps(fps) => options.fps = fps,
+                    PanelChoice::Quality(quality) => options.quality = quality,
+                    _ => {}
+                }
+                let _ = crate::recording_ui::save_options(*options);
+            });
+            // The bar keeps its own copy of the picks.
+            refresh_options(window);
+            let mut point = POINT::default();
+            if GetCursorPos(&mut point) != 0 && ScreenToClient(window, &mut point) != 0 {
+                update_options_hover(window, Some(point));
+            }
+            return;
+        }
         PanelChoice::Anchor(panel, anchor) => crate::input_overlay::pick_anchor(panel, crate::input_overlay::ANCHORS[anchor]),
         PanelChoice::Opacity(panel, step) => crate::input_overlay::step_opacity(panel, step * STEP),
     }
@@ -221,7 +260,7 @@ pub(super) unsafe fn update_toolbar_hover(window: HWND, point: Option<POINT>) {
         let entered = previous.is_none() && hovered.is_some();
         selection.toolbar_hover = hovered;
         let tip_bounds = |action: Option<Action>| {
-            action.and_then(|action| toolbar.tooltip(action).map(|(bounds, _)| bounds))
+            action.and_then(|action| tooltip(selection, toolbar, action).map(|(bounds, _)| bounds))
         };
         Some((
             [

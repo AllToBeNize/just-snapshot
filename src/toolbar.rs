@@ -317,7 +317,15 @@ impl Toolbar {
         RestoreDC(dc, saved);
     }
 
+    #[cfg(test)]
     pub fn tooltip(self, action: Action) -> Option<(RECT, Vec<u16>)> {
+        self.tooltip_clear_of(action, &[])
+    }
+
+    /// The tooltip above the button, or below the toolbar, kept clear of
+    /// the bars stacked against the toolbar (`obstacles`): when both sides
+    /// are taken it moves past the whole stack.
+    pub fn tooltip_clear_of(self, action: Action, obstacles: &[RECT]) -> Option<(RECT, Vec<u16>)> {
         let index = self.actions().iter().position(|&candidate| candidate == action)?;
         let button = self.button(index);
         let label = crate::wide(&action.tip());
@@ -325,23 +333,33 @@ impl Toolbar {
         let height = 28;
         let left = ((button.left + button.right - width) / 2)
             .clamp(self.area.left, self.area.right - width);
-        let above = self.bounds.top - height - 6;
-        let top = if above >= self.area.top {
-            above
-        } else if self.bounds.bottom + 6 + height <= self.area.bottom {
-            self.bounds.bottom + 6
-        } else {
-            return None;
+        let stack = obstacles.iter().fold(self.bounds, |stack, rect| RECT {
+            left: stack.left.min(rect.left),
+            top: stack.top.min(rect.top),
+            right: stack.right.max(rect.right),
+            bottom: stack.bottom.max(rect.bottom),
+        });
+        let at = |top: i32| RECT { left, top, right: left + width, bottom: top + height };
+        let candidates = [
+            at(self.bounds.top - height - 6),
+            at(self.bounds.bottom + 6),
+            at(stack.top - height - 6),
+            at(stack.bottom + 6),
+        ];
+        let inside = |rect: &RECT| rect.top >= self.area.top && rect.bottom <= self.area.bottom;
+        let clear = |rect: &RECT| {
+            obstacles.iter().all(|obstacle| {
+                rect.right <= obstacle.left
+                    || obstacle.right <= rect.left
+                    || rect.bottom <= obstacle.top
+                    || obstacle.bottom <= rect.top
+            })
         };
-        Some((
-            RECT {
-                left,
-                top,
-                right: left + width,
-                bottom: top + height,
-            },
-            label,
-        ))
+        let bounds = candidates
+            .iter()
+            .find(|rect| inside(rect) && clear(rect))
+            .or_else(|| candidates.iter().find(|rect| inside(rect)))?;
+        Some((*bounds, label))
     }
 }
 
@@ -521,6 +539,22 @@ mod tests {
     use super::*;
     use crate::capture::Surface;
     use std::ptr::null_mut;
+
+    #[test]
+    fn record_tooltip_stays_clear_of_the_panel_bar() {
+        let area = RECT { left: 0, top: 0, right: 1920, bottom: 1080 };
+        let apart = |a: RECT, b: RECT| a.right <= b.left || b.right <= a.left || a.bottom <= b.top || b.bottom <= a.top;
+        // The whole screen selected: the toolbar sits inside at the bottom and
+        // the panel bar goes above it, where the tooltip used to be.
+        for selection in [area, RECT { left: 300, top: 100, right: 800, bottom: 590 }, RECT { left: 300, top: 500, right: 800, bottom: 1075 }] {
+            let toolbar = Toolbar::recording(selection, area).unwrap();
+            let bar = crate::panel_options::PanelBar::new(crate::recorder::Options { show_keys: true, show_pad: true, ..Default::default() }, toolbar.bounds, area, selection).unwrap();
+            let (tip, _) = toolbar.tooltip_clear_of(Action::Record, &[bar.bounds]).unwrap();
+            assert!(apart(tip, bar.bounds), "tooltip at {} under the panel bar at {}..{}", tip.top, bar.bounds.top, bar.bounds.bottom);
+            assert!(apart(tip, toolbar.bounds));
+            assert!(tip.top >= area.top && tip.bottom <= area.bottom);
+        }
+    }
 
     #[test]
     fn panel_is_centered_and_highlights_only_the_hovered_button() {

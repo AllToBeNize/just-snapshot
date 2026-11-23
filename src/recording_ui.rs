@@ -290,8 +290,8 @@ pub unsafe fn start(owner: HWND, area: RECT, options: Options, kind: Kind) {
     };
     let instance = windows_sys::Win32::System::LibraryLoader::GetModuleHandleW(null());
     let style = WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE;
-    let frame = CreateWindowExW(style | WS_EX_TRANSPARENT, FRAME_CLASS, w!("Snapshot 录像区域"), WS_POPUP, 0, 0, 1, 1, null_mut(), null_mut(), instance, null());
-    let bar = CreateWindowExW(style, BAR_CLASS, w!("Snapshot 录像"), WS_POPUP, 0, 0, 1, 1, null_mut(), null_mut(), instance, null());
+    let frame = CreateWindowExW(style | WS_EX_TRANSPARENT, FRAME_CLASS, w!("just-snapshot 录像区域"), WS_POPUP, 0, 0, 1, 1, null_mut(), null_mut(), instance, null());
+    let bar = CreateWindowExW(style, BAR_CLASS, w!("just-snapshot 录像"), WS_POPUP, 0, 0, 1, 1, null_mut(), null_mut(), instance, null());
     for window in [frame, bar] {
         // Never in the video, and never in screenshots of it either.
         SetWindowDisplayAffinity(window, WDA_EXCLUDEFROMCAPTURE);
@@ -817,6 +817,11 @@ unsafe extern "system" fn bar_proc(window: HWND, message: u32, wparam: WPARAM, l
             let mut point = mouse_point(lparam);
             ScreenToClient(window, &mut point);
             return if hit(point).is_some() { HTCLIENT } else { HTCAPTION } as LRESULT;
+        }
+        WM_SETCURSOR if (lparam & 0xffff) as u32 == HTCLIENT => {
+            // Only the buttons are client area.
+            SetCursor(LoadCursorW(null_mut(), IDC_HAND));
+            return 1;
         }
         WM_MOUSEMOVE => {
             let hovered = hit(mouse_point(lparam));

@@ -360,13 +360,13 @@ pub unsafe fn start(instance: HINSTANCE) -> io::Result<()> {
     let mut windows = [null_mut(); 2];
     let mut grips = [null_mut(); 2];
     for index in 0..2 {
-        let title = if index == 0 { w!("Snapshot 键鼠") } else { w!("Snapshot 手柄") };
+        let title = if index == 0 { w!("just-snapshot 键鼠") } else { w!("just-snapshot 手柄") };
         let window = CreateWindowExW(style | WS_EX_TRANSPARENT, PANEL_CLASS, title, WS_POPUP, 0, 0, 1, 1, null_mut(), null_mut(), instance, null());
         if window.is_null() {
             return Err(io::Error::last_os_error());
         }
         // Owned by its panel, so it always stays in front of it.
-        let grip = CreateWindowExW(style, GRIP_CLASS, w!("Snapshot 拖动"), WS_POPUP, 0, 0, 1, 1, window, null_mut(), instance, null());
+        let grip = CreateWindowExW(style, GRIP_CLASS, w!("just-snapshot 拖动"), WS_POPUP, 0, 0, 1, 1, window, null_mut(), instance, null());
         if grip.is_null() {
             return Err(io::Error::last_os_error());
         }

@@ -517,7 +517,7 @@ unsafe fn open_selection(instance: HINSTANCE, start: Start) -> io::Result<()> {
     let window = CreateWindowExW(
         WS_EX_TOPMOST | WS_EX_TOOLWINDOW | if live.is_some() { WS_EX_LAYERED } else { 0 },
         CLASS,
-        w!("Snapshot Selection"),
+        w!("just-snapshot Selection"),
         WS_POPUP | WS_CLIPCHILDREN,
         bounds.left,
         bounds.top,

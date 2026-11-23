@@ -36,7 +36,7 @@ function Initialize-BuildTools {
 
 if ($Command -eq 'help') {
     @'
-Snapshot build CLI (Windows x64)
+just-snapshot build CLI (Windows x64)
   .\snapshot.ps1 build     Build the release executable
   .\snapshot.ps1 test      Run release tests
   .\snapshot.ps1 package   Test, build, and create dist ZIP + SHA256
@@ -79,11 +79,11 @@ try {
     if ($Command -in @('package', 'release')) {
         $dist = Join-Path $projectRoot 'dist'
         New-Item -ItemType Directory -Path $dist -Force | Out-Null
-        $zip = Join-Path $dist "snapshot-v$version-windows-x64.zip"
-        $staging = Join-Path ([IO.Path]::GetTempPath()) ('snapshot-package-' + [guid]::NewGuid())
+        $zip = Join-Path $dist "just-snapshot-v$version-windows-x64.zip"
+        $staging = Join-Path ([IO.Path]::GetTempPath()) ('just-snapshot-package-' + [guid]::NewGuid())
         New-Item -ItemType Directory -Path $staging | Out-Null
         try {
-            Copy-Item "target\$target\release\snapshot.exe", 'README.md', 'LICENSE' -Destination $staging
+            Copy-Item "target\$target\release\just-snapshot.exe", 'README.md', 'LICENSE' -Destination $staging
             Copy-Item licenses -Destination $staging -Recurse
             Compress-Archive -Path (Join-Path $staging '*') -DestinationPath $zip -Force
         } finally {
@@ -100,7 +100,7 @@ try {
         Write-Host "Package: $zip"
         Write-Host "SHA256:  $checksum"
         if ($Command -eq 'release') {
-            Invoke-Checked gh @('release', 'create', $Tag, $zip, $checksum, '--verify-tag', '--draft', '--title', "Snapshot $Tag", '--generate-notes')
+            Invoke-Checked gh @('release', 'create', $Tag, $zip, $checksum, '--verify-tag', '--draft', '--title', "just-snapshot $Tag", '--generate-notes')
         }
     }
 } catch {

@@ -459,7 +459,7 @@ pub unsafe fn open(near: HWND) -> io::Result<()> {
     let window = CreateWindowExW(
         WS_EX_TOPMOST | WS_EX_CONTROLPARENT,
         CLASS,
-        w!("Snapshot 保存设置"),
+        w!("just-snapshot 保存设置"),
         WS_POPUP | WS_SYSMENU,
         0,
         0,

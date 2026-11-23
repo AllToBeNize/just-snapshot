@@ -285,7 +285,7 @@ pub unsafe fn open(near: HWND) -> io::Result<()> {
     let window = CreateWindowExW(
         WS_EX_TOPMOST | WS_EX_CONTROLPARENT,
         CLASS,
-        w!("Snapshot 翻译服务"),
+        w!("just-snapshot 翻译服务"),
         WS_POPUP | WS_SYSMENU,
         0,
         0,

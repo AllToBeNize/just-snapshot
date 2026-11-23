@@ -233,7 +233,7 @@ pub unsafe fn start(region: RECT, first: Image) -> Result<(), String> {
     let window = CreateWindowExW(
         WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
         CLASS,
-        w!("Snapshot 长截图"),
+        w!("just-snapshot 长截图"),
         WS_POPUP,
         panel.left,
         panel.top,

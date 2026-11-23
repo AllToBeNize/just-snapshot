@@ -322,6 +322,16 @@ pub(super) unsafe fn update_cursor(point: POINT) {
             return LoadCursorW(null_mut(), IDC_CROSS);
         };
         let system = |cursor| LoadCursorW(null_mut(), cursor);
+        if let Some(bar) = selection
+            .panel_bar
+            .filter(|bar| contains(bar.bounds, point))
+        {
+            return system(if bar.hit(point).is_some() {
+                IDC_HAND
+            } else {
+                IDC_ARROW
+            });
+        }
         if let Some(options) = selection
             .options
             .filter(|options| contains(options.bounds, point))

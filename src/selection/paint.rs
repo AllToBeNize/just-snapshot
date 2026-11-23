@@ -284,18 +284,6 @@ unsafe fn compose(selection: &Selection, area: RECT, region: Option<HRGN>) {
                 .map_or([false; 4], |options| [options.system_audio, options.microphone, options.show_keys, options.show_pad]);
             toolbar.paint(dc, &selection.annotations, selection.toolbar_hover, switches);
         }
-        if let Some((bounds, label)) = selection
-            .toolbar_hover
-            .and_then(|action| toolbar.tooltip(action))
-            .filter(|(bounds, _)| intersect(*bounds, area).is_some())
-            .filter(|(bounds, _)| {
-                selection
-                    .options
-                    .is_none_or(|options| intersect(*bounds, options.bounds).is_none())
-            })
-        {
-            paint_tooltip(dc, bounds, label.as_ptr());
-        }
     }
     if let Some(options) = selection
         .options
@@ -305,6 +293,15 @@ unsafe fn compose(selection: &Selection, area: RECT, region: Option<HRGN>) {
     }
     if let Some(bar) = selection.panel_bar.filter(|bar| intersect(bar.bounds, area).is_some()) {
         bar.paint(dc, selection.panel_bar_hover);
+    }
+    // Last, so no bar stacked against the toolbar covers it.
+    if let Some((bounds, label)) = selection
+        .toolbar
+        .zip(selection.toolbar_hover)
+        .and_then(|(toolbar, action)| tooltip(selection, toolbar, action))
+        .filter(|(bounds, _)| intersect(*bounds, area).is_some())
+    {
+        paint_tooltip(dc, bounds, label.as_ptr());
     }
     SelectClipRgn(dc, null_mut());
 }
