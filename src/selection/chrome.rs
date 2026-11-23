@@ -15,7 +15,11 @@ pub(super) unsafe fn refresh_toolbar(window: HWND) {
             let area = monitor_info(point)
                 .and_then(|info| overlay_rect(info.rcMonitor, bounds))
                 .unwrap_or(selection.canvas);
-            selection.toolbar = Toolbar::new(selection.rect, area);
+            selection.toolbar = if selection.record.is_some() {
+                Toolbar::recording(selection.rect, area)
+            } else {
+                Toolbar::new(selection.rect, area)
+            };
         }
         if let (Some(old), Some(new)) = (previous, selection.toolbar) {
             if EqualRect(&old.bounds, &new.bounds) != 0 {
@@ -33,7 +37,7 @@ pub(super) unsafe fn refresh_toolbar(window: HWND) {
     });
     if let Some(changed) = changed {
         for bounds in changed.into_iter().flatten() {
-            InvalidateRect(window, &bounds, 0);
+            invalidate(window, &bounds, 0);
         }
     }
     refresh_options(window);
@@ -53,6 +57,12 @@ pub(super) unsafe fn refresh_options(window: HWND) {
             .zip(selection.annotations.tool)
             .and_then(|(toolbar, tool)| toolbar.options(tool, selection.rect));
         selection.options_hover = None;
+        let previous_bar = selection.panel_bar.take();
+        selection.panel_bar = selection.toolbar.zip(selection.record).and_then(|(toolbar, options)| {
+            let area = toolbar.area();
+            crate::panel_options::PanelBar::new([options.show_keys, options.show_pad], toolbar.bounds, area, selection.rect)
+        });
+        selection.panel_bar_hover = None;
         let tip = selection
             .toolbar
             .zip(selection.toolbar_hover)
@@ -62,16 +72,31 @@ pub(super) unsafe fn refresh_options(window: HWND) {
             previous.map(|options| options.bounds),
             selection.options.map(|options| options.bounds),
             tip,
+            previous_bar.map(|bar| bar.bounds),
+            selection.panel_bar.map(|bar| bar.bounds),
         ])
     });
     if let Some(changed) = changed {
         for bounds in changed.into_iter().flatten() {
-            InvalidateRect(window, &bounds, 0);
+            invalidate(window, &bounds, 0);
         }
     }
 }
 
 pub(super) unsafe fn update_options_hover(window: HWND, point: Option<POINT>) {
+    let bar = SESSION.with_borrow_mut(|session| {
+        let selection = session.as_mut()?;
+        let bar = selection.panel_bar?;
+        let hovered = point.and_then(|point| bar.hit(point));
+        if selection.panel_bar_hover == hovered {
+            return None;
+        }
+        selection.panel_bar_hover = hovered;
+        Some(bar.bounds)
+    });
+    if let Some(bounds) = bar {
+        invalidate(window, &bounds, 0);
+    }
     let bounds = SESSION.with_borrow_mut(|session| {
         let selection = session.as_mut()?;
         let options = selection.options?;
@@ -83,7 +108,19 @@ pub(super) unsafe fn update_options_hover(window: HWND, point: Option<POINT>) {
         Some(options.bounds)
     });
     if let Some(bounds) = bounds {
-        InvalidateRect(window, &bounds, 0);
+        invalidate(window, &bounds, 0);
+    }
+}
+
+/// A click in the recording picker's panel bar: a place or the opacity of a panel.
+pub(super) unsafe fn change_panel(window: HWND, choice: crate::panel_options::PanelChoice) {
+    use crate::panel_options::{PanelChoice, STEP};
+    match choice {
+        PanelChoice::Anchor(panel, anchor) => crate::input_overlay::pick_anchor(panel, crate::input_overlay::ANCHORS[anchor]),
+        PanelChoice::Opacity(panel, step) => crate::input_overlay::step_opacity(panel, step * STEP),
+    }
+    if let Some(bounds) = SESSION.with_borrow(|session| Some(session.as_ref()?.panel_bar?.bounds)) {
+        invalidate(window, &bounds, 0);
     }
 }
 
@@ -152,19 +189,19 @@ pub(super) unsafe fn change_option(window: HWND, choice: Choice) {
             realign_editor(window);
         }
         for rect in dirty.into_iter().flatten() {
-            InvalidateRect(window, &rect, 0);
+            invalidate(window, &rect, 0);
         }
         if let Some((editor, font, resized)) = editor_font {
             SendMessageW(editor, WM_SETFONT, font as usize, 0);
             if let Some(rect) = resized {
                 position_editor(editor, rect);
             }
-            InvalidateRect(editor, null(), 1);
+            invalidate(editor, null(), 1);
             SetFocus(editor);
             invalidate_text_input(window, editor);
         }
         if let Some(options) = options {
-            InvalidateRect(window, &options.bounds, 0);
+            invalidate(window, &options.bounds, 0);
         }
         refresh_options(window);
         invalidate_toolbar(window);
@@ -197,7 +234,7 @@ pub(super) unsafe fn update_toolbar_hover(window: HWND, point: Option<POINT>) {
     });
     if let Some((bounds, entered)) = changed {
         for rect in bounds.into_iter().flatten() {
-            InvalidateRect(window, &rect, 0);
+            invalidate(window, &rect, 0);
         }
         if entered {
             let mut tracking = TRACKMOUSEEVENT {
@@ -214,7 +251,9 @@ pub(super) unsafe fn update_toolbar_hover(window: HWND, point: Option<POINT>) {
 pub(super) unsafe fn refresh_hint(window: HWND) {
     let changed = SESSION.with_borrow_mut(|session| {
         let selection = session.as_mut()?;
-        let mode = if selection.editor.is_some() {
+        let mode = if selection.record.is_some() && !selection.automatic {
+            HintMode::Record
+        } else if selection.editor.is_some() {
             HintMode::EditText
         } else if selection.selected_text().is_some() {
             HintMode::SelectedText
@@ -231,18 +270,22 @@ pub(super) unsafe fn refresh_hint(window: HWND) {
     });
     if let Some(bounds) = changed {
         for rect in bounds {
-            InvalidateRect(window, &rect, 0);
+            invalidate(window, &rect, 0);
         }
     }
 }
 
 pub(super) unsafe fn invalidate_toolbar(window: HWND) {
     if let Some(toolbar) = SESSION.with_borrow(|session| session.as_ref()?.toolbar) {
-        InvalidateRect(window, &toolbar.bounds, 0);
+        invalidate(window, &toolbar.bounds, 0);
     }
 }
 
 pub(super) unsafe fn command(window: HWND, action: Action) {
+    if SESSION.with_borrow(|session| session.as_ref().is_some_and(|selection| selection.record.is_some())) {
+        record_command(window, action);
+        return;
+    }
     finish_text(window, true);
     if action == Action::ScrollCapture {
         start_scroll_capture(window);
@@ -322,13 +365,13 @@ pub(super) unsafe fn command(window: HWND, action: Action) {
             if let Some(canvas) = canvas {
                 invalidate_change(window, region, rect, canvas);
             }
-            InvalidateRect(window, &region, 0);
+            invalidate(window, &region, 0);
             refresh_toolbar(window);
         }
-        InvalidateRect(window, &rect, 0);
-        InvalidateRect(window, &toolbar, 0);
+        invalidate(window, &rect, 0);
+        invalidate(window, &toolbar, 0);
         for bounds in [previous, current].into_iter().flatten() {
-            InvalidateRect(window, &bounds, 0);
+            invalidate(window, &bounds, 0);
         }
         refresh_options(window);
         refresh_hint(window);
@@ -340,5 +383,87 @@ pub(super) unsafe fn command(window: HWND, action: Action) {
             hide_loupe(window);
         }
         update_cursor_at_pointer(window);
+    }
+}
+
+/// The recording area picker's toolbar and keys: start, the two sound
+/// switches, cancel. Enter and double-click start recording.
+unsafe fn record_command(window: HWND, action: Action) {
+    match action {
+        Action::Record | Action::Copy => {
+            let picked = SESSION.with_borrow(|session| {
+                let selection = session.as_ref()?;
+                if selection.automatic || outline_empty(selection.rect) || selection.drag.is_some() {
+                    return None;
+                }
+                let desktop = selection.desktop.bounds;
+                let rect = selection.rect;
+                let screen = RECT {
+                    left: rect.left + desktop.left,
+                    top: rect.top + desktop.top,
+                    right: rect.right + desktop.left,
+                    bottom: rect.bottom + desktop.top,
+                };
+                Some((screen, selection.record?))
+            });
+            if let Some((screen, options)) = picked {
+                // The recording takes over first (it is busy from here on, so the
+                // overlay closing keeps the panels); the overlay is left out of
+                // capture, and gone long before the first frame.
+                crate::recording_ui::start(null_mut(), screen, options, crate::recording_ui::Kind::Area);
+                DestroyWindow(window);
+            }
+        }
+        Action::SystemAudio | Action::Microphone | Action::KeysPanel | Action::PadPanel => {
+            let toolbar = SESSION.with_borrow_mut(|session| {
+                let selection = session.as_mut()?;
+                let options = selection.record.as_mut()?;
+                match action {
+                    Action::SystemAudio => options.system_audio = !options.system_audio,
+                    Action::Microphone => options.microphone = !options.microphone,
+                    Action::KeysPanel => options.show_keys = !options.show_keys,
+                    _ => options.show_pad = !options.show_pad,
+                }
+                let _ = crate::recording_ui::save_options(*options);
+                selection.toolbar.map(|toolbar| toolbar.bounds)
+            });
+            if let Some(bounds) = toolbar {
+                invalidate(window, &bounds, 0);
+            }
+            // The panel bar under the toolbar gains or loses a row.
+            refresh_options(window);
+            sync_record_panels();
+        }
+        Action::Cancel => {
+            DestroyWindow(window);
+        }
+        _ => {}
+    }
+}
+
+/// The panels switched on in the recording toolbar sit inside the locked
+/// area and follow it as it moves; with no locked area they are not shown.
+pub(super) unsafe fn sync_record_panels() {
+    let Some(placement) = SESSION.with_borrow(|session| {
+        let selection = session.as_ref()?;
+        let options = selection.record?;
+        if selection.automatic || outline_empty(selection.rect) || !(options.show_keys || options.show_pad) {
+            return Some(None);
+        }
+        let desktop = selection.desktop.bounds;
+        let rect = selection.rect;
+        let screen = RECT {
+            left: rect.left + desktop.left,
+            top: rect.top + desktop.top,
+            right: rect.right + desktop.left,
+            bottom: rect.bottom + desktop.top,
+        };
+        Some(Some((screen, [options.show_keys, options.show_pad])))
+    }) else {
+        return;
+    };
+    match placement {
+        Some((screen, shown)) => crate::input_overlay::show_in(screen, shown),
+        None => crate::input_overlay::end_session(),
     }
 }

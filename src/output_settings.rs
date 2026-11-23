@@ -611,7 +611,7 @@ unsafe fn save(window: HWND) {
 }
 
 /// The folder picker, starting at `current`.
-unsafe fn pick_folder(owner: HWND, current: &str) -> Option<String> {
+pub unsafe fn pick_folder(owner: HWND, current: &str) -> Option<String> {
     use windows::{
         core::PCWSTR,
         Win32::{

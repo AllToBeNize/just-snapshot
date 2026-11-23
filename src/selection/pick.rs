@@ -37,7 +37,7 @@ pub(super) fn pick_bounds(selection: &Selection) -> Vec<RECT> {
 
 unsafe fn invalidate_all(window: HWND, rects: impl IntoIterator<Item = RECT>) {
     for rect in rects {
-        InvalidateRect(window, &rect, 0);
+        invalidate(window, &rect, 0);
     }
 }
 

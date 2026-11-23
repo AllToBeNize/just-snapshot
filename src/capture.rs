@@ -129,6 +129,21 @@ impl Desktop {
         crate::panel_edges::find_panel(pixels, width as usize, window, point)
     }
 
+    /// A desktop-sized surface filled with `color`, without reading the screen:
+    /// the recording area picker shows the live screen instead.
+    pub fn blank(color: u32) -> io::Result<Self> {
+        unsafe {
+            let left = GetSystemMetrics(SM_XVIRTUALSCREEN);
+            let top = GetSystemMetrics(SM_YVIRTUALSCREEN);
+            let width = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+            let height = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+            pixel_len(width, height)?;
+            let surface = Surface::new(null_mut(), width, height)?;
+            surface.fill(width, height, color);
+            Ok(Self { bounds: RECT { left, top, right: left + width, bottom: top + height }, surface })
+        }
+    }
+
     pub fn capture() -> io::Result<Self> {
         unsafe {
             let left = GetSystemMetrics(SM_XVIRTUALSCREEN);
@@ -237,6 +252,33 @@ impl Desktop {
 impl Surface {
     pub fn bitmap(&self) -> HBITMAP {
         self.bitmap
+    }
+
+    /// Copies `height` rows of `width` BGRA pixels, `pitch` bytes apart, into this surface.
+    pub unsafe fn write_rows(&self, source: *const u8, pitch: usize, width: usize, height: usize) {
+        let row = width * 4;
+        for y in 0..height {
+            self.pixels.as_ptr().add(y * row).copy_from_nonoverlapping(source.add(y * pitch), row);
+        }
+    }
+
+    /// Fills a `width`×`height` surface with one color.
+    pub unsafe fn fill(&self, width: i32, height: i32, color: u32) {
+        let brush = CreateSolidBrush(color);
+        FillRect(self.dc, &RECT { left: 0, top: 0, right: width, bottom: height }, brush);
+        DeleteObject(brush);
+        GdiFlush();
+    }
+
+    /// The pixels of a `width`×`height` surface, to change; flush GDI first.
+    #[allow(clippy::mut_from_ref)]
+    pub unsafe fn bytes_mut(&self, width: i32, height: i32) -> &mut [u8] {
+        slice::from_raw_parts_mut(self.pixels.as_ptr(), (width * height * 4) as usize)
+    }
+
+    /// The pixels of a `width`×`height` surface, borrowed; flush GDI first.
+    pub unsafe fn bytes(&self, width: i32, height: i32) -> &[u8] {
+        slice::from_raw_parts(self.pixels.as_ptr(), (width * height * 4) as usize)
     }
 
     /// A copy of the pixels of a `width`×`height` surface.

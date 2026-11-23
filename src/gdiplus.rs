@@ -267,6 +267,56 @@ unsafe fn styled_pen(argb: u32, width: f32, dashed: bool) -> Option<Pen> {
     Some(Pen(pen))
 }
 
+/// Renders into a transparent premultiplied-BGRA image of `width`×`height`,
+/// with anti-aliased shapes and text.
+pub unsafe fn rasterize_rect(width: i32, height: i32, draw: impl FnOnce(&Graphics)) -> Option<Image> {
+    if width <= 0 || height <= 0 || !STARTUP.with(|startup| startup.is_some()) {
+        return None;
+    }
+    let mut pixels = vec![0u8; (width * height * 4) as usize];
+    let mut bitmap = null_mut();
+    if GdipCreateBitmapFromScan0(width, height, width * 4, PARGB_32, pixels.as_mut_ptr(), &mut bitmap) != Ok {
+        return None;
+    }
+    let mut context = null_mut();
+    if GdipGetImageGraphicsContext(bitmap.cast(), &mut context) == Ok {
+        GdipSetSmoothingMode(context, SmoothingModeAntiAlias8x8);
+        GdipSetPixelOffsetMode(context, PixelOffsetModeHalf);
+        GdipSetTextRenderingHint(context, TextRenderingHintAntiAliasGridFit);
+        draw(&Graphics(context));
+    }
+    GdipDisposeImage(bitmap.cast());
+    Some(Image { width, height, pixels })
+}
+
+impl Graphics {
+    /// Draws `text` centered in `bounds` in Microsoft YaHei UI at `size` px.
+    pub unsafe fn text(&self, text: &str, bounds: [f32; 4], size: f32, bold: bool, argb: u32) {
+        let units: Vec<u16> = text.encode_utf16().collect();
+        let mut family = null_mut();
+        if GdipCreateFontFamilyFromName(windows_sys::core::w!("Microsoft YaHei UI"), null_mut(), &mut family) != Ok {
+            return;
+        }
+        let mut font = null_mut();
+        if GdipCreateFont(family, size, if bold { FontStyleBold } else { FontStyleRegular }, UnitPixel, &mut font) == Ok {
+            let mut format = null_mut();
+            if GdipCreateStringFormat(0, 0, &mut format) == Ok {
+                GdipSetStringFormatAlign(format, StringAlignmentCenter);
+                GdipSetStringFormatLineAlign(format, StringAlignmentCenter);
+                let mut brush = null_mut();
+                if GdipCreateSolidFill(argb, &mut brush) == Ok {
+                    let rect = RectF { X: bounds[0], Y: bounds[1], Width: bounds[2] - bounds[0], Height: bounds[3] - bounds[1] };
+                    GdipDrawString(self.0, units.as_ptr(), units.len() as i32, font, &rect, format, brush.cast());
+                    GdipDeleteBrush(brush.cast());
+                }
+                GdipDeleteStringFormat(format);
+            }
+            GdipDeleteFont(font);
+        }
+        GdipDeleteFontFamily(family);
+    }
+}
+
 /// Renders into a transparent premultiplied-BGRA image of `size`×`size`.
 pub unsafe fn rasterize(size: i32, draw: impl FnOnce(&Graphics)) -> Option<Image> {
     if size <= 0 || !STARTUP.with(|startup| startup.is_some()) {

@@ -1,6 +1,6 @@
 use std::{
     borrow::Cow,
-    cell::RefCell,
+    cell::{Cell, RefCell},
     io,
     mem::size_of,
     ptr::{null, null_mut},
@@ -8,7 +8,7 @@ use std::{
 use windows_sys::{
     core::w,
     Win32::{
-        Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM},
+        Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM},
         Graphics::Gdi::*,
         System::LibraryLoader::GetModuleHandleW,
         UI::{
@@ -34,7 +34,7 @@ use crate::{
     annotation_options::{Choice, Options},
     capture::{Desktop, Image, Surface},
     output,
-    hotkey::{self, Shortcut},
+    hotkey::{self, Binding, Shortcut},
     icons::Cursor,
     overlay_ui::{monitor_info, HintMode, HintPanel, Loupe},
     scroll_capture,
@@ -64,6 +64,7 @@ mod text;
 mod tests {
     mod clipboard;
     mod marks;
+    mod record;
     mod select;
     mod text;
 }
@@ -140,6 +141,8 @@ impl Kept {
 
 enum Start {
     Fresh,
+    /// Pick an area to record.
+    Record,
     /// Screen coordinates to select right away.
     Region(RECT),
     Last(Last),
@@ -166,6 +169,9 @@ struct Selection {
     toolbar_hover: Option<Action>,
     options: Option<Options>,
     options_hover: Option<Choice>,
+    /// Recording picker: places and opacity of the panels switched on in its toolbar.
+    panel_bar: Option<crate::panel_options::PanelBar>,
+    panel_bar_hover: Option<crate::panel_options::PanelChoice>,
     style: Style,
     selected_text: Option<usize>,
     text_drag: Option<TextDrag>,
@@ -180,10 +186,111 @@ struct Selection {
     layer: Option<LayerPick>,
     /// Marks picked with the select tool, moved together.
     picked: Vec<usize>,
+    /// Picking an area to record, with the recording options its toolbar toggles.
+    record: Option<crate::recorder::Options>,
+    /// Recording picker only: the frame with per-pixel alpha, so the live
+    /// screen shows through a dim mask instead of a frozen capture.
+    live: Option<Surface>,
+    /// The mouse pointer as it was at capture time, for the show-pointer shortcut.
+    pointer_layer: Option<PointerLayer>,
     pick_drag: Option<PickDrag>,
     editor: Option<Editor>,
     brush_cursor: Option<Cursor>,
     mosaic_cursor: Option<(i32, Cursor)>,
+}
+
+thread_local! {
+    /// The recording picker is open: invalidations are also collected in `LIVE_DIRTY`.
+    static LIVE: Cell<bool> = const { Cell::new(false) };
+    static LIVE_DIRTY: Cell<Option<RECT>> = const { Cell::new(None) };
+}
+
+/// Marks part of the overlay (or a child) for repainting. The capture overlay
+/// is an ordinary window and gets WM_PAINT. The recording picker is fed by
+/// UpdateLayeredWindow, and such a window keeps no invalid region at all, so
+/// the change is noted too and `window_proc` paints it after the message.
+unsafe fn invalidate(window: HWND, rect: *const RECT, erase: i32) -> i32 {
+    note_dirty(rect.as_ref().copied());
+    InvalidateRect(window, rect, erase)
+}
+
+unsafe fn invalidate_region(window: HWND, region: HRGN, erase: i32) -> i32 {
+    let mut bounds = RECT::default();
+    note_dirty((GetRgnBox(region, &mut bounds) != 0).then_some(bounds));
+    InvalidateRgn(window, region, erase)
+}
+
+/// `None` is everything.
+fn note_dirty(rect: Option<RECT>) {
+    if !LIVE.get() {
+        return;
+    }
+    let rect = rect.unwrap_or(RECT { left: i32::MIN / 2, top: i32::MIN / 2, right: i32::MAX / 2, bottom: i32::MAX / 2 });
+    let merged = match LIVE_DIRTY.get() {
+        Some(dirty) => RECT {
+            left: dirty.left.min(rect.left),
+            top: dirty.top.min(rect.top),
+            right: dirty.right.max(rect.right),
+            bottom: dirty.bottom.max(rect.bottom),
+        },
+        None => rect,
+    };
+    LIVE_DIRTY.set(Some(merged));
+}
+
+/// The mouse pointer at capture time. It is drawn into the captured picture
+/// only while shown, so copies and saves carry it exactly then; the pixels it
+/// covers are kept to take it out again.
+struct PointerLayer {
+    cursor: HICON,
+    /// Its top-left corner on the canvas.
+    at: POINT,
+    /// The picture under it while it is shown (`PATCH`×`PATCH` BGRA, clipped to the canvas).
+    under: Option<Vec<u8>>,
+}
+
+/// Room for the largest pointers (big pointer sizes at high DPI).
+const PATCH: i32 = 128;
+
+impl PointerLayer {
+    /// The pointer as it is now, if it is showing.
+    unsafe fn capture(bounds: RECT) -> Option<Self> {
+        let mut info = CURSORINFO { cbSize: size_of::<CURSORINFO>() as u32, ..Default::default() };
+        if GetCursorInfo(&mut info) == 0 || info.flags & CURSOR_SHOWING == 0 || info.hCursor.is_null() {
+            return None;
+        }
+        let mut icon = ICONINFO::default();
+        if GetIconInfo(info.hCursor, &mut icon) == 0 {
+            return None;
+        }
+        for bitmap in [icon.hbmColor, icon.hbmMask] {
+            if !bitmap.is_null() {
+                DeleteObject(bitmap);
+            }
+        }
+        let cursor = CopyIcon(info.hCursor);
+        (!cursor.is_null()).then_some(Self {
+            cursor,
+            at: POINT {
+                x: info.ptScreenPos.x - icon.xHotspot as i32 - bounds.left,
+                y: info.ptScreenPos.y - icon.yHotspot as i32 - bounds.top,
+            },
+            under: None,
+        })
+    }
+
+    /// The part of the canvas the pointer may cover.
+    fn patch(&self, canvas: RECT) -> Option<RECT> {
+        intersect(RECT { left: self.at.x, top: self.at.y, right: self.at.x + PATCH, bottom: self.at.y + PATCH }, canvas)
+    }
+}
+
+impl Drop for PointerLayer {
+    fn drop(&mut self) {
+        unsafe {
+            DestroyIcon(self.cursor);
+        }
+    }
 }
 
 struct MarkDrag {
@@ -303,6 +410,11 @@ pub unsafe fn reopen(instance: HINSTANCE, region: RECT) -> io::Result<()> {
     open_selection(instance, Start::Region(region))
 }
 
+/// Opens the overlay to pick an area to record; its toolbar starts the recording.
+pub unsafe fn open_record(instance: HINSTANCE) -> io::Result<()> {
+    open_selection(instance, Start::Record)
+}
+
 pub fn has_last() -> bool {
     LAST.with_borrow(Option::is_some)
 }
@@ -334,6 +446,9 @@ unsafe fn open_selection(instance: HINSTANCE, start: Start) -> io::Result<()> {
     }
     let mut cursor = POINT::default();
     GetCursorPos(&mut cursor);
+    let record = matches!(start, Start::Record).then(crate::recording_ui::load_options);
+    // Only a fresh capture knows where the pointer was; a restored one does not.
+    let with_pointer = matches!(start, Start::Fresh | Start::Region(_));
     let (targets, desktop, region, annotations, style) = match start {
         Start::Last(last) => {
             let bounds = last.desktop.bounds;
@@ -352,9 +467,12 @@ unsafe fn open_selection(instance: HINSTANCE, start: Start) -> io::Result<()> {
                 Start::Region(rect) => Some(rect),
                 _ => None,
             };
-            (targets, Desktop::capture()?, region, History::default(), Style::default())
+            // Picking a recording area reads nothing off the screen: it stays live under the mask.
+            let desktop = if record.is_some() { Desktop::blank(paint::LIVE_INSIDE)? } else { Desktop::capture()? };
+            (targets, desktop, region, History::default(), Style::default())
         }
     };
+    let pointer_layer = if with_pointer { PointerLayer::capture(desktop.bounds) } else { None };
     let bounds = desktop.bounds;
     let restored = region.and_then(|rect| overlay_rect(rect, bounds));
     let width = bounds.right - bounds.left;
@@ -377,20 +495,27 @@ unsafe fn open_selection(instance: HINSTANCE, start: Start) -> io::Result<()> {
         .unwrap_or(canvas);
     let hint = HintPanel::new(source, work_area)?;
     let dimmed = Surface::new(source, width, height)?;
-    FillRect(dimmed.dc, &canvas, GetStockObject(BLACK_BRUSH));
-    let blend = BLENDFUNCTION {
-        SourceConstantAlpha: 102,
-        ..Default::default()
+    let live = if record.is_some() {
+        // Painted in marker colors, turned into alpha after each paint (see `paint::present_live`).
+        dimmed.fill(width, height, paint::LIVE_DIM);
+        Some(Surface::new(source, width, height)?)
+    } else {
+        FillRect(dimmed.dc, &canvas, GetStockObject(BLACK_BRUSH));
+        let blend = BLENDFUNCTION {
+            SourceConstantAlpha: 102,
+            ..Default::default()
+        };
+        if AlphaBlend(
+            dimmed.dc, 0, 0, width, height, source, 0, 0, width, height, blend,
+        ) == 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        None
     };
-    if AlphaBlend(
-        dimmed.dc, 0, 0, width, height, source, 0, 0, width, height, blend,
-    ) == 0
-    {
-        return Err(io::Error::last_os_error());
-    }
     let back_buffer = Surface::new(source, width, height)?;
     let window = CreateWindowExW(
-        WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
+        WS_EX_TOPMOST | WS_EX_TOOLWINDOW | if live.is_some() { WS_EX_LAYERED } else { 0 },
         CLASS,
         w!("Snapshot Selection"),
         WS_POPUP | WS_CLIPCHILDREN,
@@ -405,6 +530,12 @@ unsafe fn open_selection(instance: HINSTANCE, start: Start) -> io::Result<()> {
     );
     if window.is_null() {
         return Err(io::Error::last_os_error());
+    }
+    if live.is_some() {
+        // Never in a recording, even in the moment it starts.
+        SetWindowDisplayAffinity(window, 0x11);
+        LIVE.set(true);
+        LIVE_DIRTY.set(None);
     }
     SESSION.replace(Some(Selection {
         desktop,
@@ -427,6 +558,8 @@ unsafe fn open_selection(instance: HINSTANCE, start: Start) -> io::Result<()> {
         toolbar_hover: None,
         options: None,
         options_hover: None,
+        panel_bar: None,
+        panel_bar_hover: None,
         style,
         selected_text: None,
         text_drag: None,
@@ -437,6 +570,9 @@ unsafe fn open_selection(instance: HINSTANCE, start: Start) -> io::Result<()> {
         layer: None,
         picked: Vec::new(),
         pick_drag: None,
+        record,
+        live,
+        pointer_layer,
         editor: None,
         brush_cursor: None,
         mosaic_cursor: None,
@@ -453,10 +589,20 @@ unsafe fn open_selection(instance: HINSTANCE, start: Start) -> io::Result<()> {
             },
         );
     }
+    if LIVE.get() {
+        // The picker's whole first frame, before it shows (a layered window
+        // shows nothing until it has been given a picture).
+        LIVE_DIRTY.set(None);
+        paint_live(window, canvas);
+    }
     ShowWindow(window, SW_SHOW);
     SetForegroundWindow(window);
     SetFocus(window);
     UpdateWindow(window);
+    if LIVE.get() {
+        // Panels already switched on (remembered from last time) stay above the picker, where their grips can be grabbed.
+        crate::input_overlay::raise();
+    }
     Ok(())
 }
 
@@ -475,11 +621,36 @@ unsafe extern "system" fn window_proc(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
+    let result = handle_message(window, message, wparam, lparam);
+    // The recording picker is never asked to paint (see `invalidate`): what a
+    // message changed is painted and presented right after it.
+    if LIVE.get() && message != WM_DESTROY && message != WM_NCDESTROY {
+        if let Some(dirty) = LIVE_DIRTY.take() {
+            paint_live(window, dirty);
+        }
+        // Activating the picker puts it over the recording's key panels; they go back on top to stay draggable.
+        if message == WM_ACTIVATE {
+            crate::input_overlay::raise();
+        }
+    }
+    result
+}
+
+unsafe fn handle_message(window: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     match message {
         WM_PAINT => paint(window),
         WM_ERASEBKGND => return 1,
         WM_LBUTTONDOWN | WM_LBUTTONDBLCLK => {
             let point = mouse_point(lparam);
+            if let Some(bar) = SESSION
+                .with_borrow(|session| session.as_ref()?.panel_bar)
+                .filter(|bar| contains(bar.bounds, point))
+            {
+                if let Some(choice) = bar.hit(point) {
+                    change_panel(window, choice);
+                }
+                return 0;
+            }
             if let Some(options) = SESSION
                 .with_borrow(|session| session.as_ref()?.options)
                 .filter(|options| contains(options.bounds, point))
@@ -621,7 +792,7 @@ unsafe extern "system" fn window_proc(
                 editor.caret_visible = !editor.caret_visible;
                 Some(editor.frame().bounds())
             }) {
-                InvalidateRect(window, &bounds, 0);
+                invalidate(window, &bounds, 0);
             }
         }
         WM_CTLCOLOREDIT => {
@@ -694,7 +865,7 @@ unsafe extern "system" fn window_proc(
                 hide_loupe(window);
             }
             if let Some(rect) = draft {
-                InvalidateRect(window, &rect, 0);
+                invalidate(window, &rect, 0);
                 invalidate_toolbar(window);
             }
         }
@@ -716,6 +887,10 @@ unsafe extern "system" fn window_proc(
             {
                 // Mouse software often sends the side buttons as Alt+←/→.
             } else if nudge(window, key, modifiers, lparam & (1 << 30) != 0) {
+            } else if hotkey::current().resolve(Shortcut { modifiers, key }) == Some(Binding::ShowPointer) {
+                if lparam & (1 << 30) == 0 {
+                    toggle_pointer(window);
+                }
             } else if let Some(action) = hotkey::current()
                 .resolve(Shortcut { modifiers, key })
                 .and_then(Action::from_binding)
@@ -736,7 +911,14 @@ unsafe extern "system" fn window_proc(
             DestroyWindow(window);
         }
         WM_DESTROY => {
+            if LIVE.replace(false) {
+                LIVE_DIRTY.set(None);
+            }
             if let Some(selection) = SESSION.take() {
+                // Left without recording: the panels shown for the picker go away.
+                if selection.record.is_some() && !crate::recording_ui::is_busy() {
+                    crate::input_overlay::end_session();
+                }
                 remember(selection);
             }
             // The capture's full-screen buffers are gone; give their pages back.
@@ -749,7 +931,7 @@ unsafe extern "system" fn window_proc(
 
 /// Keeps a locked capture, finished or cancelled, for "找回上次截图".
 fn remember(selection: Selection) {
-    if selection.automatic || outline_empty(selection.rect) {
+    if selection.automatic || outline_empty(selection.rect) || selection.record.is_some() {
         return;
     }
     let bounds = selection.desktop.bounds;
@@ -784,4 +966,45 @@ fn remember(selection: Selection) {
 
 fn point_param(point: POINT) -> LPARAM {
     (u32::from(point.x as u16) | (u32::from(point.y as u16) << 16)) as LPARAM
+}
+
+/// Shows or hides the captured mouse pointer in the picture (and in its dimmed copy).
+unsafe fn toggle_pointer(window: HWND) {
+    let changed = SESSION.with_borrow_mut(|session| {
+        let selection = session.as_mut()?;
+        let canvas = selection.canvas;
+        let layer = selection.pointer_layer.as_mut()?;
+        let patch = layer.patch(canvas)?;
+        let (width, height) = (canvas.right, canvas.bottom);
+        let pixels = selection.desktop.surface.bytes_mut(width, height);
+        let rows = (patch.top..patch.bottom).map(|y| {
+            let start = ((y * width + patch.left) * 4) as usize;
+            start..start + ((patch.right - patch.left) * 4) as usize
+        });
+        match layer.under.take() {
+            Some(under) => {
+                let mut taken = under.chunks((patch.right - patch.left) as usize * 4);
+                for row in rows {
+                    if let Some(saved) = taken.next() {
+                        pixels[row].copy_from_slice(saved);
+                    }
+                }
+            }
+            None => {
+                layer.under = Some(rows.flat_map(|row| pixels[row].to_vec()).collect());
+                DrawIconEx(selection.desktop.surface.dc, layer.at.x, layer.at.y, layer.cursor, 0, 0, 0, null_mut(), DI_NORMAL);
+            }
+        }
+        GdiFlush();
+        // The dimmed copy outside the area follows, so the pointer shows wherever it is.
+        let size = (patch.right - patch.left, patch.bottom - patch.top);
+        let black = GetStockObject(BLACK_BRUSH);
+        FillRect(selection.dimmed.dc, &patch, black);
+        let blend = BLENDFUNCTION { SourceConstantAlpha: 102, ..Default::default() };
+        AlphaBlend(selection.dimmed.dc, patch.left, patch.top, size.0, size.1, selection.desktop.surface.dc, patch.left, patch.top, size.0, size.1, blend);
+        Some(patch)
+    });
+    if let Some(patch) = changed {
+        invalidate(window, &patch, 0);
+    }
 }

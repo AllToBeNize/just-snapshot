@@ -56,13 +56,13 @@ const MASCOT_ART: &[u8] = include_bytes!("../assets/character/settings.png");
 const PAD: i32 = 24;
 const HEADER: i32 = 52;
 const LABEL: i32 = 22;
-const SECTION_GAP: i32 = 12;
+const SECTION_GAP: i32 = 8;
 const HERO: i32 = 124;
-const ROW: i32 = 36;
-const ROWS: i32 = 6;
+const ROW: i32 = 35;
+const ROWS: i32 = 7;
 const COLUMNS: i32 = 3;
 const CARD_INSET: i32 = 6;
-const GENERAL_ROW: i32 = 48;
+const GENERAL_ROW: i32 = 44;
 const GENERAL_ROWS: i32 = 3;
 const FOOTER: i32 = 60;
 const HERO_KEYS: i32 = 220;
@@ -71,6 +71,11 @@ const CHIP: i32 = 78;
 const CHIP_GAP: i32 = 6;
 /// Field index of the optional second capture shortcut, after every binding.
 const SECONDARY: usize = BINDINGS.len();
+/// Bindings from here on belong to the recording tab.
+const RECORD_START: usize = Binding::Record as usize;
+/// The two tabs: screenshots, and recording with the input display.
+const TABS: [&str; 2] = ["截图", "录像与按键显示"];
+const ANCHOR_CELL: (i32, i32) = (30, 20);
 const FIELDS: usize = BINDINGS.len() + 1;
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -85,6 +90,23 @@ enum Target {
     Service,
     /// Opens the save settings: folder, file names, auto-save, shadow, border.
     Output,
+    Tab(usize),
+    /// Recording frame rate: 30 or 60.
+    Fps(usize),
+    Quality(usize),
+    /// Choose the recording folder.
+    Folder,
+    Cursor,
+    /// Count 3, 2, 1 before an area recording starts.
+    Countdown,
+    SystemAudio,
+    Microphone,
+    /// Input panel switches and settings, by panel index.
+    PanelVisible(usize),
+    /// Puts a panel at one of nine places; dragging it still moves it freely.
+    PanelAnchor(usize, usize),
+    PanelSize(usize, i32),
+    PanelOpacity(usize, i32),
     Close,
     Reset,
     Cancel,
@@ -115,6 +137,7 @@ struct Draft {
     start_at_login: bool,
     theme: Theme,
     secondary: Option<Shortcut>,
+    record: crate::recorder::Options,
 }
 
 impl Draft {
@@ -125,6 +148,7 @@ impl Draft {
             start_at_login: true,
             theme: Theme::default(),
             secondary: None,
+            record: crate::recorder::Options::default(),
         }
     }
 
@@ -193,6 +217,9 @@ struct State {
     animating: bool,
     /// The mascot art, decoded once per window.
     mascot: Option<Image>,
+    tab: usize,
+    /// The recording folder as chosen in this window; saved with the rest.
+    record_folder: String,
 }
 
 thread_local! {
@@ -204,6 +231,25 @@ thread_local! {
 /// hit testing always agree.
 struct Layout {
     scale: f32,
+    tab: usize,
+    tabs: [RECT; 2],
+    record_label: RECT,
+    record_keys: RECT,
+    record_options: RECT,
+    fps: [RECT; 2],
+    quality: [RECT; 3],
+    cursor: RECT,
+    countdown: RECT,
+    folder: RECT,
+    folder_button: RECT,
+    system_audio: RECT,
+    microphone: RECT,
+    panels_label: RECT,
+    panels: RECT,
+    panel_visible: [RECT; 2],
+    anchors: [[RECT; 9]; 2],
+    panel_size: [[RECT; 2]; 2],
+    panel_opacity: [[RECT; 2]; 2],
     width: i32,
     height: i32,
     header: RECT,
@@ -234,6 +280,10 @@ struct Layout {
 
 impl Layout {
     fn new(scale: f32) -> Self {
+        Self::for_tab(scale, 0)
+    }
+
+    fn for_tab(scale: f32, tab: usize) -> Self {
         let s = |value: i32| (value as f32 * scale).round() as i32;
         let rect = |left: i32, top: i32, right: i32, bottom: i32| RECT {
             left: s(left),
@@ -282,7 +332,7 @@ impl Layout {
         let clear_left = WIDTH - PAD - 16 - HERO_KEYS - 6 - 28;
         let clear = rect(clear_left, hero_top + 81, clear_left + 28, hero_top + 81 + 28);
         let column = (WIDTH - PAD * 2 - CARD_INSET * 2) / COLUMNS;
-        for index in 1..BINDINGS.len() {
+        for index in 1..RECORD_START {
             let slot = (index - 1) as i32;
             let left = PAD + CARD_INSET + (slot / ROWS) * column;
             let top = toolbar_top + CARD_INSET + (slot % ROWS) * ROW;
@@ -322,6 +372,67 @@ impl Layout {
             *chip = rect(left, chip_top, left + CHIP, chip_top + 32);
         }
 
+        // The recording tab, laid out in the same content area.
+        let tab_left = 200;
+        let tabs = [
+            rect(tab_left, 12, tab_left + 72, 42),
+            rect(tab_left + 80, 12, tab_left + 80 + 136, 42),
+        ];
+        let mut ty = HEADER;
+        let record_label = rect(PAD, ty, WIDTH - PAD, ty + LABEL);
+        ty += LABEL;
+        let record_rows = 2;
+        let record_keys = rect(PAD, ty, WIDTH - PAD, ty + ROW * record_rows + CARD_INSET * 2);
+        for index in RECORD_START..BINDINGS.len() {
+            let slot = (index - RECORD_START) as i32;
+            let left = PAD + CARD_INSET + (slot / record_rows) * column;
+            let top = ty + CARD_INSET + (slot % record_rows) * ROW;
+            rows[index] = rect(left, top, left + column, top + ROW);
+            let right = left + column - 8;
+            keys[index] = rect(right - ROW_KEYS, top + 6, right, top + ROW - 6);
+        }
+        ty += ROW * record_rows + CARD_INSET * 2 + SECTION_GAP;
+        let record_options = rect(PAD, ty, WIDTH - PAD, ty + GENERAL_ROW * 4);
+        let option_top = |row: i32, height: i32| ty + GENERAL_ROW * row + (GENERAL_ROW - height) / 2;
+        let half_right = WIDTH / 2 - 18;
+        let chip = |right_edge: i32, count: i32, index: i32, width: i32| {
+            let left = right_edge - count * width - (count - 1) * 4 + index * (width + 4);
+            rect(left, option_top(0, 30), left + width, option_top(0, 30) + 30)
+        };
+        let fps = [chip(half_right, 2, 0, 56), chip(half_right, 2, 1, 56)];
+        let quality = [chip(right, 3, 0, 64), chip(right, 3, 1, 64), chip(right, 3, 2, 64)];
+        let system_audio = rect(half_right - 44, option_top(1, 24), half_right, option_top(1, 24) + 24);
+        let microphone = rect(right - 44, option_top(1, 24), right, option_top(1, 24) + 24);
+        let cursor = rect(half_right - 44, option_top(2, 24), half_right, option_top(2, 24) + 24);
+        let countdown = rect(half_right - 44, option_top(3, 24), half_right, option_top(3, 24) + 24);
+        let folder_button = rect(right - 68, option_top(2, 30), right, option_top(2, 30) + 30);
+        let folder = rect(WIDTH / 2 + 18 + 70, option_top(2, 30), right - 76, option_top(2, 30) + 30);
+        ty += GENERAL_ROW * 4 + SECTION_GAP;
+        let panels_label = rect(PAD, ty, WIDTH - PAD, ty + LABEL);
+        ty += LABEL;
+        let panels = rect(PAD, ty, WIDTH - PAD, ty + 150);
+        let half_width = (WIDTH - PAD * 2) / 2;
+        let mut panel_visible = [RECT::default(); 2];
+        let mut anchors = [[RECT::default(); 9]; 2];
+        let mut panel_size = [[RECT::default(); 2]; 2];
+        let mut panel_opacity = [[RECT::default(); 2]; 2];
+        for panel in 0..2 {
+            let left = PAD + half_width * panel as i32;
+            let right = left + half_width - 18;
+            panel_visible[panel] = rect(right - 44, ty + 12, right, ty + 36);
+            let stepper = |top: i32| [rect(right - 112, top, right - 80, top + 30), rect(right - 32, top, right, top + 30)];
+            let grid_left = left + 18 + 48;
+            let grid_top = ty + 52;
+            for (index, cell) in anchors[panel].iter_mut().enumerate() {
+                let (column, row) = ((index % 3) as i32, (index / 3) as i32);
+                let x = grid_left + column * (ANCHOR_CELL.0 + 4);
+                let y = grid_top + row * (ANCHOR_CELL.1 + 4);
+                *cell = rect(x, y, x + ANCHOR_CELL.0, y + ANCHOR_CELL.1);
+            }
+            panel_size[panel] = stepper(grid_top);
+            panel_opacity[panel] = stepper(grid_top + 42);
+        }
+
         let button_top = y + (FOOTER - 34) / 2;
         let mascot = rect(WIDTH - 4, HEADER + 4, TOTAL - PAD / 2, y);
         let save = rect(TOTAL - PAD - 84, button_top, TOTAL - PAD, button_top + 34);
@@ -334,6 +445,25 @@ impl Layout {
         let reset = rect(PAD - 8, button_top, PAD - 8 + 92, button_top + 34);
         Self {
             scale,
+            tab,
+            tabs,
+            record_label,
+            record_keys,
+            record_options,
+            fps,
+            quality,
+            cursor,
+            countdown,
+            folder,
+            folder_button,
+            system_audio,
+            microphone,
+            panels_label,
+            panels,
+            panel_visible,
+            anchors,
+            panel_size,
+            panel_opacity,
             width: s(TOTAL),
             mascot,
             height,
@@ -366,24 +496,55 @@ impl Layout {
         (value as f32 * self.scale).round() as i32
     }
 
-    fn targets(&self) -> impl Iterator<Item = (Target, RECT)> + '_ {
-        (0..FIELDS)
-            .map(|index| (Target::Key(index), self.keys[index]))
+    fn targets(&self) -> Box<dyn Iterator<Item = (Target, RECT)> + '_> {
+        let common = (0..2)
+            .map(|index| (Target::Tab(index), self.tabs[index]))
             .chain([
-                (Target::ClearSecondary, self.clear),
-                (Target::Service, self.service),
-                (Target::Output, self.output),
-            ])
-            .chain((0..THEMES.len()).map(|index| (Target::Theme(index), self.themes[index])))
-            .chain([
-                (Target::Toggle, self.toggle),
-                (Target::Minus, self.minus),
-                (Target::Plus, self.plus),
                 (Target::Close, self.close),
                 (Target::Reset, self.reset),
                 (Target::Cancel, self.cancel),
                 (Target::Save, self.save),
-            ])
+            ]);
+        if self.tab == 0 {
+            Box::new(
+                (0..RECORD_START)
+                    .chain([SECONDARY])
+                    .map(|index| (Target::Key(index), self.keys[index]))
+                    .chain([
+                        (Target::ClearSecondary, self.clear),
+                        (Target::Service, self.service),
+                        (Target::Output, self.output),
+                    ])
+                    .chain((0..THEMES.len()).map(|index| (Target::Theme(index), self.themes[index])))
+                    .chain([(Target::Toggle, self.toggle), (Target::Minus, self.minus), (Target::Plus, self.plus)])
+                    .chain(common),
+            )
+        } else {
+            Box::new(
+                (RECORD_START..BINDINGS.len())
+                    .map(|index| (Target::Key(index), self.keys[index]))
+                    .chain((0..2).map(|index| (Target::Fps(index), self.fps[index])))
+                    .chain((0..3).map(|index| (Target::Quality(index), self.quality[index])))
+                    .chain([
+                        (Target::Folder, self.folder_button),
+                        (Target::Cursor, self.cursor),
+                        (Target::Countdown, self.countdown),
+                        (Target::SystemAudio, self.system_audio),
+                        (Target::Microphone, self.microphone),
+                    ])
+                    .chain((0..2).flat_map(move |panel| {
+                        std::iter::once((Target::PanelVisible(panel), self.panel_visible[panel]))
+                            .chain((0..9).map(move |anchor| (Target::PanelAnchor(panel, anchor), self.anchors[panel][anchor])))
+                            .chain([
+                                (Target::PanelSize(panel, -1), self.panel_size[panel][0]),
+                                (Target::PanelSize(panel, 1), self.panel_size[panel][1]),
+                                (Target::PanelOpacity(panel, -1), self.panel_opacity[panel][0]),
+                                (Target::PanelOpacity(panel, 1), self.panel_opacity[panel][1]),
+                            ])
+                    }))
+                    .chain(common),
+            )
+        }
     }
 
     fn hit(&self, point: POINT) -> Option<Target> {
@@ -409,6 +570,14 @@ pub unsafe fn register(instance: HINSTANCE) -> io::Result<()> {
 }
 
 /// A shortcut field is waiting for keys; a global shortcut must not start a capture then.
+/// Repaints the settings window, if it is open, after a setting changed elsewhere.
+pub unsafe fn refresh() {
+    let window = WINDOW.get();
+    if !window.is_null() {
+        InvalidateRect(window, null(), 0);
+    }
+}
+
 pub fn is_recording() -> bool {
     STATE.with_borrow(|state| state.as_ref().is_some_and(|state| state.recording.is_some()))
 }
@@ -446,6 +615,7 @@ pub unsafe fn open(owner: HWND, instance: HINSTANCE) -> io::Result<()> {
         start_at_login,
         theme: theme::current(),
         secondary: global_hotkey::shortcuts().get(1).copied(),
+        record: crate::recording_ui::load_options(),
     };
     install(window, owner, draft);
     WINDOW.set(window);
@@ -479,6 +649,8 @@ unsafe fn install(window: HWND, owner: HWND, draft: Draft) {
         tracking: false,
         animating: false,
         mascot: crate::app_icon::decode(MASCOT_ART),
+        tab: 0,
+        record_folder: crate::recording_ui::load_folder(),
     }));
     refresh_capture_status(window);
 }
@@ -655,6 +827,60 @@ unsafe fn activate(window: HWND, target: Target) {
                 crate::show_error(window, &format!("无法打开翻译设置。\n{error}"));
             }
         }
+        Target::Tab(tab) => {
+            stop_recording(window);
+            with_state(|state| state.tab = tab);
+            redraw(window);
+        }
+        Target::Fps(index) => {
+            with_state(|state| state.draft.record.fps = [30, 60][index]);
+            redraw(window);
+        }
+        Target::Quality(index) => {
+            with_state(|state| state.draft.record.quality = crate::recorder::Quality::ALL[index]);
+            redraw(window);
+        }
+        Target::Cursor | Target::Countdown | Target::SystemAudio | Target::Microphone => {
+            with_state(|state| {
+                let record = &mut state.draft.record;
+                match target {
+                    Target::Cursor => record.cursor = !record.cursor,
+                    Target::Countdown => record.countdown = !record.countdown,
+                    Target::SystemAudio => record.system_audio = !record.system_audio,
+                    _ => record.microphone = !record.microphone,
+                }
+            });
+            redraw(window);
+        }
+        Target::Folder => {
+            let current = crate::recording_ui::folder();
+            if let Some(chosen) = crate::output_settings::pick_folder(window, &current.to_string_lossy()) {
+                with_state(|state| state.record_folder = chosen);
+                redraw(window);
+            }
+        }
+        Target::PanelVisible(panel) => {
+            crate::input_overlay::toggle(crate::input_overlay::PANELS[panel]);
+            redraw(window);
+        }
+        Target::PanelAnchor(panel, anchor) => {
+            let which = crate::input_overlay::PANELS[panel];
+            let mut config = crate::input_overlay::config().panels[panel].at_anchor(crate::input_overlay::ANCHORS[anchor]);
+            config.visible = true;
+            crate::input_overlay::set(which, config);
+            redraw(window);
+        }
+        Target::PanelSize(panel, step) | Target::PanelOpacity(panel, step) => {
+            let which = crate::input_overlay::PANELS[panel];
+            let mut config = crate::input_overlay::config().panels[panel];
+            if matches!(target, Target::PanelSize(..)) {
+                config.scale += step * 10;
+            } else {
+                config.opacity += step * 5;
+            }
+            crate::input_overlay::set(which, config);
+            redraw(window);
+        }
         Target::Output => {
             if let Err(error) = crate::output_settings::open(window) {
                 crate::show_error(window, &format!("无法打开保存设置。\n{error}"));
@@ -668,17 +894,19 @@ unsafe fn activate(window: HWND, target: Target) {
 }
 
 unsafe fn save(window: HWND) {
-    let Some((owner, draft)) = STATE.with_borrow(|state| {
+    let Some((owner, draft, folder)) = STATE.with_borrow(|state| {
         state
             .as_ref()
             .filter(|state| state.draft.first_duplicate().is_none())
-            .map(|state| (state.owner, state.draft))
+            .map(|state| (state.owner, state.draft, state.record_folder.clone()))
     }) else {
         return;
     };
     match draft
         .preferences()
         .and_then(|preferences| apply_preferences(owner, preferences, draft.start_at_login))
+        .and_then(|()| crate::recording_ui::save_options(draft.record))
+        .and_then(|()| crate::recording_ui::save_folder(&folder))
     {
         Ok(()) => {
             DestroyWindow(window);
@@ -708,7 +936,12 @@ unsafe fn record_key(window: HWND, key: u32) -> bool {
             state.recording = None;
             state.notice = Notice::None;
         });
-    } else if let Some(shortcut) = Shortcut::from_key(modifiers, key) {
+    } else if let Some(shortcut) = Shortcut::from_key(modifiers, key).or_else(|| {
+        // A lone letter or digit, for the bindings that allow one (the pointer key).
+        let letter = char::from_u32(key).filter(char::is_ascii_alphanumeric)?;
+        let binding = *BINDINGS.get(index)?;
+        (modifiers == 0).then(|| Shortcut::single(binding, &letter.to_string())).flatten()
+    }) {
         with_state(|state| {
             state.draft.set_slot(index, shortcut);
             state.recording = None;
@@ -733,7 +966,7 @@ unsafe fn stop_recording(window: HWND) {
 }
 
 fn layout() -> Option<Layout> {
-    STATE.with_borrow(|state| state.as_ref().map(|state| Layout::new(state.scale)))
+    STATE.with_borrow(|state| state.as_ref().map(|state| Layout::for_tab(state.scale, state.tab)))
 }
 
 unsafe extern "system" fn window_proc(
@@ -916,7 +1149,7 @@ impl<'a> Painter<'a> {
         Self {
             dc,
             state,
-            layout: Layout::new(state.scale),
+            layout: Layout::for_tab(state.scale, state.tab),
             palette: state.draft.theme.palette(),
         }
     }
@@ -978,6 +1211,13 @@ impl<'a> Painter<'a> {
             DT_LEFT | DT_VCENTER,
         );
         self.close_button();
+        self.tabs();
+        self.mascot();
+        if self.state.tab == 1 {
+            self.record_tab();
+            self.footer();
+            return;
+        }
         for (rect, label) in [
             (layout.capture_label, "截图"),
             (layout.toolbar_label, "截图工具栏　·　「截取窗口」和「上次截图」在任何程序里都能用"),
@@ -993,11 +1233,240 @@ impl<'a> Painter<'a> {
         for card in [layout.hero, layout.toolbar, layout.general] {
             self.card(card);
         }
-        self.mascot();
         self.hero();
         self.toolbar_rows();
         self.general();
         self.footer();
+    }
+
+    /// Section titles in the header: 截图 and 录像与按键显示.
+    unsafe fn tabs(&self) {
+        let palette = self.palette;
+        for (index, rect) in self.layout.tabs.iter().enumerate() {
+            let selected = self.state.tab == index;
+            let target = Target::Tab(index);
+            if let Some(graphics) = Graphics::new(self.dc) {
+                let face = if selected { palette.accent_soft } else { self.face(target, palette.background) };
+                graphics.fill_round(ui::to_f(*rect), self.f(8.0), argb(face, 255));
+            }
+            let color = if selected { palette.accent } else { palette.secondary };
+            let font = if selected { self.state.fonts.heading } else { self.state.fonts.body };
+            self.text(*rect, TABS[index], font, color, DT_CENTER | DT_VCENTER);
+        }
+    }
+
+    unsafe fn section_label(&self, rect: RECT, label: &str) {
+        let rect = RECT { left: rect.left + self.s(4), bottom: rect.bottom - self.s(6), ..rect };
+        self.text(rect, label, self.state.fonts.small, self.palette.secondary, DT_LEFT | DT_BOTTOM);
+    }
+
+    /// One shortcut row: icon, name, keycaps; a divider above all but the first in a column.
+    unsafe fn binding_row(&self, index: usize, divider: bool) {
+        let palette = self.palette;
+        let row = self.layout.rows[index];
+        if divider {
+            ui::fill(
+                self.dc,
+                RECT { left: row.left + self.s(12), top: row.top, right: row.right - self.s(12), bottom: row.top + 1 },
+                palette.divider,
+            );
+        }
+        let size = self.s(20);
+        let icon = RECT {
+            left: row.left + self.s(12),
+            top: (row.top + row.bottom - size) / 2,
+            right: row.left + self.s(12) + size,
+            bottom: (row.top + row.bottom - size) / 2 + size,
+        };
+        icons::paint(self.dc, icon, binding_icon(BINDINGS[index]), palette.icon);
+        let label = RECT { left: icon.right + self.s(10), right: self.layout.keys[index].left, ..row };
+        self.text(label, BINDINGS[index].label(), self.state.fonts.body, palette.text, DT_LEFT | DT_VCENTER);
+        self.key_field(index, self.s(24));
+    }
+
+    /// A settings row's title and description, between `left` and `right`.
+    unsafe fn row_text(&self, left: i32, right: i32, middle: i32, title: &str, description: &str) {
+        self.text(
+            RECT { left, top: middle - self.s(21), right, bottom: middle },
+            title,
+            self.state.fonts.body,
+            self.palette.text,
+            DT_LEFT | DT_BOTTOM | DT_END_ELLIPSIS,
+        );
+        if !description.is_empty() {
+            self.text(
+                RECT { left, top: middle + self.s(2), right, bottom: middle + self.s(21) },
+                description,
+                self.state.fonts.small,
+                self.palette.secondary,
+                DT_LEFT | DT_TOP | DT_END_ELLIPSIS,
+            );
+        }
+    }
+
+    unsafe fn switch(&self, rect: RECT, on: bool, target: Target) {
+        let palette = self.palette;
+        let Some(graphics) = Graphics::new(self.dc) else { return };
+        let hover = self.hover(target);
+        let track = if on { mix(palette.accent, palette.accent_hover, hover) } else { mix(palette.track_off, palette.secondary, hover * 0.3) };
+        let bounds = ui::to_f(rect);
+        let height = bounds[3] - bounds[1];
+        graphics.fill_round(bounds, height / 2.0, argb(track, 255));
+        let margin = self.f(3.0);
+        let knob = height - margin * 2.0;
+        let left = if on { bounds[2] - margin - knob } else { bounds[0] + margin };
+        graphics.fill_ellipse([left, bounds[1] + margin, left + knob, bounds[1] + margin + knob], argb(0x00ff_ffff, 255));
+    }
+
+    unsafe fn chip(&self, rect: RECT, label: &str, selected: bool, target: Target) {
+        let palette = self.palette;
+        if let Some(graphics) = Graphics::new(self.dc) {
+            let bounds = ui::to_f(rect);
+            let face = if selected { palette.accent_soft } else { self.face(target, palette.key_face) };
+            graphics.fill_round(bounds, self.f(8.0), argb(face, 255));
+            let (border, width) = if selected { (palette.accent, 1.5) } else { (palette.key_border, 1.0) };
+            graphics.stroke_round(ui::inset(bounds, width / 2.0), self.f(8.0), argb(border, 255), width);
+        }
+        let color = if selected { palette.accent } else { palette.text };
+        self.text(rect, label, self.state.fonts.small, color, DT_CENTER | DT_VCENTER);
+    }
+
+    /// − value + with the value between the two buttons.
+    unsafe fn small_stepper(&self, minus: RECT, plus: RECT, value: &str, minus_target: Target, plus_target: Target) {
+        let palette = self.palette;
+        let whole = RECT { left: minus.left, right: plus.right, ..minus };
+        if let Some(graphics) = Graphics::new(self.dc) {
+            graphics.fill_round(ui::to_f(whole), self.f(8.0), argb(palette.key_face, 255));
+            for (target, rect) in [(minus_target, minus), (plus_target, plus)] {
+                let face = self.face(target, palette.key_face);
+                graphics.fill_round(ui::to_f(ui::inflate(rect, -self.s(2))), self.f(6.0), argb(face, 255));
+            }
+            graphics.stroke_round(ui::inset(ui::to_f(whole), 0.5), self.f(8.0), argb(palette.key_border, 255), 1.0);
+        }
+        self.text(minus, "−", self.state.fonts.body, palette.icon, DT_CENTER | DT_VCENTER);
+        self.text(plus, "+", self.state.fonts.body, palette.icon, DT_CENTER | DT_VCENTER);
+        self.text(RECT { left: minus.right, right: plus.left, ..minus }, value, self.state.fonts.key, palette.text, DT_CENTER | DT_VCENTER);
+    }
+
+    /// The 录像与按键显示 tab.
+    unsafe fn record_tab(&self) {
+        let palette = self.palette;
+        let layout = &self.layout;
+        let draft = self.state.draft.record;
+        self.section_label(layout.record_label, "录像快捷键　·　在任何程序里都能用");
+        self.section_label(layout.panels_label, "按键显示　·　改动立即生效；拖面板下方的 ≡ 可以随意摆");
+        for card in [layout.record_keys, layout.record_options, layout.panels] {
+            self.card(card);
+        }
+        // Shortcuts, two to a column.
+        for index in RECORD_START..BINDINGS.len() {
+            self.binding_row(index, (index - RECORD_START) % 2 == 1);
+        }
+        // Options: three rows, two settings each.
+        let card = layout.record_options;
+        let row = self.s(GENERAL_ROW);
+        let half = card.left + (card.right - card.left) / 2;
+        for line in 0..4 {
+            let top = card.top + row * line;
+            if line > 0 {
+                ui::fill(self.dc, RECT { left: card.left + self.s(18), top, right: card.right - self.s(18), bottom: top + 1 }, palette.divider);
+            }
+            ui::fill(self.dc, RECT { left: half, top: top + self.s(10), right: half + 1, bottom: top + row - self.s(10) }, palette.divider);
+        }
+        let middle = |line: i32| card.top + row * line + row / 2;
+        let left_text = card.left + self.s(18);
+        let right_text = half + self.s(18);
+        self.row_text(left_text, layout.fps[0].left - self.s(12), middle(0), "帧率", "60 帧更流畅，30 帧文件更小");
+        for (index, fps) in [30, 60].into_iter().enumerate() {
+            self.chip(layout.fps[index], &format!("{fps} 帧"), draft.fps == fps, Target::Fps(index));
+        }
+        self.row_text(right_text, layout.quality[0].left - self.s(12), middle(0), "画质", "原画按屏幕实际像素录");
+        for (index, quality) in crate::recorder::Quality::ALL.into_iter().enumerate() {
+            self.chip(layout.quality[index], quality.name(), draft.quality == quality, Target::Quality(index));
+        }
+        self.row_text(left_text, layout.system_audio.left - self.s(12), middle(1), "录制系统声音", "电脑里播放的声音");
+        self.switch(layout.system_audio, draft.system_audio, Target::SystemAudio);
+        self.row_text(right_text, layout.microphone.left - self.s(12), middle(1), "录制麦克风", "和系统声音混在一起");
+        self.switch(layout.microphone, draft.microphone, Target::Microphone);
+        self.row_text(left_text, layout.cursor.left - self.s(12), middle(2), "录制鼠标指针", "");
+        self.switch(layout.cursor, draft.cursor, Target::Cursor);
+        self.row_text(left_text, layout.countdown.left - self.s(12), middle(3), "开始前倒数 3 秒", "框选录像时，给你时间切回要录的窗口");
+        self.switch(layout.countdown, draft.countdown, Target::Countdown);
+        self.row_text(right_text, layout.folder.left - self.s(8), middle(2), "保存位置", "");
+        let folder = if self.state.record_folder.trim().is_empty() {
+            crate::recording_ui::folder().to_string_lossy().into_owned()
+        } else {
+            self.state.record_folder.clone()
+        };
+        self.text(layout.folder, &folder, self.state.fonts.small, palette.secondary, DT_LEFT | DT_VCENTER | DT_PATH_ELLIPSIS);
+        ui::button(
+            self.dc,
+            layout.folder_button,
+            "更改…",
+            self.state.fonts.body,
+            palette,
+            false,
+            self.face(Target::Folder, palette.key_face),
+            self.f(8.0),
+        );
+        // Input panels: one column each.
+        let config = crate::input_overlay::config();
+        let panels = layout.panels;
+        let half_width = (panels.right - panels.left) / 2;
+        ui::fill(
+            self.dc,
+            RECT { left: panels.left + half_width, top: panels.top + self.s(12), right: panels.left + half_width + 1, bottom: panels.bottom - self.s(12) },
+            palette.divider,
+        );
+        for (panel, (name, description, icon)) in [("键鼠", "按下的键和鼠标按键会亮起", Icon::Keyboard), ("手柄", "Xbox 手柄的按键、扳机和摇杆", Icon::Gamepad)]
+            .into_iter()
+            .enumerate()
+        {
+            let settings = config.panels[panel];
+            let left = panels.left + half_width * panel as i32 + self.s(18);
+            let toggle = layout.panel_visible[panel];
+            let size = self.s(20);
+            let icon_rect = RECT { left, top: (toggle.top + toggle.bottom - size) / 2, right: left + size, bottom: (toggle.top + toggle.bottom - size) / 2 + size };
+            icons::paint(self.dc, icon_rect, icon, palette.icon);
+            self.row_text(icon_rect.right + self.s(10), toggle.left - self.s(12), (toggle.top + toggle.bottom) / 2, name, description);
+            self.switch(toggle, settings.visible, Target::PanelVisible(panel));
+            // Nine places; none is lit once the panel was dragged somewhere else.
+            let grid = layout.anchors[panel];
+            self.text(
+                RECT { left, top: grid[0].top, right: grid[0].left - self.s(6), bottom: grid[0].bottom },
+                "位置",
+                self.state.fonts.small,
+                palette.secondary,
+                DT_LEFT | DT_VCENTER,
+            );
+            let anchored = settings.anchored();
+            for (index, cell) in grid.iter().enumerate() {
+                let selected = anchored == Some(crate::input_overlay::ANCHORS[index]);
+                let target = Target::PanelAnchor(panel, index);
+                if let Some(graphics) = Graphics::new(self.dc) {
+                    let face = if selected { palette.accent } else { self.face(target, palette.key_face) };
+                    graphics.fill_round(ui::to_f(*cell), self.f(5.0), argb(face, 255));
+                    if !selected {
+                        graphics.stroke_round(ui::inset(ui::to_f(*cell), 0.5), self.f(5.0), argb(palette.key_border, 255), 1.0);
+                    }
+                }
+            }
+            if anchored.is_none() {
+                self.text(
+                    RECT { left, top: grid[6].bottom + self.s(4), right: grid[2].right + self.s(40), bottom: grid[6].bottom + self.s(20) },
+                    "已拖到自定义位置",
+                    self.state.fonts.small,
+                    palette.secondary,
+                    DT_LEFT | DT_VCENTER,
+                );
+            }
+            let [minus, plus] = layout.panel_size[panel];
+            self.text(RECT { left: grid[2].right + self.s(16), right: minus.left - self.s(8), ..minus }, "大小", self.state.fonts.small, palette.secondary, DT_RIGHT | DT_VCENTER);
+            self.small_stepper(minus, plus, &format!("{}%", settings.scale), Target::PanelSize(panel, -1), Target::PanelSize(panel, 1));
+            let [minus, plus] = layout.panel_opacity[panel];
+            self.text(RECT { left: grid[2].right + self.s(16), right: minus.left - self.s(8), ..minus }, "不透明度", self.state.fonts.small, palette.secondary, DT_RIGHT | DT_VCENTER);
+            self.small_stepper(minus, plus, &format!("{}%", settings.opacity), Target::PanelOpacity(panel, -1), Target::PanelOpacity(panel, 1));
+        }
     }
 
     /// The mascot, as tall as her column allows, standing on the footer line.
@@ -1243,7 +1712,7 @@ impl<'a> Painter<'a> {
                 palette.divider,
             );
         }
-        for index in 1..BINDINGS.len() {
+        for index in 1..RECORD_START {
             let row = layout.rows[index];
             if (index - 1) as i32 % ROWS != 0 {
                 ui::fill(
@@ -1721,6 +2190,12 @@ fn binding_icon(binding: Binding) -> Icon {
         Binding::Select => Icon::Select,
         Binding::CaptureWindow => Icon::Window,
         Binding::LastCapture => Icon::History,
+        Binding::ShowPointer => Icon::MouseLeft,
+        Binding::RecordScreen => Icon::Record,
+        Binding::Record => Icon::Video,
+        Binding::RecordPause => Icon::Pause,
+        Binding::ShowKeys => Icon::Keyboard,
+        Binding::ShowPad => Icon::Gamepad,
     }
 }
 
@@ -1772,6 +2247,7 @@ mod tests {
             .collect();
         cases.extend([
             ("occupied".into(), 1.0, Draft::defaults(), CaptureStatus::Occupied, None, 0),
+            ("record-tab".into(), 1.0, Draft::defaults(), CaptureStatus::Active, None, 0),
             (
                 "recording".into(),
                 1.0,
@@ -1830,6 +2306,8 @@ mod tests {
                     tracking: false,
                     animating: false,
                     mascot: crate::app_icon::decode(MASCOT_ART),
+                    tab: usize::from(name == "record-tab"),
+                    record_folder: String::new(),
                 };
                 let layout = Layout::new(scale);
                 let bounds = RECT {
@@ -1904,13 +2382,14 @@ mod tests {
         draft.set_slot(SECONDARY, Shortcut::parse("F1").unwrap());
         assert!(draft.first_duplicate().is_none());
         let preferences = draft.preferences().unwrap();
-        assert_eq!(preferences.globals().len(), 4, "main, second, window and last capture");
+        assert_eq!(preferences.globals(false).len(), 8, "main, second, window, last capture, record, full screen and the two panels");
     }
 
     #[test]
     fn every_target_is_hit_at_its_center_on_any_scale() {
         for scale in [1.0, 1.25, 1.5, 2.0] {
-            let layout = Layout::new(scale);
+            for tab in 0..2 {
+            let layout = Layout::for_tab(scale, tab);
             for (target, rect) in layout.targets() {
                 let center = POINT {
                     x: (rect.left + rect.right) / 2,
@@ -1924,6 +2403,7 @@ mod tests {
                 "fits a 1080p screen: {} at {scale}",
                 layout.height
             );
+            }
         }
     }
 

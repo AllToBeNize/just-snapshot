@@ -61,14 +61,14 @@ pub(super) unsafe fn begin_mark_drag(window: HWND, point: POINT) -> bool {
     let Some((previous, current)) = result else {
         return false;
     };
-    InvalidateRect(window, &previous, 0);
+    invalidate(window, &previous, 0);
     refresh_options(window);
     refresh_hint(window);
     invalidate_toolbar(window);
     let Some(current) = current else {
         return false;
     };
-    InvalidateRect(window, &current, 0);
+    invalidate(window, &current, 0);
     SetCapture(window);
     update_cursor(point);
     true
@@ -108,7 +108,7 @@ pub(super) unsafe fn update_mark_drag(window: HWND, point: POINT, end: bool) -> 
         return false;
     };
     for rect in dirty {
-        InvalidateRect(window, &rect, 0);
+        invalidate(window, &rect, 0);
     }
     if end {
         ReleaseCapture();
@@ -129,7 +129,7 @@ pub(super) unsafe fn cancel_mark_drag(window: HWND) {
         Some([previous, current])
     });
     for rect in dirty.into_iter().flatten() {
-        InvalidateRect(window, &rect, 0);
+        invalidate(window, &rect, 0);
     }
 }
 
@@ -153,7 +153,7 @@ pub(super) unsafe fn delete_selected(window: HWND) -> bool {
     let Some(bounds) = removed else {
         return false;
     };
-    InvalidateRect(window, &bounds, 0);
+    invalidate(window, &bounds, 0);
     refresh_options(window);
     refresh_hint(window);
     invalidate_toolbar(window);
@@ -173,7 +173,7 @@ pub(super) unsafe fn deselect_mark(window: HWND) -> bool {
     let Some(bounds) = bounds else {
         return false;
     };
-    InvalidateRect(window, &bounds, 0);
+    invalidate(window, &bounds, 0);
     refresh_options(window);
     refresh_hint(window);
     true

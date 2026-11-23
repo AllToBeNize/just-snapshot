@@ -64,6 +64,8 @@ pub enum HintMode {
     SelectedText,
     /// A drawn shape picked up again.
     SelectedMark,
+    /// A locked area to record.
+    Record,
     EditText,
 }
 
@@ -129,6 +131,7 @@ impl HintMode {
                     (Key("Ctrl+方向键"), w!("调整大小")),
                     (Mouse(Icon::MouseLeft), w!("单击尺寸输入宽高")),
                     (Key("C"), w!("复制鼠标处颜色")),
+                    (HintInput::Bound(Binding::ShowPointer), w!("显示 / 隐藏指针")),
                     (Mouse(Icon::MouseRight), w!("返回自动框选")),
                     (Key("Esc"), w!("退出截图")),
                 ],
@@ -162,6 +165,18 @@ impl HintMode {
             ))
             .chain(toolbar())
             .collect(),
+            Self::Record => vec![(
+                w!("录像区域"),
+                vec![
+                    (Mouse(Icon::Move), w!("拖动框内移动")),
+                    (Mouse(Icon::Resize), w!("拖动边线缩放")),
+                    (Key("方向键"), w!("微调位置")),
+                    (Mouse(Icon::MouseLeft), w!("单击尺寸输入宽高")),
+                    (Key("Enter"), w!("开始录制")),
+                    (Mouse(Icon::MouseRight), w!("返回自动框选")),
+                    (Key("Esc"), w!("退出")),
+                ],
+            )],
             Self::SelectedMark => std::iter::once((
                 w!("选中的标注"),
                 vec![

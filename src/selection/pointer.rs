@@ -191,7 +191,7 @@ pub(super) unsafe fn select_screen(window: HWND) {
     });
     if let Some((old, new, canvas)) = change {
         invalidate_change(window, old, new, canvas);
-        InvalidateRect(window, &old, 0);
+        invalidate(window, &old, 0);
         hide_loupe(window);
         refresh_toolbar(window);
         refresh_hint(window);
@@ -225,7 +225,7 @@ pub(super) unsafe fn reset_automatic(window: HWND, point: POINT) {
             ReleaseCapture();
         }
         invalidate_change(window, old, new, canvas);
-        InvalidateRect(window, &old, 0);
+        invalidate(window, &old, 0);
         refresh_toolbar(window);
         refresh_hint(window);
         hide_loupe(window);
@@ -242,7 +242,9 @@ pub(super) unsafe fn update_loupe(window: HWND, point: POINT) {
             .drag
             .as_ref()
             .is_some_and(|drag| drag.started || !selection.automatic);
-        let visible = selection.annotations.tool.is_none()
+        // The recording picker shows the live screen; there is no frozen picture to magnify.
+        let visible = selection.record.is_none()
+            && selection.annotations.tool.is_none()
             && contains(selection.canvas, point)
             && (dragging || !selection.automatic && contains(selection.rect, point));
         if visible
@@ -269,7 +271,7 @@ pub(super) unsafe fn update_loupe(window: HWND, point: POINT) {
     });
     if let Some((previous, current)) = change {
         if let Some(previous) = previous {
-            InvalidateRect(window, &previous.bounds, 0);
+            invalidate(window, &previous.bounds, 0);
         } else if current.is_some() {
             let mut tracking = TRACKMOUSEEVENT {
                 cbSize: size_of::<TRACKMOUSEEVENT>() as u32,
@@ -280,7 +282,7 @@ pub(super) unsafe fn update_loupe(window: HWND, point: POINT) {
             TrackMouseEvent(&mut tracking);
         }
         if let Some(current) = current {
-            InvalidateRect(window, &current.bounds, 0);
+            invalidate(window, &current.bounds, 0);
         }
     }
 }
@@ -297,7 +299,7 @@ pub(super) unsafe fn copy_color(window: HWND) {
     let Some((bounds, color)) = picked else { return };
     match crate::output::copy_text(window, &crate::overlay_ui::hex(color)) {
         Ok(()) => {
-            InvalidateRect(window, &bounds, 0);
+            invalidate(window, &bounds, 0);
         }
         Err(error) => show_error(window, &format!("无法复制颜色。\n{error}")),
     }
@@ -310,7 +312,7 @@ pub(super) unsafe fn hide_loupe(window: HWND) {
             .and_then(|selection| selection.loupe.take())
     });
     if let Some(loupe) = loupe {
-        InvalidateRect(window, &loupe.bounds, 0);
+        invalidate(window, &loupe.bounds, 0);
     }
 }
 

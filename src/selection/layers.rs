@@ -113,7 +113,7 @@ pub(super) unsafe fn step_layer_at(window: HWND, point: POINT, larger: bool) -> 
         size_badge(new, selection.desktop.bounds, selection.canvas)
     });
     if let Some(badge) = badge {
-        InvalidateRect(window, &badge, 0);
+        invalidate(window, &badge, 0);
     }
     true
 }

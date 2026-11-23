@@ -131,7 +131,7 @@ unsafe fn invalidate_badge(window: HWND) {
         size_badge(selection.rect, selection.desktop.bounds, selection.canvas)
     });
     if let Some(badge) = badge {
-        InvalidateRect(window, &badge, 0);
+        invalidate(window, &badge, 0);
     }
 }
 
@@ -155,8 +155,8 @@ unsafe fn set_region(window: HWND, change: impl FnOnce(RECT, RECT) -> RECT, reco
     });
     if let Some((old, new, canvas)) = changed {
         invalidate_change(window, old, new, canvas);
-        InvalidateRect(window, &old, 0);
-        InvalidateRect(window, &new, 0);
+        invalidate(window, &old, 0);
+        invalidate(window, &new, 0);
         refresh_toolbar(window);
         refresh_hint(window);
         invalidate_toolbar(window);
@@ -203,7 +203,7 @@ pub(super) unsafe fn nudge(window: HWND, key: u32, modifiers: u32, repeat: bool)
     });
     if let Some(dirty) = moved_mark {
         for rect in dirty {
-            InvalidateRect(window, &rect, 0);
+            invalidate(window, &rect, 0);
         }
         invalidate_toolbar(window);
         return true;

@@ -10,14 +10,19 @@ mod credential;
 mod dialog;
 mod digest;
 mod gdiplus;
+mod gif_export;
 mod global_hotkey;
 mod hotkey;
 mod http;
 mod icons;
+mod input_overlay;
 mod mosaic;
 mod ocr;
 mod output;
 mod output_settings;
+mod panel_options;
+mod recorder;
+mod recording_ui;
 mod overlay_ui;
 mod panel_edges;
 mod pin_text;
@@ -75,6 +80,10 @@ const MENU_LAST: usize = 6;
 const MENU_PINS_SHOW: usize = 7;
 const MENU_PINS_HIDE: usize = 8;
 const MENU_PINS_CLOSE: usize = 9;
+const MENU_RECORD: usize = 10;
+const MENU_SHOW_KEYS: usize = 11;
+const MENU_SHOW_PAD: usize = 12;
+const MENU_RECORD_SCREEN: usize = 13;
 /// Menu ids for "show group N" start here.
 const MENU_GROUP: usize = 100;
 static TASKBAR_CREATED: OnceLock<u32> = OnceLock::new();
@@ -82,6 +91,10 @@ thread_local! {
     static TRAY_ICONS: Cell<[HICON; 2]> = const { Cell::new([null_mut(); 2]) };
     /// The last balloon was the shortcut conflict, so clicking it opens the settings.
     static CONFLICT_BALLOON: Cell<bool> = const { Cell::new(false) };
+    /// The tray window, which owns the global shortcuts.
+    static TRAY: Cell<HWND> = const { Cell::new(null_mut()) };
+    /// The preferences in effect, to re-register the shortcuts when recording starts or ends.
+    static PREFERENCES: Cell<Option<hotkey::Preferences>> = const { Cell::new(None) };
 }
 
 fn main() {
@@ -120,6 +133,10 @@ unsafe fn run() -> Result<(), String> {
     settings::register(instance).map_err(|error| error.to_string())?;
     translate_settings::register().map_err(|error| error.to_string())?;
     output_settings::register().map_err(|error| error.to_string())?;
+    input_overlay::register(instance).map_err(|error| error.to_string())?;
+    recording_ui::register(instance).map_err(|error| error.to_string())?;
+    // A panel that cannot be created only costs that panel, not the app.
+    let _ = input_overlay::start(instance);
     TASKBAR_CREATED.get_or_init(|| RegisterWindowMessageW(w!("TaskbarCreated")));
     let class = WNDCLASSW {
         lpfnWndProc: Some(tray_proc),
@@ -148,7 +165,9 @@ unsafe fn run() -> Result<(), String> {
         return Err(io::Error::last_os_error().to_string());
     }
 
-    let conflicts = global_hotkey::set(window, &preferences.globals());
+    TRAY.set(window);
+    PREFERENCES.set(Some(preferences));
+    let conflicts = global_hotkey::set(window, &preferences.globals(false));
     if !tray_icon(window, NIM_ADD) {
         DestroyWindow(window);
         return Err("无法创建 Snapshot 托盘图标。".into());
@@ -188,6 +207,11 @@ unsafe extern "system" fn tray_proc(
             Some(hotkey::Global::Capture) => begin_capture(window),
             Some(hotkey::Global::Window) => capture_window(window),
             Some(hotkey::Global::Last) => restore_last(window),
+            Some(hotkey::Global::Record) => toggle_record(window),
+            Some(hotkey::Global::RecordPause) => recording_ui::toggle_pause(),
+            Some(hotkey::Global::RecordScreen) => toggle_screen_record(window),
+            Some(hotkey::Global::ShowKeys) => input_overlay::toggle(input_overlay::Panel::Keys),
+            Some(hotkey::Global::ShowPad) => input_overlay::toggle(input_overlay::Panel::Pad),
             None => {}
         },
         TRAY_MESSAGE => match lparam as u32 {
@@ -311,6 +335,25 @@ unsafe fn tray_menu(window: HWND) {
     let last_item = wide(&format!("找回上次截图{}", shortcut(hotkey::Global::Last)));
     let last_flags = if selection::has_last() { MF_STRING } else { MF_STRING | MF_GRAYED };
     AppendMenuW(menu, last_flags, MENU_LAST, last_item.as_ptr());
+    let recording = recording_ui::is_recording();
+    let record_label = if recording { "停止录像" } else { "区域录像" };
+    let record_item = wide(&format!("{record_label}{}", shortcut(hotkey::Global::Record)));
+    // While the file is being saved there is nothing to start or stop.
+    let record_flags = if recording_ui::is_busy() && !recording { MF_STRING | MF_GRAYED } else { MF_STRING };
+    AppendMenuW(menu, record_flags, MENU_RECORD, record_item.as_ptr());
+    if !recording {
+        let screen_item = wide(&format!("全屏 / 游戏录像{}", shortcut(hotkey::Global::RecordScreen)));
+        AppendMenuW(menu, record_flags, MENU_RECORD_SCREEN, screen_item.as_ptr());
+    }
+    let overlay = CreatePopupMenu();
+    if !overlay.is_null() {
+        let check = |panel| if input_overlay::is_visible(panel) { MF_CHECKED } else { 0 };
+        let keys = wide(&format!("键鼠{}", shortcut(hotkey::Global::ShowKeys)));
+        let pad = wide(&format!("手柄{}", shortcut(hotkey::Global::ShowPad)));
+        AppendMenuW(overlay, MF_STRING | check(input_overlay::Panel::Keys), MENU_SHOW_KEYS, keys.as_ptr());
+        AppendMenuW(overlay, MF_STRING | check(input_overlay::Panel::Pad), MENU_SHOW_PAD, pad.as_ptr());
+        AppendMenuW(menu, MF_POPUP, overlay as usize, w!("按键显示"));
+    }
     let pins = pins_menu();
     if !pins.is_null() {
         AppendMenuW(menu, MF_POPUP, pins as usize, w!("贴图"));
@@ -337,6 +380,10 @@ unsafe fn tray_menu(window: HWND) {
         MENU_CAPTURE => begin_capture(window),
         MENU_WINDOW => capture_window(window),
         MENU_LAST => restore_last(window),
+        MENU_RECORD => toggle_record(window),
+        MENU_RECORD_SCREEN => toggle_screen_record(window),
+        MENU_SHOW_KEYS => input_overlay::toggle(input_overlay::Panel::Keys),
+        MENU_SHOW_PAD => input_overlay::toggle(input_overlay::Panel::Pad),
         MENU_PINS_SHOW => pinned::set_all_hidden(false),
         MENU_PINS_HIDE => pinned::set_all_hidden(true),
         MENU_PINS_CLOSE => pinned::close_all(),
@@ -410,6 +457,31 @@ unsafe fn capture_window(window: HWND) {
     }
 }
 
+/// One shortcut for both: stops and saves a running recording, otherwise
+/// opens the area picker for a new one. While a file is still being saved, does nothing.
+unsafe fn toggle_record(window: HWND) {
+    if recording_ui::is_recording() {
+        recording_ui::stop(false);
+        return;
+    }
+    if settings::is_recording() || recording_ui::is_busy() {
+        return;
+    }
+    if let Err(error) = selection::open_record(GetModuleHandleW(null())) {
+        show_error(window, &format!("无法开始录像。\n{error}"));
+    }
+}
+
+/// Like a game recorder: starts recording the active window's whole screen,
+/// or stops whatever recording is running.
+unsafe fn toggle_screen_record(window: HWND) {
+    if recording_ui::is_recording() {
+        recording_ui::stop(false);
+    } else if !settings::is_recording() && !recording_ui::is_busy() {
+        recording_ui::start_screen(window);
+    }
+}
+
 /// Brings back the last capture: the same frozen screen, selection and annotations.
 unsafe fn restore_last(window: HWND) {
     // Only while a shortcut is being recorded; with settings open you can still capture them.
@@ -448,12 +520,24 @@ unsafe fn apply_preferences(
     preferences.validate()?;
     startup::save_with(start_at_login, || hotkey::save(preferences))?;
     // An occupied shortcut is still saved; the tray badge reports the conflict.
-    global_hotkey::set(window, &preferences.globals());
+    PREFERENCES.set(Some(preferences));
+    global_hotkey::set(window, &preferences.globals(recording_ui::is_recording()));
     hotkey::activate(bindings);
     pinned::set_opacity_step(preferences.opacity_step);
     theme::set(preferences.theme);
     tray_icon(window, NIM_MODIFY);
     Ok(())
+}
+
+/// Takes the pause shortcut while a recording runs and gives it back after,
+/// so programs that use the same keys (IDEs, for one) keep them otherwise.
+pub unsafe fn refresh_shortcuts() {
+    let (window, Some(preferences)) = (TRAY.get(), PREFERENCES.get()) else { return };
+    if window.is_null() {
+        return;
+    }
+    global_hotkey::set(window, &preferences.globals(recording_ui::is_recording()));
+    tray_icon(window, NIM_MODIFY);
 }
 
 /// Errors use the themed dialog; the first line of `message` is its title.

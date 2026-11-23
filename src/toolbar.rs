@@ -10,7 +10,6 @@ use crate::{
     ui::{inset, to_f},
 };
 use windows_sys::{
-    core::w,
     Win32::{
         Foundation::{POINT, RECT},
         Graphics::Gdi::*,
@@ -29,7 +28,24 @@ pub enum Action {
     ExtractText,
     Translate,
     Cancel,
+    /// Recording mode: start recording the selected area.
+    Record,
+    /// Recording mode: record what the computer plays.
+    SystemAudio,
+    /// Recording mode: record the microphone.
+    Microphone,
+    /// Recording mode: show the key and mouse panel inside the area.
+    KeysPanel,
+    /// Recording mode: show the gamepad panel inside the area.
+    PadPanel,
 }
+
+/// The toolbar of the recording area picker.
+pub const RECORD_ACTIONS: [Action; 6] =
+    [Action::Record, Action::SystemAudio, Action::Microphone, Action::KeysPanel, Action::PadPanel, Action::Cancel];
+const RECORD_GROUPS: [usize; 3] = [1, 3, 5];
+/// The record toolbar's switches, in the order `paint` takes their states.
+pub const SWITCHES: [Action; 4] = [Action::SystemAudio, Action::Microphone, Action::KeysPanel, Action::PadPanel];
 
 impl Action {
     pub fn from_binding(binding: Binding) -> Option<Self> {
@@ -51,7 +67,14 @@ impl Action {
             Binding::Number => Self::Tool(Tool::Number),
             Binding::Magnify => Self::Tool(Tool::Magnify),
             Binding::Select => Self::Tool(Tool::Select),
-            Binding::CaptureWindow | Binding::LastCapture => return None,
+            Binding::CaptureWindow
+            | Binding::LastCapture
+            | Binding::Record
+            | Binding::RecordPause
+            | Binding::RecordScreen
+            | Binding::ShowPointer
+            | Binding::ShowKeys
+            | Binding::ShowPad => return None,
         })
     }
 
@@ -74,17 +97,34 @@ impl Action {
             Self::Pin => Binding::Pin,
             Self::ExtractText => Binding::ExtractText,
             Self::Translate => Binding::Translate,
-            Self::Cancel => return None,
+            Self::Cancel | Self::Record | Self::SystemAudio | Self::Microphone | Self::KeysPanel | Self::PadPanel => return None,
         })
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Record => "开始录制",
+            Self::SystemAudio => "录制系统声音",
+            Self::Microphone => "录制麦克风",
+            Self::KeysPanel => "显示键鼠",
+            Self::PadPanel => "显示手柄",
+            _ => {
+                let index = ACTIONS.iter().position(|&candidate| candidate == self).unwrap_or(0);
+                LABEL_TEXT[index]
+            }
+        }
     }
 
     /// "矩形  Ctrl+1": the name and its current shortcut.
     pub fn tip(self) -> String {
-        let index = ACTIONS.iter().position(|&candidate| candidate == self).unwrap_or(0);
-        let name = unsafe { String::from_utf16_lossy(std::slice::from_raw_parts(LABELS[index], wide_len(LABELS[index]))) };
-        let key = match self.binding() {
-            Some(binding) => crate::hotkey::current().get(binding).label(),
-            None => "Esc".into(),
+        let name = self.label();
+        let key = match self {
+            Self::Record => "Enter".into(),
+            Self::SystemAudio | Self::Microphone | Self::KeysPanel | Self::PadPanel => "单击开 / 关".into(),
+            _ => match self.binding() {
+                Some(binding) => crate::hotkey::current().get(binding).label(),
+                None => "Esc".into(),
+            },
         };
         format!("{name}  {key}")
     }
@@ -118,24 +158,24 @@ pub const ACTIONS: [Action; 17] = [
     Action::Cancel,
     Action::Copy,
 ];
-const LABELS: [*const u16; ACTIONS.len()] = [
-    w!("矩形"),
-    w!("文本"),
-    w!("画笔"),
-    w!("马赛克"),
-    w!("箭头"),
-    w!("序号"),
-    w!("放大镜"),
-    w!("选择"),
-    w!("撤回"),
-    w!("重做"),
-    w!("提取文本"),
-    w!("翻译"),
-    w!("长截图"),
-    w!("贴图"),
-    w!("保存"),
-    w!("退出"),
-    w!("复制"),
+const LABEL_TEXT: [&str; ACTIONS.len()] = [
+    "矩形",
+    "文本",
+    "画笔",
+    "马赛克",
+    "箭头",
+    "序号",
+    "放大镜",
+    "选择",
+    "撤回",
+    "重做",
+    "提取文本",
+    "翻译",
+    "长截图",
+    "贴图",
+    "保存",
+    "退出",
+    "复制",
 ];
 /// Indexes of the first button in every group after the first.
 const GROUP_STARTS: [usize; 3] = [8, 10, 12];
@@ -155,16 +195,41 @@ pub struct Toolbar {
     pub bounds: RECT,
     cell: i32,
     area: RECT,
+    /// The recording area picker's short toolbar.
+    record: bool,
 }
 
 impl Toolbar {
+    /// The monitor area the toolbar keeps inside.
+    pub fn area(self) -> RECT {
+        self.area
+    }
+
     pub fn options(self, tool: Tool, selection: RECT) -> Option<Options> {
         Options::new(tool, self.bounds, self.area, selection)
     }
 
+    fn actions(self) -> &'static [Action] {
+        if self.record { &RECORD_ACTIONS } else { &ACTIONS }
+    }
+
+    fn groups(self) -> &'static [usize] {
+        if self.record { &RECORD_GROUPS } else { &GROUP_STARTS }
+    }
+
     pub fn new(selection: RECT, area: RECT) -> Option<Self> {
-        let spacing = GROUP_GAP * GROUP_STARTS.len() as i32 + PADDING * 2;
-        let count = ACTIONS.len() as i32;
+        Self::with(selection, area, false)
+    }
+
+    /// The toolbar for picking a recording area.
+    pub fn recording(selection: RECT, area: RECT) -> Option<Self> {
+        Self::with(selection, area, true)
+    }
+
+    fn with(selection: RECT, area: RECT, record: bool) -> Option<Self> {
+        let probe = Self { bounds: RECT::default(), cell: 0, area, record };
+        let spacing = GROUP_GAP * probe.groups().len() as i32 + PADDING * 2;
+        let count = probe.actions().len() as i32;
         let cell = ((area.right - area.left - spacing) / count).min(MAX_CELL);
         if cell < 12 || area.bottom - area.top < HEIGHT {
             return None;
@@ -191,11 +256,12 @@ impl Toolbar {
             },
             cell,
             area,
+            record,
         })
     }
 
     fn button(self, index: usize) -> RECT {
-        let groups = GROUP_STARTS.iter().filter(|&&start| index >= start).count() as i32;
+        let groups = self.groups().iter().filter(|&&start| index >= start).count() as i32;
         let left = self.bounds.left + PADDING + index as i32 * self.cell + groups * GROUP_GAP;
         RECT {
             left,
@@ -206,14 +272,15 @@ impl Toolbar {
     }
 
     pub fn hit(self, point: POINT) -> Option<Action> {
-        ACTIONS
+        self.actions()
             .iter()
             .copied()
             .enumerate()
             .find_map(|(index, action)| contains(self.button(index), point).then_some(action))
     }
 
-    pub unsafe fn paint(self, dc: HDC, history: &History, hovered: Option<Action>) {
+    /// `switches` is whether each of `SWITCHES` is on, for the recording toolbar.
+    pub unsafe fn paint(self, dc: HDC, history: &History, hovered: Option<Action>, switches: [bool; 4]) {
         let saved = SaveDC(dc);
         if saved == 0 {
             return;
@@ -221,7 +288,7 @@ impl Toolbar {
         paint_panel(dc, self.bounds);
 
         SetDCBrushColor(dc, theme::palette().divider);
-        for start in GROUP_STARTS {
+        for &start in self.groups() {
             let divider = self.button(start - 1).right + 1 + GROUP_GAP / 2;
             let line = RECT {
                 left: divider,
@@ -232,11 +299,12 @@ impl Toolbar {
             FillRect(dc, &line, GetStockObject(DC_BRUSH));
         }
 
-        for (index, action) in ACTIONS.iter().enumerate() {
+        for (index, action) in self.actions().iter().enumerate() {
             let rect = self.button(index);
-            let selected = history
-                .tool
-                .is_some_and(|tool| *action == Action::Tool(tool));
+            let selected = match SWITCHES.iter().position(|switch| switch == action) {
+                Some(index) => switches[index],
+                None => history.tool.is_some_and(|tool| *action == Action::Tool(tool)),
+            };
             paint_button(
                 dc,
                 rect,
@@ -250,7 +318,7 @@ impl Toolbar {
     }
 
     pub fn tooltip(self, action: Action) -> Option<(RECT, Vec<u16>)> {
-        let index = ACTIONS.iter().position(|&candidate| candidate == action)?;
+        let index = self.actions().iter().position(|&candidate| candidate == action)?;
         let button = self.button(index);
         let label = crate::wide(&action.tip());
         let width = unsafe { measure_tip(&label) } + 22;
@@ -275,11 +343,6 @@ impl Toolbar {
             label,
         ))
     }
-}
-
-/// Length of a NUL-terminated UTF-16 string.
-unsafe fn wide_len(text: *const u16) -> usize {
-    (0..).take_while(|&index| *text.add(index) != 0).count()
 }
 
 /// Width of a tooltip label in the tooltip font, at least wide enough for a short name.
@@ -334,6 +397,8 @@ pub unsafe fn paint_button(
         (true, true, _) => (Some(palette.accent_soft), palette.accent),
         (true, false, true) => (Some(palette.hover), palette.text),
         (true, false, false) if action == Action::Copy => (None, palette.accent),
+        // The record button is red, like every record button.
+        (true, false, false) if action == Action::Record => (None, 0x0040_40e8),
         (true, false, false) => (None, palette.icon),
     };
     if let Some(background) = background {
@@ -431,6 +496,11 @@ fn action_icon(action: Action) -> Icon {
         Action::ExtractText => Icon::ExtractText,
         Action::Translate => Icon::Translate,
         Action::Cancel => Icon::Close,
+        Action::Record => Icon::Record,
+        Action::SystemAudio => Icon::Sound,
+        Action::Microphone => Icon::Microphone,
+        Action::KeysPanel => Icon::Keyboard,
+        Action::PadPanel => Icon::Gamepad,
     }
 }
 
@@ -486,7 +556,7 @@ mod tests {
             .is_none());
         unsafe {
             let surface = Surface::new(null_mut(), area.right, area.bottom).unwrap();
-            toolbar.paint(surface.dc, &History::default(), hovered);
+            toolbar.paint(surface.dc, &History::default(), hovered, [false; 4]);
             let palette = theme::palette();
             assert_eq!(GetPixel(surface.dc, point.x, point.y + 6), palette.hover);
             assert_eq!(
@@ -542,7 +612,7 @@ mod tests {
                 let toolbar = Toolbar::new(selection, area).unwrap();
                 let mut history = History::default();
                 history.tool = Some(Tool::Brush);
-                toolbar.paint(surface.dc, &history, Some(Action::Save));
+                toolbar.paint(surface.dc, &history, Some(Action::Save), [false; 4]);
                 if let Some((bounds, label)) = toolbar.tooltip(Action::Save) {
                     paint_tooltip(surface.dc, bounds, label.as_ptr());
                 }

@@ -42,7 +42,7 @@ pub(super) unsafe fn begin_text_drag(window: HWND, point: POINT, double: bool) -
         return false;
     };
     for rect in previous.into_iter().chain([bounds]) {
-        InvalidateRect(window, &rect, 0);
+        invalidate(window, &rect, 0);
     }
     refresh_options(window);
     refresh_hint(window);
@@ -105,7 +105,7 @@ pub(super) unsafe fn begin_editor_drag(window: HWND, point: POINT) -> bool {
     KillTimer(window, TEXT_CARET_TIMER);
     ShowWindow(editor, SW_HIDE);
     SetFocus(window);
-    InvalidateRect(window, &bounds, 0);
+    invalidate(window, &bounds, 0);
     refresh_options(window);
     SetCursor(LoadCursorW(null_mut(), handle_cursor(handle, frame_angle)));
     true
@@ -161,7 +161,7 @@ pub(super) unsafe fn update_text_drag(window: HWND, point: POINT, end: bool) -> 
     });
     if let Some((dirty, editing)) = changed {
         for rect in dirty {
-            InvalidateRect(window, &rect, 0);
+            invalidate(window, &rect, 0);
         }
         if end {
             ReleaseCapture();
@@ -193,7 +193,7 @@ pub(super) unsafe fn cancel_text_drag(window: HWND) {
     });
     if let Some((dirty, editing)) = changed {
         for rect in dirty {
-            InvalidateRect(window, &rect, 0);
+            invalidate(window, &rect, 0);
         }
         refresh_options(window);
         invalidate_toolbar(window);
@@ -258,8 +258,8 @@ pub(super) unsafe fn open_text(window: HWND, index: Option<usize>, text: TextMar
     ShowWindow(editor, SW_SHOW);
     SetFocus(editor);
     SetCursor(LoadCursorW(null_mut(), IDC_IBEAM));
-    InvalidateRect(window, &bounds, 0);
-    InvalidateRect(window, &frame, 0);
+    invalidate(window, &bounds, 0);
+    invalidate(window, &frame, 0);
     refresh_options(window);
     refresh_hint(window);
 }
@@ -321,9 +321,9 @@ pub(super) unsafe fn resume_editor(window: HWND) {
     start_text_caret(window, editor);
     ShowWindow(editor, SW_SHOW);
     SetFocus(editor);
-    InvalidateRect(editor, null(), 1);
-    InvalidateRect(window, &previous, 0);
-    InvalidateRect(window, &current, 0);
+    invalidate(editor, null(), 1);
+    invalidate(window, &previous, 0);
+    invalidate(window, &current, 0);
     update_cursor_at_pointer(window);
 }
 
@@ -378,7 +378,7 @@ pub(super) unsafe fn invalidate_text_selection(window: HWND) {
     if let Some(rect) =
         SESSION.with_borrow(|session| session.as_ref().map(|selection| selection.rect))
     {
-        InvalidateRect(window, &rect, 0);
+        invalidate(window, &rect, 0);
     }
 }
 
@@ -398,7 +398,7 @@ pub(super) unsafe fn invalidate_text_input(window: HWND, input: HWND) {
         Some(editor.frame().bounds())
     });
     if let Some(bounds) = bounds {
-        InvalidateRect(window, &bounds, 0);
+        invalidate(window, &bounds, 0);
     }
 }
 
@@ -679,7 +679,7 @@ pub(super) unsafe fn finish_text(window: HWND, save: bool) {
     .into_iter()
     .flatten()
     {
-        InvalidateRect(window, &rect, 0);
+        invalidate(window, &rect, 0);
     }
     invalidate_text_selection(window);
     refresh_options(window);

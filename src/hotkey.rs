@@ -37,6 +37,18 @@ pub enum Binding {
     CaptureWindow,
     /// Global: bring back the last capture with its annotations.
     LastCapture,
+    /// In the capture: show or hide the mouse pointer in the picture.
+    ShowPointer,
+    /// Global: pick an area and record it; while recording, stop and save.
+    Record,
+    /// Global, registered only while recording: pause or resume.
+    RecordPause,
+    /// Global: record the whole screen the active window (a game) is on; again to stop.
+    RecordScreen,
+    /// Global: show or hide the key and mouse panel.
+    ShowKeys,
+    /// Global: show or hide the gamepad panel.
+    ShowPad,
 }
 
 /// What a global shortcut does.
@@ -45,10 +57,15 @@ pub enum Global {
     Capture,
     Window,
     Last,
+    Record,
+    RecordPause,
+    RecordScreen,
+    ShowKeys,
+    ShowPad,
 }
 
 /// In toolbar order, so the settings list reads like the toolbar.
-pub const BINDINGS: [Binding; 19] = [
+pub const BINDINGS: [Binding; 25] = [
     Binding::Capture,
     Binding::Rectangle,
     Binding::Text,
@@ -68,6 +85,12 @@ pub const BINDINGS: [Binding; 19] = [
     Binding::Copy,
     Binding::CaptureWindow,
     Binding::LastCapture,
+    Binding::ShowPointer,
+    Binding::Record,
+    Binding::RecordPause,
+    Binding::RecordScreen,
+    Binding::ShowKeys,
+    Binding::ShowPad,
 ];
 const NAMES: [&str; BINDINGS.len()] = [
     "capture",
@@ -89,6 +112,12 @@ const NAMES: [&str; BINDINGS.len()] = [
     "copy",
     "capture_window",
     "last_capture",
+    "show_pointer",
+    "record",
+    "record_pause",
+    "record_screen",
+    "show_keys",
+    "show_pad",
 ];
 const LABELS: [&str; BINDINGS.len()] = [
     "开始截图（全局）",
@@ -110,6 +139,12 @@ const LABELS: [&str; BINDINGS.len()] = [
     "复制",
     "截取窗口",
     "上次截图",
+    "显示 / 隐藏指针",
+    "开始 / 停止录像",
+    "暂停 / 继续",
+    "全屏 / 游戏录像",
+    "键鼠显示",
+    "手柄显示",
 ];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -187,7 +222,25 @@ pub const DEFAULT: Bindings = Bindings([
         modifiers: MOD_CONTROL | MOD_ALT,
         key: b'R' as u32,
     },
+    // A single key: it only works inside the capture, never system-wide.
+    Shortcut { modifiers: 0, key: b'P' as u32 },
+    ctrl_alt(b'Z'),
+    ctrl_alt(b'P'),
+    // Alt+F8, next to the Alt+F9 game recorders use.
+    Shortcut {
+        modifiers: MOD_ALT,
+        key: VK_F8 as u32,
+    },
+    ctrl_alt(b'K'),
+    ctrl_alt(b'G'),
 ]);
+
+const fn ctrl_alt(key: u8) -> Shortcut {
+    Shortcut {
+        modifiers: MOD_CONTROL | MOD_ALT,
+        key: key as u32,
+    }
+}
 
 /// Defaults before the layout above (files without `layout=2`). A binding
 /// still on its old default moves to the new one.
@@ -228,12 +281,23 @@ impl Binding {
         LABELS[self as usize]
     }
 
+    /// May be a single letter or digit with no modifier. Only for keys used
+    /// inside the capture; a global one would take the letter from every program.
+    pub fn allows_single_key(self) -> bool {
+        self == Self::ShowPointer
+    }
+
     /// Registered with Windows, so it works in any program.
     pub fn global(self) -> Option<Global> {
         match self {
             Self::Capture => Some(Global::Capture),
             Self::CaptureWindow => Some(Global::Window),
             Self::LastCapture => Some(Global::Last),
+            Self::Record => Some(Global::Record),
+            Self::RecordPause => Some(Global::RecordPause),
+            Self::RecordScreen => Some(Global::RecordScreen),
+            Self::ShowKeys => Some(Global::ShowKeys),
+            Self::ShowPad => Some(Global::ShowPad),
             _ => None,
         }
     }
@@ -294,6 +358,20 @@ impl Shortcut {
         let alphanumeric =
             u8::try_from(key).is_ok_and(|key| key.is_ascii_uppercase() || key.is_ascii_digit());
         (function_key || (modifiers != 0 && alphanumeric)).then_some(Self { modifiers, key })
+    }
+
+    /// Like `parse`, also taking a lone letter or digit where `binding` allows it.
+    pub fn parse_for(binding: Binding, value: &str) -> Option<Self> {
+        Self::parse(value).or_else(|| Self::single(binding, value.trim()))
+    }
+
+    /// A lone letter or digit for a binding that allows one.
+    pub fn single(binding: Binding, value: &str) -> Option<Self> {
+        let key = match value.to_ascii_uppercase().as_bytes() {
+            [key @ (b'A'..=b'Z' | b'0'..=b'9')] => u32::from(*key),
+            _ => return None,
+        };
+        binding.allows_single_key().then_some(Self { modifiers: 0, key })
     }
 
     pub fn parse(value: &str) -> Option<Self> {
@@ -408,7 +486,7 @@ fn load_from(path: &Path) -> Result<Preferences, String> {
                     // An unknown theme falls back to the default instead of failing startup.
                     theme = Theme::parse(value).unwrap_or_default();
                 } else if let Some(index) = NAMES.iter().position(|&key| key == name) {
-                    let shortcut = Shortcut::parse(value).ok_or_else(|| format!("快捷键格式有误：{line}"))?;
+                    let shortcut = Shortcut::parse_for(BINDINGS[index], value).ok_or_else(|| format!("快捷键格式有误：{line}"))?;
                     bindings.set(BINDINGS[index], shortcut);
                     stored.push((index, shortcut));
                 }
@@ -483,14 +561,17 @@ fn load_from(path: &Path) -> Result<Preferences, String> {
 
 impl Preferences {
     /// The global shortcuts: the main capture key, the optional second one,
-    /// then capturing the active window and bringing back the last capture.
-    pub fn globals(&self) -> Vec<(Shortcut, Global)> {
+    /// then every other global binding. The pause key is only taken while
+    /// `recording`, so other programs keep it the rest of the time.
+    pub fn globals(&self, recording: bool) -> Vec<(Shortcut, Global)> {
         std::iter::once((self.bindings.get(Binding::Capture), Global::Capture))
             .chain(self.capture_secondary.map(|shortcut| (shortcut, Global::Capture)))
-            .chain([
-                (self.bindings.get(Binding::CaptureWindow), Global::Window),
-                (self.bindings.get(Binding::LastCapture), Global::Last),
-            ])
+            .chain(
+                BINDINGS[1..]
+                    .iter()
+                    .filter(|&&binding| recording || binding != Binding::RecordPause)
+                    .filter_map(|&binding| Some((self.bindings.get(binding), binding.global()?))),
+            )
             .collect()
     }
 
@@ -563,6 +644,9 @@ mod tests {
             "Ctrl+Shift+F10"
         );
         assert_eq!(Shortcut::parse("F1").unwrap().label(), "F1");
+        assert_eq!(DEFAULT.get(Binding::ShowPointer).label(), "P", "the pointer key is a single key");
+        assert_eq!(Shortcut::parse_for(Binding::ShowPointer, "m"), Some(Shortcut { modifiers: 0, key: u32::from(b'M') }));
+        assert_eq!(Shortcut::parse_for(Binding::Capture, "M"), None, "global keys need a modifier");
         for value in [
             "9",
             "Ctrl+Ctrl+9",
@@ -652,7 +736,8 @@ mod tests {
         preferences.opacity_step = 10;
         preferences.theme = Theme::Midnight;
         preferences.capture_secondary = Shortcut::parse("F1");
-        assert_eq!(preferences.globals().len(), 4);
+        assert_eq!(preferences.globals(false).len(), 8);
+        assert_eq!(preferences.globals(true).len(), 9, "the pause key only while recording");
         save_to(&file, preferences).unwrap();
         assert_eq!(load_from(&file).unwrap(), preferences);
         save_to(&file, Preferences::default()).unwrap();

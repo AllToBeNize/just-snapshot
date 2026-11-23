@@ -26,9 +26,9 @@ pub(super) unsafe fn begin_annotation(window: HWND, point: POINT) -> bool {
         Some((dirty, previous))
     });
     if let Some((dirty, previous)) = started {
-        InvalidateRect(window, &dirty, 0);
+        invalidate(window, &dirty, 0);
         if let Some(previous) = previous {
-            InvalidateRect(window, &previous, 0);
+            invalidate(window, &previous, 0);
             refresh_options(window);
             refresh_hint(window);
         }
@@ -47,7 +47,7 @@ pub(super) unsafe fn update_annotation(window: HWND, point: POINT, end: bool) ->
     let Some((dirty, clip, style, finished)) = change else {
         return false;
     };
-    InvalidateRect(window, &dirty, 0);
+    invalidate(window, &dirty, 0);
     if let Some(draft) = finished {
         ReleaseCapture();
         if draft.tool == Tool::Text {
@@ -67,7 +67,7 @@ pub(super) unsafe fn update_annotation(window: HWND, point: POINT, end: bool) ->
             });
             // A lens appears away from where it was dragged.
             if let Some(bounds) = added {
-                InvalidateRect(window, &bounds, 0);
+                invalidate(window, &bounds, 0);
             }
         }
         invalidate_toolbar(window);
@@ -99,7 +99,7 @@ pub(super) unsafe fn leave_tool(window: HWND, point: POINT) -> bool {
             ReleaseCapture();
         }
         for rect in [Some(rect), frame].into_iter().flatten() {
-            InvalidateRect(window, &rect, 0);
+            invalidate(window, &rect, 0);
         }
         refresh_options(window);
         refresh_hint(window);
