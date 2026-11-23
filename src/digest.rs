@@ -1,4 +1,4 @@
-//! MD5 and SHA-256 from Windows CNG, for request signatures.
+//! MD5 and SHA-256 from Windows CNG, for request signatures and update checks.
 
 use windows_sys::Win32::Security::Cryptography::{
     BCryptHash, BCRYPT_ALG_HANDLE, BCRYPT_MD5_ALG_HANDLE, BCRYPT_SHA256_ALG_HANDLE,
@@ -27,6 +27,28 @@ pub fn md5(input: &str) -> String {
 
 pub fn sha256(input: &str) -> String {
     hash::<32>(BCRYPT_SHA256_ALG_HANDLE, input.as_bytes())
+}
+
+/// SHA-256 of raw bytes, as bytes.
+pub fn sha256_bytes(input: &[u8]) -> [u8; 32] {
+    let mut output = [0u8; 32];
+    let status = unsafe {
+        BCryptHash(
+            BCRYPT_SHA256_ALG_HANDLE,
+            std::ptr::null(),
+            0,
+            input.as_ptr(),
+            input.len() as u32,
+            output.as_mut_ptr(),
+            32,
+        )
+    };
+    assert_eq!(status, 0, "BCryptHash failed: {status:#x}");
+    output
+}
+
+pub fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 #[cfg(test)]

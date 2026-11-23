@@ -4,10 +4,14 @@
 
 use std::{
     ffi::OsString,
+    fs::{self, OpenOptions},
     mem::size_of,
     os::windows::ffi::{OsStrExt, OsStringExt},
-    path::PathBuf,
+    path::{Path, PathBuf},
+    ptr::null_mut,
     slice,
+    sync::Mutex,
+    thread::{self, JoinHandle},
 };
 use windows_sys::{
     core::w,
@@ -32,9 +36,15 @@ use windows_sys::Win32::{Foundation::SYSTEMTIME, System::SystemInformation::GetL
 
 use crate::{
     capture::{bitmap_header, Image, BYTES_PER_PIXEL},
+    dialog,
     output_settings::{self, OutputConfig},
-    pinned,
+    pinned, theme,
 };
+
+/// PNG files still being written. Encoding a long capture takes seconds, so
+/// files are written in the background and the capture closes at once; the
+/// app waits for them before it exits.
+static WRITERS: Mutex<Vec<JoinHandle<()>>> = Mutex::new(Vec::new());
 
 const CF_DIB: u32 = 8;
 const CF_UNICODETEXT: u32 = 13;
@@ -60,11 +70,16 @@ pub unsafe fn deliver(window: HWND, image: &Image, target: Target) -> Result<boo
     let config = OutputConfig::load().unwrap_or_default();
     let result = match target {
         Target::Copy => copy_image(window, image).map(|()| true),
-        Target::Save if config.auto_save => save_to_folder(image, &config).map(|_| true),
+        Target::Save if config.auto_save => {
+            save_to_folder(image, &config, "无法保存图片。").map(|_| true)
+        }
         Target::Save => {
             let name = config.file_name(image.width, image.height);
             match save_path(window, &name, &config.folder())? {
-                Some(path) => save_file(image, &config, &path).map(|()| true),
+                Some(path) => {
+                    save_later(image, &config, path, "无法保存图片。");
+                    Ok(true)
+                }
                 None => Ok(false),
             }
         }
@@ -85,25 +100,69 @@ pub unsafe fn deliver(window: HWND, image: &Image, target: Target) -> Result<boo
         Target::Pin(_) | Target::TextPin(_) | Target::TranslatePin(_) => format!("无法贴图。\n{error}"),
     })?;
     if delivered && config.auto_save && !matches!(target, Target::Save) {
-        save_to_folder(image, &config).map_err(|error| {
-            let done = if matches!(target, Target::Copy) { "复制" } else { "贴到屏幕上" };
-            format!("截图已经{done}，但没能自动保存。\n{error}")
-        })?;
+        let failure = if matches!(target, Target::Copy) {
+            "截图已经复制，但没能自动保存。"
+        } else {
+            "截图已经贴到屏幕上，但没能自动保存。"
+        };
+        save_to_folder(image, &config, failure).map_err(|error| format!("{failure}\n{error}"))?;
     }
     Ok(delivered)
 }
 
-/// Writes the capture to the save folder under a free name.
-pub fn save_to_folder(image: &Image, config: &OutputConfig) -> Result<PathBuf, String> {
+/// Saves the capture into the save folder under a free name, in the
+/// background. The name is taken right away by creating the empty file, so
+/// two quick saves never pick the same one.
+fn save_to_folder(image: &Image, config: &OutputConfig, failure: &'static str) -> Result<PathBuf, String> {
     let folder = config.folder();
-    std::fs::create_dir_all(&folder).map_err(|error| format!("无法创建保存位置 {}。\n{error}", folder.display()))?;
-    let path = output_settings::unique_path(&folder, &config.file_name(image.width, image.height));
-    save_file(image, config, &path)?;
+    fs::create_dir_all(&folder).map_err(|error| format!("无法创建保存位置 {}。\n{error}", folder.display()))?;
+    let name = config.file_name(image.width, image.height);
+    let path = loop {
+        let path = output_settings::unique_path(&folder, &name);
+        match OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(_) => break path,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(format!("{}\n{error}", path.display())),
+        }
+    };
+    save_later(image, config, path.clone(), failure);
     Ok(path)
 }
 
+/// Encodes and writes `path` on a worker thread; a failure removes the
+/// unfinished file and shows `failure` with the reason.
+fn save_later(image: &Image, config: &OutputConfig, path: PathBuf, failure: &'static str) {
+    let image = image.clone();
+    let config = config.clone();
+    let theme = theme::current();
+    let work = move || {
+        if let Err(error) = save_file(&image, &config, &path) {
+            let _ = fs::remove_file(&path);
+            theme::set(theme);
+            unsafe { dialog::show(null_mut(), dialog::Kind::Error, &format!("{failure}\n{error}")) };
+        }
+    };
+    let mut writers = WRITERS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    writers.retain(|writer| !writer.is_finished());
+    match thread::Builder::new().name("snapshot-save".into()).spawn(work) {
+        Ok(writer) => writers.push(writer),
+        Err(error) => {
+            drop(writers);
+            unsafe { dialog::show(null_mut(), dialog::Kind::Error, &format!("{failure}\n{error}")) };
+        }
+    }
+}
+
+/// Blocks until every background save has finished; called before exiting.
+pub fn wait_for_saves() {
+    let writers = std::mem::take(&mut *WRITERS.lock().unwrap_or_else(|poisoned| poisoned.into_inner()));
+    for writer in writers {
+        let _ = writer.join();
+    }
+}
+
 /// Saves as PNG, with the shadow and border the settings ask for.
-fn save_file(image: &Image, config: &OutputConfig, path: &std::path::Path) -> Result<(), String> {
+fn save_file(image: &Image, config: &OutputConfig, path: &Path) -> Result<(), String> {
     let result = if config.decorates() {
         output_settings::decorate(image, config.shadow, config.border).save_png_alpha(path)
     } else {
@@ -125,7 +184,7 @@ fn save_file(image: &Image, config: &OutputConfig, path: &std::path::Path) -> Re
 /// the bitmap formats, not virtual files.
 pub fn copy_image(owner: HWND, image: &Image) -> Result<(), String> {
     let mut png = Vec::new();
-    let png = image.write_png(&mut png).ok().map(|()| png);
+    let png = image.write_png_fast(&mut png).ok().map(|()| png);
     let format = unsafe { RegisterClipboardFormatW(w!("PNG")) };
     let mut items = vec![(CF_DIB, opaque_dib(image))];
     if let (Some(png), true) = (png, format != 0) {
@@ -297,6 +356,60 @@ unsafe fn save_path(window: HWND, default_name: &str, folder: &std::path::Path) 
 mod tests {
     use super::*;
 
+    /// Where a long-capture copy spends its time:
+    /// `SNAPSHOT_PROFILE_IMAGE=<png> <test binary> profile_copy --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn profile_copy() {
+        use std::time::Instant;
+        let path = std::env::var("SNAPSHOT_PROFILE_IMAGE").unwrap();
+        let decoder = png::Decoder::new(std::io::BufReader::new(std::fs::File::open(path).unwrap()));
+        let mut reader = decoder.read_info().unwrap();
+        let mut rgba = vec![0; reader.output_buffer_size().unwrap()];
+        let info = reader.next_frame(&mut rgba).unwrap();
+        let pixels: Vec<u8> = rgba[..info.buffer_size()]
+            .chunks_exact(4)
+            .flat_map(|p| [p[2], p[1], p[0], 0])
+            .collect();
+        for repeat in [1, 4] {
+            let image = Image {
+                width: info.width as i32,
+                height: info.height as i32 * repeat,
+                pixels: pixels.repeat(repeat as usize),
+            };
+            let started = Instant::now();
+            let mut encoded = Vec::new();
+            image.write_png(&mut encoded).unwrap();
+            let png_time = started.elapsed();
+            for compression in [png::Compression::Balanced, png::Compression::Fast, png::Compression::Fastest] {
+                let started = Instant::now();
+                let mut out = Vec::new();
+                let mut encoder = png::Encoder::new(&mut out, image.width as u32, image.height as u32);
+                encoder.set_color(png::ColorType::Rgba);
+                encoder.set_compression(compression);
+                let mut writer = encoder.write_header().unwrap();
+                let rgba: Vec<u8> = image.pixels.chunks_exact(4).flat_map(|p| [p[2], p[1], p[0], 255]).collect();
+                writer.write_image_data(&rgba).unwrap();
+                writer.finish().unwrap();
+                println!("    {compression:?}: {:?}, {} KB", started.elapsed(), out.len() / 1024);
+            }
+            let started = Instant::now();
+            let dib = opaque_dib(&image);
+            let dib_time = started.elapsed();
+            let started = Instant::now();
+            let copied = copy_image(std::ptr::null_mut(), &image);
+            println!(
+                "{}x{}: png {png_time:?} ({} KB), dib {dib_time:?} ({} KB), copy_image {:?} {:?}",
+                image.width,
+                image.height,
+                encoded.len() / 1024,
+                dib.len() / 1024,
+                started.elapsed(),
+                copied.is_ok()
+            );
+        }
+    }
+
     #[test]
     fn clipboard_dib_is_opaque_and_bottom_up() {
         // A 1×2 GDI capture: alpha is 0, rows are top-down.
@@ -313,6 +426,32 @@ mod tests {
         let mut png = Vec::new();
         image.write_png(&mut png).unwrap();
         assert_eq!(&png[1..4], b"PNG");
+    }
+
+    #[test]
+    fn quick_saves_get_their_own_files_and_finish_in_the_background() {
+        let folder = std::env::temp_dir().join(format!("snapshot-save-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&folder);
+        let config = OutputConfig {
+            folder: folder.display().to_string(),
+            template: "same name".into(),
+            ..OutputConfig::default()
+        };
+        let image = Image {
+            width: 64,
+            height: 2000,
+            pixels: (0..64 * 2000 * 4).map(|i| (i * 7 % 251) as u8).collect(),
+        };
+        let first = save_to_folder(&image, &config, "无法保存图片。").unwrap();
+        let second = save_to_folder(&image, &config, "无法保存图片。").unwrap();
+        assert_ne!(first, second, "the second save must not reuse the reserved name");
+        wait_for_saves();
+        for path in [&first, &second] {
+            let decoder = png::Decoder::new(std::io::BufReader::new(fs::File::open(path).unwrap()));
+            let info = decoder.read_info().unwrap();
+            assert_eq!((info.info().width, info.info().height), (64, 2000));
+        }
+        fs::remove_dir_all(&folder).unwrap();
     }
 
     #[test]

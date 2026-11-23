@@ -24,12 +24,14 @@ mod output_settings;
 mod panel_options;
 mod recorder;
 mod recording_ui;
+mod release_key;
 mod overlay_ui;
 mod panel_edges;
 mod pin_text;
 mod pin_translate;
 mod pinned;
 mod scroll_capture;
+mod scroll_dump;
 mod scroll_input;
 mod scroll_stitch;
 mod selection;
@@ -46,6 +48,8 @@ mod translate_overlay;
 mod translate_settings;
 mod typography;
 mod ui;
+mod update;
+mod update_ui;
 
 use std::{
     cell::Cell,
@@ -85,6 +89,11 @@ const MENU_RECORD: usize = 10;
 const MENU_SHOW_KEYS: usize = 11;
 const MENU_SHOW_PAD: usize = 12;
 const MENU_RECORD_SCREEN: usize = 13;
+const MENU_CHECK_UPDATE: usize = 14;
+/// The automatic update check, a while after start-up so it does not
+/// compete with everything else that starts at login.
+const UPDATE_TIMER: usize = 1;
+const UPDATE_DELAY_MS: u32 = 30_000;
 /// Menu ids for "show group N" start here.
 const MENU_GROUP: usize = 100;
 static TASKBAR_CREATED: OnceLock<u32> = OnceLock::new();
@@ -99,19 +108,67 @@ thread_local! {
 }
 
 fn main() {
-    if let Err(error) = unsafe { run() } {
+    let args: Vec<String> = std::env::args().collect();
+    if let Some(code) = release_command(&args) {
+        std::process::exit(code);
+    }
+    if let Err(error) = unsafe { run(&args) } {
         unsafe { show_error(null_mut(), &error) };
         std::process::exit(1);
     }
 }
 
-unsafe fn run() -> Result<(), String> {
+/// Publishing helpers for `snapshot.ps1`, which runs them on the machine
+/// that holds the release key. The app is a GUI program without a console,
+/// so results and errors go to the file named last.
+///
+/// - `--release-key-new <id> <public key file>`
+/// - `--release-sign <id> <payload file> <latest.json>`
+fn release_command(args: &[String]) -> Option<i32> {
+    let result = match args.get(1).map(String::as_str) {
+        Some("--release-key-new") if args.len() == 4 => {
+            release_key::create(&args[2]).map(|public| (args[3].clone(), public))
+        }
+        Some("--release-sign") if args.len() == 5 => std::fs::read(&args[3])
+            .map_err(|error| format!("无法读取 {}：{error}", args[3]))
+            .and_then(|payload| {
+                let signed = String::from_utf8(payload).map_err(|_| "更新信息必须是 UTF-8".to_string())?;
+                let signature = release_key::sign(&args[2], signed.as_bytes())?;
+                Ok(serde_json::json!({ "signed": signed, "key": args[2], "signature": signature }).to_string())
+            })
+            .map(|manifest| (args[4].clone(), manifest)),
+        Some(command) if command.starts_with("--release-") => Err(format!("参数不对：{}", args[1..].join(" "))),
+        _ => return None,
+    };
+    Some(match result {
+        Ok((path, text)) => match std::fs::write(&path, text) {
+            Ok(()) => 0,
+            Err(_) => 2,
+        },
+        Err(error) => {
+            if let Some(path) = args.last() {
+                let _ = std::fs::write(format!("{path}.error.txt"), error);
+            }
+            1
+        }
+    })
+}
+
+/// Whether the automatic update check is on, for the settings window.
+pub fn auto_update_enabled() -> bool {
+    PREFERENCES.get().is_none_or(|preferences| preferences.auto_update)
+}
+
+unsafe fn run(args: &[String]) -> Result<(), String> {
     if SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) == 0 {
         return Err(format!(
             "无法启用高 DPI 支持。\n{}",
             io::Error::last_os_error()
         ));
     }
+    // After an update: wait for the old process to let go of the tray and
+    // the shortcuts, then clean up what the update left behind.
+    let updated = update::finish(args);
     let failures = migrate::run();
     if !failures.is_empty() {
         show_error(
@@ -186,6 +243,13 @@ unsafe fn run() -> Result<(), String> {
     if !conflicts.is_empty() {
         notify_conflict(window);
     }
+    update::set_target(window);
+    if let Some(updated) = updated {
+        update_ui::show_updated(window, updated);
+    }
+    if !update::is_dev_build() {
+        SetTimer(window, UPDATE_TIMER, UPDATE_DELAY_MS, None);
+    }
 
     let mut message = MSG::default();
     loop {
@@ -195,7 +259,10 @@ unsafe fn run() -> Result<(), String> {
                 DestroyWindow(window);
                 return Err(error.to_string());
             }
-            0 => return Ok(()),
+            0 => {
+                output::wait_for_saves();
+                return Ok(());
+            }
             _ if translate_settings::dialog_message(&message) => {}
             _ if output_settings::dialog_message(&message) => {}
             _ => {
@@ -230,6 +297,13 @@ unsafe extern "system" fn tray_proc(
             NIN_BALLOONUSERCLICK if CONFLICT_BALLOON.get() => open_settings(window),
             _ => {}
         },
+        update::UPDATE_EVENT => update_ui::handle(window),
+        WM_TIMER if wparam == UPDATE_TIMER => {
+            KillTimer(window, UPDATE_TIMER);
+            if auto_update_enabled() {
+                update::check(false);
+            }
+        }
         WM_CLOSE => {
             DestroyWindow(window);
         }
@@ -370,6 +444,8 @@ unsafe fn tray_menu(window: HWND) {
     }
     AppendMenuW(menu, MF_SEPARATOR, 0, null());
     AppendMenuW(menu, MF_STRING, MENU_CONFIG, w!("设置"));
+    let version = wide(&format!("检查更新（当前 v{}）", update::VERSION));
+    AppendMenuW(menu, MF_STRING, MENU_CHECK_UPDATE, version.as_ptr());
     AppendMenuW(menu, MF_SEPARATOR, 0, null());
     AppendMenuW(menu, MF_STRING, MENU_EXIT, w!("退出"));
     let mut cursor = POINT::default();
@@ -399,6 +475,7 @@ unsafe fn tray_menu(window: HWND) {
         MENU_PINS_CLOSE => pinned::close_all(),
         id if id > MENU_GROUP => pinned::toggle_group((id - MENU_GROUP) as u32),
         MENU_CONFIG | MENU_CONFLICT => open_settings(window),
+        MENU_CHECK_UPDATE => update_ui::check_now(window),
         MENU_EXIT => {
             DestroyWindow(window);
         }

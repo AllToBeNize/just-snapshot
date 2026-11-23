@@ -156,6 +156,7 @@ pub const DEFAULT_OPACITY_STEP: u8 = 5;
 const OPACITY_STEP_KEY: &str = "pin_opacity_step";
 const THEME_KEY: &str = "theme";
 const SECONDARY_KEY: &str = "capture_secondary";
+const AUTO_UPDATE_KEY: &str = "auto_update";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Preferences {
@@ -164,6 +165,8 @@ pub struct Preferences {
     pub theme: Theme,
     /// Optional second global capture shortcut, active alongside the main one.
     pub capture_secondary: Option<Shortcut>,
+    /// Look for a new version shortly after start-up.
+    pub auto_update: bool,
 }
 
 impl Default for Preferences {
@@ -173,6 +176,7 @@ impl Default for Preferences {
             opacity_step: DEFAULT_OPACITY_STEP,
             theme: Theme::default(),
             capture_secondary: None,
+            auto_update: true,
         }
     }
 }
@@ -454,6 +458,7 @@ fn load_from(path: &Path) -> Result<Preferences, String> {
     let mut opacity_step = DEFAULT_OPACITY_STEP;
     let mut theme = Theme::default();
     let mut capture_secondary = None;
+    let mut auto_update = true;
     let mut layout = None;
     let mut stored: Vec<(usize, Shortcut)> = Vec::new();
     match fs::read_to_string(path) {
@@ -479,6 +484,8 @@ fn load_from(path: &Path) -> Result<Preferences, String> {
                                 .ok_or_else(|| format!("快捷键格式有误：{line}"))?,
                         )
                     };
+                } else if name == AUTO_UPDATE_KEY {
+                    auto_update = value.trim() != "off";
                 } else if name == LAYOUT_KEY {
                     layout = Some(value.trim().to_string());
                 } else if name == THEME_KEY {
@@ -553,6 +560,7 @@ fn load_from(path: &Path) -> Result<Preferences, String> {
         opacity_step,
         theme,
         capture_secondary,
+        auto_update,
     };
     preferences.validate()?;
     Ok(preferences)
@@ -610,13 +618,14 @@ fn save_to(path: &Path, preferences: Preferences) -> Result<(), String> {
         })
         .collect();
     contents.push_str(&format!(
-        "{SECONDARY_KEY}={}\r\n{OPACITY_STEP_KEY}={}\r\n{THEME_KEY}={}\r\n{LAYOUT_KEY}={LAYOUT}\r\n",
+        "{SECONDARY_KEY}={}\r\n{OPACITY_STEP_KEY}={}\r\n{THEME_KEY}={}\r\n{AUTO_UPDATE_KEY}={}\r\n{LAYOUT_KEY}={LAYOUT}\r\n",
         preferences
             .capture_secondary
             .map(Shortcut::label)
             .unwrap_or_default(),
         preferences.opacity_step,
-        preferences.theme.key()
+        preferences.theme.key(),
+        if preferences.auto_update { "on" } else { "off" }
     ));
     fs::create_dir_all(path.parent().expect("settings directory"))
         .map_err(|error| error.to_string())?;

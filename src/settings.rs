@@ -82,6 +82,8 @@ const FIELDS: usize = BINDINGS.len() + 1;
 enum Target {
     Key(usize),
     Toggle,
+    /// "自动检查更新".
+    AutoUpdate,
     Minus,
     Plus,
     Theme(usize),
@@ -135,6 +137,7 @@ struct Draft {
     bindings: Bindings,
     opacity_step: u8,
     start_at_login: bool,
+    auto_update: bool,
     theme: Theme,
     secondary: Option<Shortcut>,
     record: crate::recorder::Options,
@@ -146,6 +149,7 @@ impl Draft {
             bindings: hotkey::DEFAULT,
             opacity_step: DEFAULT_OPACITY_STEP,
             start_at_login: true,
+            auto_update: true,
             theme: Theme::default(),
             secondary: None,
             record: crate::recorder::Options::default(),
@@ -192,6 +196,7 @@ impl Draft {
             opacity_step: self.opacity_step,
             theme: self.theme,
             capture_secondary: self.secondary,
+            auto_update: self.auto_update,
         };
         preferences.validate()?;
         Ok(preferences)
@@ -268,6 +273,7 @@ struct Layout {
     mascot: RECT,
     service: RECT,
     toggle: RECT,
+    auto_update: RECT,
     output: RECT,
     stepper: RECT,
     minus: RECT,
@@ -361,9 +367,14 @@ impl Layout {
         let output_top = row_top(0, 30);
         let output = rect(right - 76, output_top, right, output_top + 30);
         let stepper_top = row_top(1, 30);
-        let stepper = rect(right - 112, stepper_top, right, stepper_top + 30);
-        let minus = rect(right - 112, stepper_top, right - 80, stepper_top + 30);
-        let plus = rect(right - 32, stepper_top, right, stepper_top + 30);
+        // The second row is split too: the pin opacity step on the left,
+        // the automatic update check on the right.
+        let stepper_right = half - 18;
+        let stepper = rect(stepper_right - 112, stepper_top, stepper_right, stepper_top + 30);
+        let minus = rect(stepper_right - 112, stepper_top, stepper_right - 80, stepper_top + 30);
+        let plus = rect(stepper_right - 32, stepper_top, stepper_right, stepper_top + 30);
+        let auto_update_top = row_top(1, 24);
+        let auto_update = rect(right - 44, auto_update_top, right, auto_update_top + 24);
         let chip_top = row_top(2, 32);
         let mut themes = [RECT::default(); THEMES.len()];
         let count = THEMES.len() as i32;
@@ -481,6 +492,7 @@ impl Layout {
             clear,
             service,
             toggle,
+            auto_update,
             output,
             stepper,
             minus,
@@ -516,7 +528,12 @@ impl Layout {
                         (Target::Output, self.output),
                     ])
                     .chain((0..THEMES.len()).map(|index| (Target::Theme(index), self.themes[index])))
-                    .chain([(Target::Toggle, self.toggle), (Target::Minus, self.minus), (Target::Plus, self.plus)])
+                    .chain([
+                        (Target::Toggle, self.toggle),
+                        (Target::AutoUpdate, self.auto_update),
+                        (Target::Minus, self.minus),
+                        (Target::Plus, self.plus),
+                    ])
                     .chain(common),
             )
         } else {
@@ -613,6 +630,7 @@ pub unsafe fn open(owner: HWND, instance: HINSTANCE) -> io::Result<()> {
         bindings: hotkey::current(),
         opacity_step: pinned::opacity_step(),
         start_at_login,
+        auto_update: crate::auto_update_enabled(),
         theme: theme::current(),
         secondary: global_hotkey::shortcuts().get(1).copied(),
         record: crate::recording_ui::load_options(),
@@ -790,6 +808,9 @@ unsafe fn activate(window: HWND, target: Target) {
         }
         Target::Toggle => {
             with_state(|state| state.draft.start_at_login = !state.draft.start_at_login);
+        }
+        Target::AutoUpdate => {
+            with_state(|state| state.draft.auto_update = !state.draft.auto_update);
             animate(window);
         }
         Target::Minus | Target::Plus => {
@@ -1865,11 +1886,7 @@ impl<'a> Painter<'a> {
         let half = card.left + (card.right - card.left) / 2;
         let rows = [
             ("开机自动启动", "登录 Windows 后在托盘待命", self.layout.toggle.left),
-            (
-                "贴图透明度步长",
-                "在贴图上 Ctrl+滚轮，每格改变的不透明度",
-                self.layout.stepper.left,
-            ),
+            ("贴图透明度步长", "贴图上 Ctrl+滚轮每格的变化", self.layout.stepper.left),
             ("外观", "截图工具栏、设置和提示窗口的配色", self.layout.themes[0].left),
         ];
         for (index, (title, description, control)) in rows.into_iter().enumerate() {
@@ -1914,28 +1931,35 @@ impl<'a> Painter<'a> {
                 DT_LEFT | DT_TOP | DT_END_ELLIPSIS,
             );
         }
-        // The right half of the first row: save settings.
-        let middle = card.top + row / 2;
-        ui::fill(
-            self.dc,
-            RECT { left: half, top: card.top + self.s(10), right: half + 1, bottom: card.top + row - self.s(10) },
-            palette.divider,
-        );
-        let text = RECT { left: half + self.s(18), right: self.layout.output.left - self.s(12), ..card };
-        self.text(
-            RECT { top: middle - self.s(21), bottom: middle, ..text },
-            "保存截图",
-            self.state.fonts.body,
-            palette.text,
-            DT_LEFT | DT_BOTTOM | DT_END_ELLIPSIS,
-        );
-        self.text(
-            RECT { top: middle + self.s(2), bottom: middle + self.s(21), ..text },
-            "位置、文件名、自动保存、阴影和边框",
-            self.state.fonts.small,
-            palette.secondary,
-            DT_LEFT | DT_TOP | DT_END_ELLIPSIS,
-        );
+        // The right halves of the first two rows: save settings, updates.
+        let halves = [
+            ("保存截图", "位置、文件名、自动保存、阴影和边框", self.layout.output.left),
+            ("自动检查更新", "启动后查看新版本，有就在右下角提示", self.layout.auto_update.left),
+        ];
+        for (index, (title, description, control)) in halves.into_iter().enumerate() {
+            let top = card.top + row * index as i32;
+            let middle = top + row / 2;
+            ui::fill(
+                self.dc,
+                RECT { left: half, top: top + self.s(10), right: half + 1, bottom: top + row - self.s(10) },
+                palette.divider,
+            );
+            let text = RECT { left: half + self.s(18), right: control - self.s(12), ..card };
+            self.text(
+                RECT { top: middle - self.s(21), bottom: middle, ..text },
+                title,
+                self.state.fonts.body,
+                palette.text,
+                DT_LEFT | DT_BOTTOM | DT_END_ELLIPSIS,
+            );
+            self.text(
+                RECT { top: middle + self.s(2), bottom: middle + self.s(21), ..text },
+                description,
+                self.state.fonts.small,
+                palette.secondary,
+                DT_LEFT | DT_TOP | DT_END_ELLIPSIS,
+            );
+        }
         let radius = self.f(8.0);
         ui::button(
             self.dc,
@@ -1948,6 +1972,7 @@ impl<'a> Painter<'a> {
             radius,
         );
         self.toggle();
+        self.switch(self.layout.auto_update, self.state.draft.auto_update, Target::AutoUpdate);
         self.stepper();
         self.theme_chips();
     }

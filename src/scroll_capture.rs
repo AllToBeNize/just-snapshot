@@ -29,6 +29,7 @@ use crate::{
     output,
     theme,
     overlay_ui::monitor_info,
+    scroll_dump::Dump,
     scroll_input::{
         InputHooks, InputTarget, CANCEL_CAPTURE, COPY_CAPTURE, SAVE_CAPTURE, WHEEL_RECEIVED,
     },
@@ -66,6 +67,7 @@ struct Session {
     stitcher: Stitcher,
     preview: Preview,
     _hooks: InputHooks,
+    dump: Option<Dump>,
     region: RECT,
     panel_limit: RECT,
     hovered: Option<Action>,
@@ -217,6 +219,7 @@ pub unsafe fn start(region: RECT, first: Image) -> Result<(), String> {
     let panel_limit = monitor_info(center)
         .and_then(|monitor| panel_bounds(region, monitor.rcWork))
         .ok_or("请缩小选区，在同一屏幕上为长截图面板留出空间。")?;
+    let dump = Dump::start(region, &first);
     let stitcher = Stitcher::new(first).ok_or("选区超过长截图尺寸上限。")?;
     let capture = RegionCapture::new(region).map_err(|error| error.to_string())?;
     let preview = Preview::new(
@@ -266,6 +269,7 @@ pub unsafe fn start(region: RECT, first: Image) -> Result<(), String> {
         stitcher,
         preview,
         _hooks: hooks,
+        dump,
         region,
         panel_limit,
         hovered: None,
@@ -552,6 +556,9 @@ unsafe fn update_hover(window: HWND, point: Option<POINT>) {
 unsafe fn cancel(window: HWND) {
     let region = SESSION.with_borrow(|session| {
         let session = session.as_ref()?;
+        if let Some(dump) = &session.dump {
+            dump.note("cancel");
+        }
         (!session.exporting).then_some(session.region)
     });
     if let Some(region) = region {
@@ -566,6 +573,9 @@ unsafe fn cancel(window: HWND) {
 unsafe fn arm_sample(window: HWND) {
     SESSION.with_borrow_mut(|session| {
         if let Some(session) = session.as_mut() {
+            if let Some(dump) = &mut session.dump {
+                dump.wheel();
+            }
             if !session.exporting
                 && !session.stopped
                 && (session.samples_left != 0 || SetTimer(window, TIMER, SAMPLE_MS, None) != 0)
@@ -584,7 +594,11 @@ unsafe fn sample(window: HWND) {
         }
         let frame = session.capture.sample().ok()?;
         let height = session.stitcher.image.height;
-        if session.stitcher.observe(frame) == Update::Limit {
+        let update = session.stitcher.observe(frame);
+        if let Some(dump) = &mut session.dump {
+            dump.frame(frame, update, session.stitcher.image.height);
+        }
+        if update == Update::Limit {
             session.stopped = true;
             session.samples_left = 0;
             KillTimer(window, TIMER);
@@ -626,6 +640,9 @@ unsafe fn export(window: HWND, save: bool) {
     SESSION.with_borrow_mut(|session| {
         if let Some(session) = session {
             session.exporting = true;
+            if let Some(dump) = &session.dump {
+                dump.note(&format!("export height={}", session.stitcher.image.height));
+            }
             session.samples_left = 0;
         }
     });

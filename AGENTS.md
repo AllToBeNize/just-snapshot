@@ -23,13 +23,16 @@ Build and test on Windows only. `snapshot.ps1` locates Cargo and the Visual Stud
 - Run `.\snapshot.ps1 test` before reporting a change as done. The build must stay warning-free.
 - A running `just-snapshot.exe` locks the release binary; exit it from the tray before rebuilding.
 - UI previews without a desktop session: run the test binary in `target/x86_64-pc-windows-msvc/release/deps/snapshot-*.exe` with `preview --ignored`. It renders the settings window (every theme and main states), the toolbar and option bar in every theme, the dialog, the text frame and the tray icons to `%TEMP%\snapshot-preview\*.png`. Look at them after any UI change.
+- Long capture that does not stitch: create `%LOCALAPPDATA%\just-snapshot\scroll-debug\`. Every long-capture session then writes `first.png`, each distinct sampled frame and `log.txt` (target program, window class, DPI, wheel events, stitch results) into a timestamped subfolder (`scroll_dump.rs`). Replay one with `SNAPSHOT_SCROLL_REPLAY=<folder>` and the test binary `replay_dump --ignored --nocapture`; frames that do not match print the best shift and where the rows still differ. Delete the folder to turn recording off.
 
 ## Release Flow
 
-1. Bump `version` in `Cargo.toml`, run `.\snapshot.ps1 build` to sync `Cargo.lock`, and commit.
+1. Bump `version` in `Cargo.toml`, run `.\snapshot.ps1 build` to sync `Cargo.lock`, write the user-facing notes under `## vX.Y.Z` in `RELEASE_NOTES.md` (Chinese, one `- ` item per change: what users notice, not commit titles), and commit.
 2. `git tag vX.Y.Z`, `git push origin HEAD`, `git push origin vX.Y.Z`.
-3. `.\snapshot.ps1 release -Tag vX.Y.Z` creates a **draft** with the ZIP, SHA256, and generated notes. It refuses to run on a dirty tree, when the remote tag is not at `HEAD`, or when a release for the tag already exists.
-4. A human reviews and publishes the draft on GitHub. Do not tag, push, or publish unless asked.
+3. In the publishing machine's desktop session (the release key is in its Credential Manager, which remote shells cannot read): `.\snapshot.ps1 release -Tag vX.Y.Z [-KeyId <id>]`. It creates a **draft** with the ZIP, SHA256, the bare `just-snapshot.exe` and the signed `latest.json`, with the notes as the release text. It refuses to run on a dirty tree, without notes for the version, when the remote tag is not at `HEAD`, when the key is missing or not in `TRUSTED_KEYS`, or when a release for the tag already exists.
+4. A human reviews and publishes the draft on GitHub. Do not tag, push, or publish unless asked. Installed copies see the update once the release is published (not a draft, not a prerelease): they read `releases/latest/download/latest.json`.
+
+Release keys: one ECDSA P-256 key per publishing machine, created there with `.\snapshot.ps1 release-key [-KeyId <id>]` (default id: the computer name). The private key stays in that machine's Credential Manager (`just-snapshot/release-key/<id>`); its public key goes into `TRUSTED_KEYS` in `src/release_key.rs`. A new machine can publish only after a release containing its key, published from a machine that is already trusted. To retire a machine, remove its key and release. Never copy or export a private key.
 
 ## Code Map
 
@@ -56,7 +59,9 @@ Build and test on Windows only. `snapshot.ps1` locates Cargo and the Visual Stud
 | `icons.rs`, `icons/lucide.rs` | Vector icons rendered at the exact target size. `icons/lucide.rs` is generated: edit SVGs in `tools/icons/` and run `python tools/svg2rust.py tools/icons <lucide version> <names...> > src/icons/lucide.rs` |
 | `theme.rs` | Color themes (Graphite default, Midnight, Forest, Light) and color helpers |
 | `ui.rs`, `dialog.rs` | Shared drawing helpers for custom-drawn windows; the themed dialog that replaces `MessageBox` |
-| `scroll_capture.rs`, `scroll_input.rs`, `scroll_stitch.rs` | Long capture session, wheel forwarding, frame stitching |
+| `scroll_capture.rs`, `scroll_input.rs`, `scroll_stitch.rs`, `scroll_dump.rs` | Long capture session, wheel forwarding, frame stitching, debug recording of sessions. Rows are matched by the gray steps between cells with a tolerance (content scrolls over fixed gradients and through translucent panels), counting only cells with edges so a floating button over part of a row does not hide the rest. `Overlay` learns floating buttons from pixels that stay on screen while content moves and repaints them from later frames, shading-matched |
+| `update.rs`, `update_ui.rs`, `release_key.rs` | In-app updates: signed `latest.json` from GitHub (then the mirror prefixes in `update.txt`), download with progress and SHA-256/size check, swap of the running executable (`.old` rename, rollback on failure, `--after <pid>` handover), the bottom-right card (slides in, mirrored exit, never takes focus), ECDSA P-256 signing and verification via CNG. The publishing modes `--release-key-new` / `--release-sign` run before the app starts. Development builds (run from a `target` folder) never update |
+| `http.rs` | Blocking WinHTTP: POST for translation, GET with a size limit, streaming download with progress and cancel |
 | `selection` pointer layer | `PointerLayer`: the pointer at capture time; the `ShowPointer` binding (single key P; `Binding::allows_single_key`) draws it into `desktop` (and `dimmed`) and restores the pixels under it, so output carries it only while shown |
 | `pinned.rs` | Pinned image windows (`Mode::Plain` / `Text` / `Translate`). Right-click menu: copy, save, topmost, group, hide group, close; groups are shown/hidden together (`groups`, `toggle_group`, `set_all_hidden`). Text and translate pins carry a `pin_text::TextLayer` and recognize in a background thread that posts `OCR_DONE`; translate pins add a `pin_translate::TranslatePane` shown in an owned popup window (`popup_proc`, keys forwarded to the pin) and post `TRANSLATE_DONE` with a request id so stale replies are dropped. `translation_settings_changed()` makes waiting pins retry |
 | `recorder.rs` | Recording to MP4 on a worker thread: DXGI desktop duplication with double-buffered readback and D3D11 video-processor scaling (GDI fallback), Media Foundation sink writer (hardware H.264 first, software in session 0 or on failure), WASAPI loopback + microphone mixed on the recording clock, pause. `<test binary> full_hd_at_60 --ignored --nocapture` prints dropped frames (`SNAPSHOT_TEST_SIZE`, `SNAPSHOT_TEST_QUALITY`, `SNAPSHOT_PROFILE`) and must run in the desktop session |
@@ -100,6 +105,9 @@ The overlay follows Snipaste's layout:
 | Credential Manager `just-snapshot/translate/<provider>/<field>` | Translation API keys and secrets |
 | `%LOCALAPPDATA%\just-snapshot\hotkey.txt` | Legacy capture shortcut, migrated on first run |
 | `HKCU\...\Run\just-snapshot` | Start-at-login command, pointing at the running executable |
+| `%LOCALAPPDATA%\just-snapshot\update.txt` | Update mirror prefixes (`mirrors=`, `;`-separated, tried after GitHub) and the version the user skipped. `auto_update=on/off` lives in `shortcuts.txt` |
+| `%LOCALAPPDATA%\just-snapshot\update\` | Downloaded executables and `updated.json` (what the next start reports), cleared after a successful update |
+| Credential Manager `just-snapshot/release-key/<id>` | This machine's private release key, only on publishing machines |
 
 API keys and other secrets live only in the Credential Manager: never in `translate.txt`, the repo, logs, error messages or command lines. Before every commit, check the file list for anything key-like.
 

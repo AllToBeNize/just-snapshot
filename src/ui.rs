@@ -145,9 +145,11 @@ pub fn inflate(rect: RECT, amount: i32) -> RECT {
 pub enum Badge {
     Check,
     Exclamation,
+    /// A download arrow, for an available update.
+    Arrow,
 }
 
-/// A filled circle with a white check or exclamation mark.
+/// A filled circle with a white check, exclamation mark or download arrow.
 pub unsafe fn badge(dc: HDC, rect: RECT, color: u32, kind: Badge, on: u32) {
     let Some(graphics) = Graphics::new(dc) else {
         return;
@@ -158,6 +160,13 @@ pub unsafe fn badge(dc: HDC, rect: RECT, color: u32, kind: Badge, on: u32) {
     let (cx, cy) = ((bounds[0] + bounds[2]) / 2.0, (bounds[1] + bounds[3]) / 2.0);
     let width = (size * 0.13).max(1.4);
     match kind {
+        Badge::Arrow => {
+            let color = argb(on, 255);
+            graphics.line((cx, cy - size * 0.24), (cx, cy + size * 0.12), color, width);
+            graphics.line((cx - size * 0.17, cy - size * 0.03), (cx, cy + size * 0.14), color, width);
+            graphics.line((cx + size * 0.17, cy - size * 0.03), (cx, cy + size * 0.14), color, width);
+            graphics.line((cx - size * 0.22, cy + size * 0.26), (cx + size * 0.22, cy + size * 0.26), color, width);
+        }
         Badge::Check => {
             if let Some(pen) = graphics.pen(on, width) {
                 graphics.lines(

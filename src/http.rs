@@ -1,5 +1,6 @@
-//! A minimal blocking HTTPS POST over WinHTTP: system TLS and the system
-//! proxy, nothing bundled. Call it off the UI thread.
+//! Minimal blocking HTTPS over WinHTTP: POST for the translation services,
+//! GET and streaming downloads for updates. System TLS and the system proxy,
+//! nothing bundled. Call it off the UI thread.
 
 use std::{ffi::c_void, ptr::null};
 use windows_sys::{
@@ -59,10 +60,18 @@ fn failure(step: &str) -> String {
     format!("{reason}（{step}，错误码 {code}）")
 }
 
-/// POSTs `body` to `url` with `headers` (`Name: value`). Any HTTP status is
-/// returned; only transport failures are errors.
-pub fn post(url: &str, headers: &[(&str, &str)], body: &[u8]) -> Result<Response, String> {
-    unsafe {
+/// An answered request; the handles close in field order, request first.
+struct Exchange {
+    request: Handle,
+    _connection: Handle,
+    _session: Handle,
+    status: u32,
+}
+
+impl Exchange {
+    /// Sends `method` to `url` and waits for the status line. Redirects are
+    /// followed; any HTTP status is returned, only transport failures fail.
+    unsafe fn send(method: &str, url: &str, headers: &[(&str, &str)], body: &[u8]) -> Result<Self, String> {
         let url_wide = wide(url);
         let mut parts = URL_COMPONENTS {
             dwStructSize: size_of::<URL_COMPONENTS>() as u32,
@@ -105,10 +114,11 @@ pub fn post(url: &str, headers: &[(&str, &str)], body: &[u8]) -> Result<Response
             "连接服务器",
         )?;
         let path_wide = wide(if path.is_empty() { "/" } else { &path });
+        let method_wide = wide(method);
         let request = check(
             WinHttpOpenRequest(
                 connection.0,
-                w!("POST"),
+                method_wide.as_ptr(),
                 path_wide.as_ptr(),
                 null(),
                 null(),
@@ -137,37 +147,117 @@ pub fn post(url: &str, headers: &[(&str, &str)], body: &[u8]) -> Result<Response
         if WinHttpReceiveResponse(request.0, std::ptr::null_mut()) == 0 {
             return Err(failure("接收响应"));
         }
-        let mut status = 0u32;
-        let mut size = size_of::<u32>() as u32;
-        if WinHttpQueryHeaders(
-            request.0,
-            WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
-            null(),
-            (&mut status as *mut u32).cast(),
-            &mut size,
-            std::ptr::null_mut(),
-        ) == 0
-        {
-            return Err(failure("读取状态码"));
-        }
-        let mut bytes = Vec::new();
-        let mut chunk = vec![0u8; 16 * 1024];
+        let status = query_number(&request, WINHTTP_QUERY_STATUS_CODE).ok_or_else(|| failure("读取状态码"))?;
+        Ok(Self {
+            request,
+            _connection: connection,
+            _session: session,
+            status: status as u32,
+        })
+    }
+
+    /// The announced body length, when the server sent one.
+    unsafe fn length(&self) -> Option<u64> {
+        query_number(&self.request, WINHTTP_QUERY_CONTENT_LENGTH)
+    }
+
+    /// Feeds the body to `sink` chunk by chunk until it ends or `sink` fails.
+    unsafe fn read(&self, mut sink: impl FnMut(&[u8]) -> Result<(), String>) -> Result<(), String> {
+        let mut chunk = vec![0u8; 64 * 1024];
         loop {
             let mut read = 0u32;
-            if WinHttpReadData(request.0, chunk.as_mut_ptr().cast(), chunk.len() as u32, &mut read) == 0 {
+            if WinHttpReadData(self.request.0, chunk.as_mut_ptr().cast(), chunk.len() as u32, &mut read) == 0 {
                 return Err(failure("读取响应"));
             }
             if read == 0 {
-                break;
+                return Ok(());
             }
-            bytes.extend_from_slice(&chunk[..read as usize]);
+            sink(&chunk[..read as usize])?;
         }
+    }
+}
+
+unsafe fn query_number(request: &Handle, info: u32) -> Option<u64> {
+    let mut value = 0u32;
+    let mut size = size_of::<u32>() as u32;
+    let ok = WinHttpQueryHeaders(
+        request.0,
+        info | WINHTTP_QUERY_FLAG_NUMBER,
+        null(),
+        (&mut value as *mut u32).cast(),
+        &mut size,
+        std::ptr::null_mut(),
+    );
+    (ok != 0).then_some(u64::from(value))
+}
+
+/// POSTs `body` to `url` with `headers` (`Name: value`). Any HTTP status is
+/// returned; only transport failures are errors.
+pub fn post(url: &str, headers: &[(&str, &str)], body: &[u8]) -> Result<Response, String> {
+    unsafe {
+        let exchange = Exchange::send("POST", url, headers, body)?;
+        let mut bytes = Vec::new();
+        exchange.read(|chunk| {
+            bytes.extend_from_slice(chunk);
+            Ok(())
+        })?;
         Ok(Response {
-            status,
+            status: exchange.status,
             body: String::from_utf8_lossy(&bytes).into_owned(),
         })
     }
 }
+
+/// GETs `url`; the body must be at most `limit` bytes. Returns the status
+/// and the raw body.
+pub fn get(url: &str, limit: usize) -> Result<(u32, Vec<u8>), String> {
+    unsafe {
+        let exchange = Exchange::send("GET", url, &[], &[])?;
+        let mut bytes = Vec::new();
+        exchange.read(|chunk| {
+            if bytes.len() + chunk.len() > limit {
+                return Err(format!("服务器返回的内容超过 {} KB，不像是要找的文件", limit / 1024));
+            }
+            bytes.extend_from_slice(chunk);
+            Ok(())
+        })?;
+        Ok((exchange.status, bytes))
+    }
+}
+
+/// Streams `url` into `output`. `progress(done, total)` follows every chunk
+/// and stops the download by returning false. Fails on any status but 200
+/// and when the body is shorter than announced.
+pub fn download(
+    url: &str,
+    output: &mut impl std::io::Write,
+    mut progress: impl FnMut(u64, Option<u64>) -> bool,
+) -> Result<u64, String> {
+    unsafe {
+        let exchange = Exchange::send("GET", url, &[], &[])?;
+        if exchange.status != 200 {
+            return Err(format!("服务器返回 HTTP {}", exchange.status));
+        }
+        let total = exchange.length();
+        let mut done = 0u64;
+        exchange.read(|chunk| {
+            output.write_all(chunk).map_err(|error| format!("写入下载的文件失败：{error}"))?;
+            done += chunk.len() as u64;
+            if progress(done, total) {
+                Ok(())
+            } else {
+                Err(CANCELLED.into())
+            }
+        })?;
+        if total.is_some_and(|total| total != done) {
+            return Err("下载没有完成，连接中途断开了".into());
+        }
+        Ok(done)
+    }
+}
+
+/// The error `download` returns when `progress` asked it to stop.
+pub const CANCELLED: &str = "已取消下载";
 
 /// `application/x-www-form-urlencoded` value encoding.
 pub fn form(pairs: &[(&str, &str)]) -> String {
