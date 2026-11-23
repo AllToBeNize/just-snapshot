@@ -16,6 +16,7 @@ mod hotkey;
 mod http;
 mod icons;
 mod input_overlay;
+mod migrate;
 mod mosaic;
 mod ocr;
 mod output;
@@ -110,6 +111,13 @@ unsafe fn run() -> Result<(), String> {
             "无法启用高 DPI 支持。\n{}",
             io::Error::last_os_error()
         ));
+    }
+    let failures = migrate::run();
+    if !failures.is_empty() {
+        show_error(
+            null_mut(),
+            &format!("从旧版 Snapshot 迁移时有些内容没能移过来，旧的还在原处：\n\n{}", failures.join("\n")),
+        );
     }
     let first_run = hotkey::first_run();
     let preferences = hotkey::load()?;

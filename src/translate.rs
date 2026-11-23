@@ -1,6 +1,6 @@
 //! Translation through a provider the user configures: any OpenAI-compatible
 //! chat endpoint, DeepL, Baidu or Youdao. Plain settings go to
-//! `%LOCALAPPDATA%\Snapshot\translate.txt`; keys go to the Credential Manager
+//! `%LOCALAPPDATA%\just-snapshot\translate.txt`; keys go to the Credential Manager
 //! and never touch a file. Everything here blocks; call it off the UI thread.
 
 use serde_json::{json, Value};

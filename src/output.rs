@@ -149,12 +149,12 @@ pub fn copy_image(owner: HWND, image: &Image) -> Result<(), String> {
     set_clipboard(owner, items)
 }
 
-/// "Snapshot 2026-11-20 114500.png" in local time.
+/// "just-snapshot 2026-11-20 114500.png" in local time.
 fn file_name() -> String {
     let mut time = SYSTEMTIME::default();
     unsafe { GetLocalTime(&mut time) };
     format!(
-        "Snapshot {:04}-{:02}-{:02} {:02}{:02}{:02}.png",
+        "just-snapshot {:04}-{:02}-{:02} {:02}{:02}{:02}.png",
         time.wYear, time.wMonth, time.wDay, time.wHour, time.wMinute, time.wSecond
     )
 }
@@ -328,7 +328,7 @@ mod tests {
             .take_while(|&unit| unit != 0)
             .collect();
         assert_eq!(String::from_utf16(&name).unwrap(), "截图.png");
-        assert!(file_name().starts_with("Snapshot 20") && file_name().ends_with(".png"));
+        assert!(file_name().starts_with("just-snapshot 20") && file_name().ends_with(".png"));
     }
 
     /// Reads the clipboard back the way Explorer does, through OLE with

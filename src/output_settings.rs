@@ -1,6 +1,6 @@
 //! 保存设置: where saves go, how files are named, saving every capture
 //! automatically, and the shadow and border added to saved images. Stored in
-//! `%LOCALAPPDATA%\Snapshot\output.txt`.
+//! `%LOCALAPPDATA%\just-snapshot\output.txt`.
 
 use std::{
     cell::{Cell, RefCell},
@@ -36,7 +36,7 @@ use crate::{
     wide,
 };
 
-pub const DEFAULT_TEMPLATE: &str = "Snapshot {date} {time}";
+pub const DEFAULT_TEMPLATE: &str = "just-snapshot {date} {time}";
 /// Room around a saved image for its shadow.
 const SHADOW_PAD: i32 = 28;
 const SHADOW_OFFSET: i32 = 6;
@@ -68,8 +68,7 @@ impl Default for OutputConfig {
 }
 
 fn config_path() -> Result<PathBuf, String> {
-    let app_data = env::var_os("LOCALAPPDATA").ok_or("找不到 LOCALAPPDATA。")?;
-    Ok(PathBuf::from(app_data).join("Snapshot").join("output.txt"))
+    Ok(crate::migrate::app_data()?.join("output.txt"))
 }
 
 impl OutputConfig {
@@ -124,12 +123,12 @@ impl OutputConfig {
         })
     }
 
-    /// The folder saves go to: the chosen one, or Pictures\Snapshot.
+    /// The folder saves go to: the chosen one, or Pictures\just-snapshot.
     pub fn folder(&self) -> PathBuf {
         if !self.folder.trim().is_empty() {
             return PathBuf::from(self.folder.trim());
         }
-        pictures().unwrap_or_else(|| env::temp_dir()).join("Snapshot")
+        pictures().unwrap_or_else(|| env::temp_dir()).join(crate::migrate::NAME)
     }
 
     /// The file name for a capture of `width`×`height` taken now.
@@ -157,7 +156,7 @@ pub fn expand(template: &str, time: &SYSTEMTIME, width: i32, height: i32) -> Str
         .filter(|c| !matches!(c, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*') && !c.is_control())
         .collect();
     let name = name.trim().trim_end_matches('.');
-    let name = if name.is_empty() { "Snapshot" } else { name };
+    let name = if name.is_empty() { crate::migrate::NAME } else { name };
     let name = name.strip_suffix(".png").unwrap_or(name);
     format!("{name}.png")
 }
@@ -176,7 +175,7 @@ pub fn unique_path(folder: &Path, name: &str) -> PathBuf {
 }
 
 /// The user's Pictures folder, wherever it was moved.
-fn pictures() -> Option<PathBuf> {
+pub fn pictures() -> Option<PathBuf> {
     use windows::Win32::{
         System::Com::CoTaskMemFree,
         UI::Shell::{FOLDERID_Pictures, SHGetKnownFolderPath, KF_FLAG_DEFAULT},
@@ -903,10 +902,10 @@ mod tests {
     #[test]
     fn templates_fill_in_the_time_and_size_and_stay_valid_names() {
         let time = SYSTEMTIME { wYear: 2026, wMonth: 11, wDay: 20, wHour: 9, wMinute: 5, wSecond: 7, ..Default::default() };
-        assert_eq!(expand(DEFAULT_TEMPLATE, &time, 800, 600), "Snapshot 2026-11-20 090507.png");
+        assert_eq!(expand(DEFAULT_TEMPLATE, &time, 800, 600), "just-snapshot 2026-11-20 090507.png");
         assert_eq!(expand("{w}x{h}", &time, 800, 600), "800x600.png");
         assert_eq!(expand("bug: a/b?.png", &time, 1, 1), "bug ab.png");
-        assert_eq!(expand("  ...  ", &time, 1, 1), "Snapshot.png");
+        assert_eq!(expand("  ...  ", &time, 1, 1), "just-snapshot.png");
     }
 
     #[test]

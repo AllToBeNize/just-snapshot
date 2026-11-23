@@ -1,5 +1,5 @@
 //! Secrets live in the Windows Credential Manager, never in a file. Each one
-//! is a generic credential named `Snapshot/<name>`, visible to the user under
+//! is a generic credential named `just-snapshot/<name>`, visible to the user under
 //! Control Panel › Credential Manager › Windows Credentials.
 
 use std::ptr::null_mut;
@@ -11,13 +11,15 @@ use windows_sys::Win32::{
 use crate::wide;
 
 fn target(name: &str) -> Vec<u16> {
-    wide(&format!("Snapshot/{name}"))
+    wide(&format!("{}/{name}", crate::migrate::NAME))
 }
 
 pub fn save(name: &str, secret: &str) -> Result<(), String> {
-    let mut target = target(name);
-    let mut user = wide("Snapshot");
-    let mut blob = secret.as_bytes().to_vec();
+    write(target(name), secret.as_bytes().to_vec())
+}
+
+fn write(mut target: Vec<u16>, mut blob: Vec<u8>) -> Result<(), String> {
+    let mut user = wide(crate::migrate::NAME);
     let credential = CREDENTIALW {
         Type: CRED_TYPE_GENERIC,
         TargetName: target.as_mut_ptr(),
@@ -35,6 +37,47 @@ pub fn save(name: &str, secret: &str) -> Result<(), String> {
     } else {
         Err(format!("无法把密钥保存到 Windows 凭据管理器。\n{error}"))
     }
+}
+
+/// Moves every `<old>/…` secret to `<new>/…` (one already under the new
+/// name is kept and the old one left alone); returns what could not move.
+pub fn migrate(old: &str, new: &str) -> Vec<String> {
+    let mut failures = Vec::new();
+    let filter = wide(&format!("{old}/*"));
+    let mut count = 0;
+    let mut list: *mut *mut CREDENTIALW = null_mut();
+    unsafe {
+        if CredEnumerateW(filter.as_ptr(), 0, &mut count, &mut list) == 0 {
+            if GetLastError() != ERROR_NOT_FOUND {
+                failures.push(format!("无法列出旧的密钥：{}", std::io::Error::last_os_error()));
+            }
+            return failures;
+        }
+        for &credential in std::slice::from_raw_parts(list, count as usize) {
+            let credential = &*credential;
+            if credential.Type != CRED_TYPE_GENERIC {
+                continue;
+            }
+            let length = (0..).take_while(|&index| *credential.TargetName.add(index) != 0).count();
+            let old_target = String::from_utf16_lossy(std::slice::from_raw_parts(credential.TargetName, length));
+            let Some(rest) = old_target.strip_prefix(&format!("{old}/")) else { continue };
+            let new_target = wide(&format!("{new}/{rest}"));
+            let mut existing: *mut CREDENTIALW = null_mut();
+            if CredReadW(new_target.as_ptr(), CRED_TYPE_GENERIC, 0, &mut existing) != 0 {
+                CredFree(existing.cast());
+                continue;
+            }
+            let blob = std::slice::from_raw_parts(credential.CredentialBlob, credential.CredentialBlobSize as usize).to_vec();
+            match write(new_target, blob) {
+                Ok(()) => {
+                    CredDeleteW(credential.TargetName, CRED_TYPE_GENERIC, 0);
+                }
+                Err(error) => failures.push(format!("密钥 {old_target}：{error}")),
+            }
+        }
+        CredFree(list.cast());
+    }
+    failures
 }
 
 /// The stored secret, or `None` if there is none.
@@ -91,5 +134,19 @@ mod tests {
         delete(name).unwrap();
         assert_eq!(load(name).unwrap(), None);
         delete(name).unwrap();
+    }
+
+    /// Same session needs as above. Run with `<test binary> credential --ignored`.
+    #[test]
+    #[ignore]
+    fn migrates_secrets_to_the_new_prefix() {
+        let old = "just-snapshot-test-old";
+        let old_target = wide(&format!("{old}/test/migrate"));
+        write(old_target.clone(), "旧密钥".as_bytes().to_vec()).unwrap();
+        assert!(migrate(old, crate::migrate::NAME).is_empty());
+        assert_eq!(load("test/migrate").unwrap().as_deref(), Some("旧密钥"));
+        let mut gone: *mut CREDENTIALW = null_mut();
+        assert_eq!(unsafe { CredReadW(old_target.as_ptr(), CRED_TYPE_GENERIC, 0, &mut gone) }, 0, "the old one is removed");
+        delete("test/migrate").unwrap();
     }
 }

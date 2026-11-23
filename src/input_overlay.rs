@@ -4,7 +4,7 @@
 //! and drawn with per-pixel alpha. Each has a small grip (three bars) at its
 //! bottom edge that drags it anywhere; the grip takes the mouse but is left
 //! out of screen capture, so it never shows in a recording. Position, size
-//! and opacity are stored in `%LOCALAPPDATA%\Snapshot\overlay.txt`.
+//! and opacity are stored in `%LOCALAPPDATA%\just-snapshot\overlay.txt`.
 //!
 //! Input comes from Raw Input on a message-only window, registered only while
 //! the key panel is shown; the gamepad is polled only while its panel is
@@ -13,11 +13,13 @@
 use std::{
     cell::RefCell,
     collections::BTreeSet,
-    env, fs, io,
+    fs, io,
     mem::size_of,
     path::PathBuf,
     ptr::{null, null_mut},
 };
+#[cfg(test)]
+use std::env;
 use windows_sys::{
     core::w,
     Win32::{
@@ -216,8 +218,7 @@ fn config_path() -> Result<PathBuf, String> {
     if let Some(folder) = TEST_FOLDER.with_borrow(Clone::clone) {
         return Ok(folder.join("overlay.txt"));
     }
-    let app_data = env::var_os("LOCALAPPDATA").ok_or("找不到 LOCALAPPDATA。")?;
-    Ok(PathBuf::from(app_data).join("Snapshot").join("overlay.txt"))
+    Ok(crate::migrate::app_data()?.join("overlay.txt"))
 }
 
 impl OverlayConfig {

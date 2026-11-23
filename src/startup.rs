@@ -17,7 +17,9 @@ use windows_sys::{
 };
 
 const RUN_KEY: *const u16 = w!(r"Software\Microsoft\Windows\CurrentVersion\Run");
-const VALUE_NAME: *const u16 = w!("Snapshot");
+const VALUE_NAME: *const u16 = w!("just-snapshot");
+/// The value before the rename.
+const OLD_VALUE_NAME: *const u16 = w!("Snapshot");
 const MAX_COMMAND_LENGTH: usize = 260;
 
 pub fn is_enabled() -> Result<bool, String> {
@@ -47,6 +49,13 @@ pub fn save_with(
 /// Points an existing start-at-login entry at this executable when the
 /// program was moved or renamed (snapshot.exe became just-snapshot.exe).
 pub fn follow_executable() -> Result<(), String> {
+    if read_value(OLD_VALUE_NAME)?.is_some() {
+        // Moved to the new value name, at this executable.
+        if read_command()?.is_none() {
+            write_command(Some(&current_command()?))?;
+        }
+        write_value(OLD_VALUE_NAME, None)?;
+    }
     let Some(previous) = read_command()? else {
         return Ok(());
     };
@@ -70,13 +79,17 @@ fn current_command() -> Result<Vec<u16>, String> {
 }
 
 fn read_command() -> Result<Option<Vec<u16>>, String> {
+    read_value(VALUE_NAME)
+}
+
+fn read_value(name: *const u16) -> Result<Option<Vec<u16>>, String> {
     let mut command = [0u16; MAX_COMMAND_LENGTH + 1];
     let mut bytes = size_of_val(&command) as u32;
     let status = unsafe {
         RegGetValueW(
             HKEY_CURRENT_USER,
             RUN_KEY,
-            VALUE_NAME,
+            name,
             RRF_RT_REG_SZ,
             null_mut(),
             command.as_mut_ptr().cast(),
@@ -94,17 +107,21 @@ fn read_command() -> Result<Option<Vec<u16>>, String> {
 }
 
 fn write_command(command: Option<&[u16]>) -> Result<(), String> {
+    write_value(VALUE_NAME, command)
+}
+
+fn write_value(name: *const u16, command: Option<&[u16]>) -> Result<(), String> {
     let status = unsafe {
         match command {
             Some(command) => RegSetKeyValueW(
                 HKEY_CURRENT_USER,
                 RUN_KEY,
-                VALUE_NAME,
+                name,
                 REG_SZ,
                 command.as_ptr().cast(),
                 size_of_val(command) as u32,
             ),
-            None => match RegDeleteKeyValueW(HKEY_CURRENT_USER, RUN_KEY, VALUE_NAME) {
+            None => match RegDeleteKeyValueW(HKEY_CURRENT_USER, RUN_KEY, name) {
                 ERROR_FILE_NOT_FOUND => ERROR_SUCCESS,
                 status => status,
             },

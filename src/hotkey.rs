@@ -1,8 +1,10 @@
 use std::{
     cell::Cell,
-    env, fs, io,
+    fs, io,
     path::{Path, PathBuf},
 };
+#[cfg(test)]
+use std::env;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::*;
 
 use crate::theme::Theme;
@@ -435,13 +437,10 @@ pub unsafe fn modifiers() -> u32 {
 }
 
 pub fn path() -> Result<PathBuf, String> {
-    let app_data = env::var_os("LOCALAPPDATA").ok_or("找不到 LOCALAPPDATA。")?;
-    Ok(PathBuf::from(app_data)
-        .join("Snapshot")
-        .join("shortcuts.txt"))
+    Ok(crate::migrate::app_data()?.join("shortcuts.txt"))
 }
 
-/// No settings file and no legacy hotkey file means Snapshot has never run here.
+/// No settings file and no legacy hotkey file means just-snapshot has never run here.
 pub fn first_run() -> bool {
     path().is_ok_and(|path| !path.exists() && !path.with_file_name("hotkey.txt").exists())
 }

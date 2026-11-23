@@ -40,7 +40,8 @@ Build and test on Windows only. `snapshot.ps1` locates Cargo and the Visual Stud
 | `hotkey.rs` | Binding list in toolbar order, defaults (capture `Ctrl+Alt+A`; drawing tools `Ctrl+1`… in order; from undo on, mnemonic keys), migration of old default layouts (`layout=2`), parsing, `shortcuts.txt` load/save, `first_run()` |
 | `settings.rs` | Settings window: frameless and custom-drawn (GDI + GDI+), DPI-scaled, key recording, live hotkey probe, theme picker |
 | `app_icon.rs` | Tray icon from the embedded `assets/icon/png` sizes, with an amber warning badge variant. The executable icon is `assets/icon/snapshot.ico`, compiled in by `build.rs` with rc.exe (see `assets/README.md`) |
-| `startup.rs` | Start-at-login value under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\Snapshot`; `follow_executable` repoints an existing entry at the running exe on every start (covers the snapshot.exe → just-snapshot.exe rename) |
+| `startup.rs` | Start-at-login value under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\just-snapshot`; `follow_executable` moves the old `Snapshot` value over and repoints the entry at the running exe on every start |
+| `migrate.rs` | First start after the Snapshot → just-snapshot rename: renames `%LOCALAPPDATA%\Snapshot`, moves `Snapshot/*` credentials, renames the default `Pictures\Snapshot` and the old default file name template. Runs only while the old settings folder exists and the new one does not; never overwrites |
 | `capture.rs` | Desktop grab, cropping, the `Surface` bitmap helper and PNG encoding |
 | `output.rs` | The only exit for captures: `deliver` copies (opaque bottom-up DIB + PNG), saves or pins, then auto-saves when enabled. Normal and long captures both use it |
 | `output_settings.rs` | `output.txt` (folder, file name template, auto-save, shadow, border), template expansion, the shadow/border decoration (real alpha, saved with `save_png_alpha`), and the 保存设置 window |
@@ -71,7 +72,7 @@ Build and test on Windows only. `snapshot.ps1` locates Cargo and the Visual Stud
 | `translate_overlay.rs` | Renders a translate pin's translation over its recognized lines (background median, ink color, fitted font); one line per line, or one wrapped block when the counts differ |
 | `translate_settings.rs` | Translation service window with native EDIT boxes (Tab via `IsDialogMessageW` in the main loop). Keys are written to the Credential Manager and never read back into the window |
 | `http.rs` | Blocking HTTPS POST over WinHTTP (system proxy and TLS); call off the UI thread |
-| `credential.rs` | Windows Credential Manager secrets named `Snapshot/<name>`. The ignored round-trip test needs the desktop session |
+| `credential.rs` | Windows Credential Manager secrets named `just-snapshot/<name>`. The ignored round-trip test needs the desktop session |
 | `digest.rs` | MD5 / SHA-256 from CNG for request signatures |
 | `pin_text.rs` | Text layer of a pin: word selection in reading order, hit testing (text selects, the rest drags the pin), copy, painting. `<test binary> pin_text --ignored` renders previews; `<test binary> pinned --ignored --nocapture` runs a real pin through recognition |
 
@@ -91,14 +92,14 @@ The overlay follows Snipaste's layout:
 
 | Location | Content |
 | --- | --- |
-| `%LOCALAPPDATA%\Snapshot\shortcuts.txt` (the folder, the Run value, credential names, `Pictures\Snapshot` and the default file name keep the old name so existing settings and keys survive the rename) | Shortcuts (`capture_secondary=` is the optional second capture key, empty when unset), pin opacity step and theme. Its absence (together with no legacy `hotkey.txt`) marks the first run, which enables start at login |
-| `%LOCALAPPDATA%\Snapshot\translate.txt` | Translation provider (none means the free service), OpenAI-compatible address and model, Baidu/Youdao app IDs, the optional email for the free service. Never secrets |
-| `%LOCALAPPDATA%\Snapshot\recording.txt` | Recording folder (empty means `Videos` next to just-snapshot.exe), frame rate, quality, sound and cursor defaults |
-| `%LOCALAPPDATA%\Snapshot\overlay.txt` | Input panels: visible, position (x, y; old files: anchor + offset), size, opacity |
-| `%LOCALAPPDATA%\Snapshot\output.txt` | Save folder (empty means Pictures\Snapshot), file name template, auto-save, shadow, border |
-| Credential Manager `Snapshot/translate/<provider>/<field>` | Translation API keys and secrets |
-| `%LOCALAPPDATA%\Snapshot\hotkey.txt` | Legacy capture shortcut, migrated on first run |
-| `HKCU\...\Run\Snapshot` | Start-at-login command, pointing at the running executable |
+| `%LOCALAPPDATA%\just-snapshot\shortcuts.txt` | Shortcuts (`capture_secondary=` is the optional second capture key, empty when unset), pin opacity step and theme. Its absence (together with no legacy `hotkey.txt`) marks the first run, which enables start at login |
+| `%LOCALAPPDATA%\just-snapshot\translate.txt` | Translation provider (none means the free service), OpenAI-compatible address and model, Baidu/Youdao app IDs, the optional email for the free service. Never secrets |
+| `%LOCALAPPDATA%\just-snapshot\recording.txt` | Recording folder (empty means `Videos` next to just-snapshot.exe), frame rate, quality, sound and cursor defaults |
+| `%LOCALAPPDATA%\just-snapshot\overlay.txt` | Input panels: visible, position (x, y; old files: anchor + offset), size, opacity |
+| `%LOCALAPPDATA%\just-snapshot\output.txt` | Save folder (empty means Pictures\just-snapshot), file name template, auto-save, shadow, border |
+| Credential Manager `just-snapshot/translate/<provider>/<field>` | Translation API keys and secrets |
+| `%LOCALAPPDATA%\just-snapshot\hotkey.txt` | Legacy capture shortcut, migrated on first run |
+| `HKCU\...\Run\just-snapshot` | Start-at-login command, pointing at the running executable |
 
 API keys and other secrets live only in the Credential Manager: never in `translate.txt`, the repo, logs, error messages or command lines. Before every commit, check the file list for anything key-like.
 

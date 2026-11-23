@@ -2,7 +2,7 @@
 //! and a small control bar (time, pause, stop, cancel) that turns into a
 //! result card when the file is saved (open, show in folder, make a GIF).
 //! Both are excluded from screen capture, so they never end up in the video.
-//! Recording options live in `%LOCALAPPDATA%\Snapshot\recording.txt`.
+//! Recording options live in `%LOCALAPPDATA%\just-snapshot\recording.txt`.
 
 use std::{
     cell::RefCell,
@@ -61,7 +61,7 @@ const AMBER: u32 = 0x0020_a0f0;
 // Options.
 
 fn config_path() -> Option<PathBuf> {
-    Some(PathBuf::from(env::var_os("LOCALAPPDATA")?).join("Snapshot").join("recording.txt"))
+    Some(crate::migrate::app_data().ok()?.join("recording.txt"))
 }
 
 pub fn load_options() -> Options {
@@ -142,7 +142,7 @@ fn default_folder() -> PathBuf {
     env::current_exe()
         .ok()
         .and_then(|exe| exe.parent().map(|folder| folder.join("Videos")))
-        .unwrap_or_else(|| env::temp_dir().join("Snapshot"))
+        .unwrap_or_else(|| env::temp_dir().join(crate::migrate::NAME))
 }
 
 // ---------------------------------------------------------------------------
