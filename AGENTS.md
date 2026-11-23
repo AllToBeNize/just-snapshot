@@ -16,7 +16,7 @@ Build and test on Windows only. `snapshot.ps1` locates Cargo and the Visual Stud
 | --- | --- |
 | `.\snapshot.ps1 build` | Release build: `target/x86_64-pc-windows-msvc/release/just-snapshot.exe` |
 | `.\snapshot.ps1 test` | Run all unit tests |
-| `.\snapshot.ps1 package` | Test, build, then write `dist/just-snapshot-v<version>-windows-x64.zip` and `.sha256` |
+| `.\snapshot.ps1 package` | Test, build, then write `dist/just-snapshot-v<version>-windows-x64.zip`, `dist/just-snapshot-v<version>-setup.exe` and a `.sha256` for each |
 | `.\snapshot.ps1 release -Tag vX.Y.Z` | Package and create a draft GitHub Release (needs `gh auth login`) |
 
 - The script writes rustup progress to stderr. In a remote or non-interactive PowerShell session that is turned into a terminating error; run it from `cmd` instead (`powershell -NoProfile -ExecutionPolicy Bypass -File snapshot.ps1 test > log 2>&1`).
@@ -29,7 +29,7 @@ Build and test on Windows only. `snapshot.ps1` locates Cargo and the Visual Stud
 
 1. Bump `version` in `Cargo.toml`, run `.\snapshot.ps1 build` to sync `Cargo.lock`, write the user-facing notes under `## vX.Y.Z` in `RELEASE_NOTES.md` (Chinese, one `- ` item per change: what users notice, not commit titles), and commit.
 2. `git tag vX.Y.Z`, `git push origin HEAD`, `git push origin vX.Y.Z`.
-3. In the publishing machine's desktop session (the release key is in its Credential Manager, which remote shells cannot read): `.\snapshot.ps1 release -Tag vX.Y.Z [-KeyId <id>]`. It creates a **draft** with the ZIP, SHA256, the bare `just-snapshot.exe` and the signed `latest.json`, with the notes as the release text. It refuses to run on a dirty tree, without notes for the version, when the remote tag is not at `HEAD`, when the key is missing or not in `TRUSTED_KEYS`, or when a release for the tag already exists.
+3. In the publishing machine's desktop session (the release key is in its Credential Manager, which remote shells cannot read): `.\snapshot.ps1 release -Tag vX.Y.Z [-KeyId <id>]`. It creates a **draft** with the setup executable, the ZIP, their SHA256 files, the bare `just-snapshot.exe` and the signed `latest.json`, with the notes as the release text. It refuses to run on a dirty tree, without notes for the version, when the remote tag is not at `HEAD`, when the key is missing or not in `TRUSTED_KEYS`, or when a release for the tag already exists.
 4. A human reviews and publishes the draft on GitHub. Do not tag, push, or publish unless asked. Installed copies see the update once the release is published (not a draft, not a prerelease): they read `releases/latest/download/latest.json`.
 
 Release keys: one ECDSA P-256 key per publishing machine, created there with `.\snapshot.ps1 release-key [-KeyId <id>]` (default id: the computer name). The private key stays in that machine's Credential Manager (`just-snapshot/release-key/<id>`); its public key goes into `TRUSTED_KEYS` in `src/release_key.rs`. A new machine can publish only after a release containing its key, published from a machine that is already trusted. To retire a machine, remove its key and release. Never copy or export a private key.
@@ -43,6 +43,7 @@ Release keys: one ECDSA P-256 key per publishing machine, created there with `.\
 | `hotkey.rs` | Binding list in toolbar order, defaults (capture `Ctrl+Alt+A`; drawing tools `Ctrl+1`… in order; from undo on, mnemonic keys), migration of old default layouts (`layout=2`), parsing, `shortcuts.txt` load/save, `first_run()` |
 | `settings.rs` | Settings window: frameless and custom-drawn (GDI + GDI+), DPI-scaled, key recording, live hotkey probe, theme picker |
 | `app_icon.rs` | Tray icon from the embedded `assets/icon/png` sizes, with an amber warning badge variant. The executable icon is `assets/icon/snapshot.ico`, compiled in by `build.rs` with rc.exe (see `assets/README.md`) |
+| `setup.rs` | Install and uninstall window. The setup executable is the app itself: a file name containing `setup` (or `--setup`) shows the installer instead of starting the app; `--uninstall` is the command registered under Settings › Apps. `install_dir` puts a `just-snapshot` folder (name editable) inside whatever parent the user picks, unless the parent already has that name. Installing stops running copies (WM_CLOSE to `Snapshot.Tray`), swaps the exe via `.old` like updates, writes the license notices, shortcuts and `HKCU\...\Uninstall\just-snapshot`. Uninstalling removes only what installing wrote (never `Videos` or other user files) and deletes its own running exe through a hidden `cmd` after exit. `Places` holds every outside location so tests use temporary ones; `refresh_registration` keeps the listed version current after in-app updates |
 | `startup.rs` | Start-at-login value under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\just-snapshot`; `follow_executable` moves the old `Snapshot` value over and repoints the entry at the running exe on every start |
 | `migrate.rs` | First start after the Snapshot → just-snapshot rename: renames `%LOCALAPPDATA%\Snapshot`, moves `Snapshot/*` credentials, renames the default `Pictures\Snapshot` and the old default file name template. Runs only while the old settings folder exists and the new one does not; never overwrites |
 | `capture.rs` | Desktop grab, cropping, the `Surface` bitmap helper and PNG encoding |
@@ -105,6 +106,7 @@ The overlay follows Snipaste's layout:
 | Credential Manager `just-snapshot/translate/<provider>/<field>` | Translation API keys and secrets |
 | `%LOCALAPPDATA%\just-snapshot\hotkey.txt` | Legacy capture shortcut, migrated on first run |
 | `HKCU\...\Run\just-snapshot` | Start-at-login command, pointing at the running executable |
+| `HKCU\...\Uninstall\just-snapshot` | The Settings › Apps entry written by the installer (install folder, version, `--uninstall` command) |
 | `%LOCALAPPDATA%\just-snapshot\update.txt` | Update mirror prefixes (`mirrors=`, `;`-separated, tried after GitHub) and the version the user skipped. `auto_update=on/off` lives in `shortcuts.txt` |
 | `%LOCALAPPDATA%\just-snapshot\update\` | Downloaded executables and `updated.json` (what the next start reports), cleared after a successful update |
 | Credential Manager `just-snapshot/release-key/<id>` | This machine's private release key, only on publishing machines |

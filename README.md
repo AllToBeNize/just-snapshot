@@ -18,7 +18,14 @@
 
 ## 下载安装
 
-到 [Releases](https://github.com/AllToBeNize/just-snapshot/releases) 下载最新的 `just-snapshot-v<版本>-windows-x64.zip`，解压后运行 `just-snapshot.exe`，程序会驻留在系统托盘。
+到 [Releases](https://github.com/AllToBeNize/just-snapshot/releases) 下载最新的 `just-snapshot-v<版本>-setup.exe`，双击打开安装界面：
+
+- **安装位置**：默认装到 `%LOCALAPPDATA%\Programs`，不需要管理员权限。点「选择…」随便选一个文件夹就行，比如直接选 `D:\`，安装程序会在里面自动建一个 `just-snapshot` 文件夹装进去，不用自己想名字；想换名字就改「文件夹名」。选的文件夹本身就叫这个名字时（比如重装时选了 `D:\just-snapshot`）直接装在里面，不会再套一层。最终位置实时显示在输入框下面。
+- **附带选项**：开始菜单快捷方式（默认开）、桌面快捷方式（默认关）、安装完成后启动（默认开）。
+- **重装和升级**：再运行一次安装程序就行，界面会带出上次的位置；正在运行的 just-snapshot 会先退出再替换，设置都保留。平时的版本更新走程序内的自动更新，不用重新安装。
+- **卸载**：在 Windows「设置 → 应用」里找到 just-snapshot 卸载，会删掉程序、快捷方式和开机启动项。「同时删除我的设置」默认不开；截图和录像（包括程序旁边的 `Videos` 文件夹）不会删。
+
+不想安装的话，也可以下载 `just-snapshot-v<版本>-windows-x64.zip`，解压后直接运行 `just-snapshot.exe`。程序会驻留在系统托盘。
 
 第一次运行时 just-snapshot 会把自己加入开机启动。不需要的话，右键托盘图标 →「设置」，取消勾选「登录 Windows 时自动启动」。
 

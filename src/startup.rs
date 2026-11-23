@@ -66,6 +66,22 @@ pub fn follow_executable() -> Result<(), String> {
     Ok(())
 }
 
+/// Removes the start-at-login entry when it starts a program inside `dir`,
+/// for uninstalling; an entry for a copy elsewhere stays.
+pub fn remove_if_inside(dir: &std::path::Path) -> Result<(), String> {
+    let Some(command) = read_command()? else {
+        return Ok(());
+    };
+    let length = command.iter().position(|&unit| unit == 0).unwrap_or(command.len());
+    let command = String::from_utf16_lossy(&command[..length]).to_lowercase();
+    let mut folder = dir.to_string_lossy().trim_end_matches('\\').to_lowercase();
+    folder.push('\\');
+    if command.trim_start_matches('"').starts_with(&folder) {
+        write_command(None)?;
+    }
+    Ok(())
+}
+
 fn current_command() -> Result<Vec<u16>, String> {
     let executable = env::current_exe().map_err(|error| format!("无法获取程序路径。\n{error}"))?;
     let command: Vec<_> = std::iter::once(u16::from(b'"'))

@@ -105,6 +105,36 @@ pub fn load(name: &str) -> Result<Option<String>, String> {
     }
 }
 
+/// Deletes every secret under `just-snapshot/<prefix>/`, for uninstalling;
+/// returns what could not be deleted.
+pub fn delete_all(prefix: &str) -> Vec<String> {
+    let mut failures = Vec::new();
+    let filter = target(&format!("{prefix}/*"));
+    let mut count = 0;
+    let mut list: *mut *mut CREDENTIALW = null_mut();
+    unsafe {
+        if CredEnumerateW(filter.as_ptr(), 0, &mut count, &mut list) == 0 {
+            if GetLastError() != ERROR_NOT_FOUND {
+                failures.push(format!("无法列出保存的密钥：{}", std::io::Error::last_os_error()));
+            }
+            return failures;
+        }
+        for &credential in std::slice::from_raw_parts(list, count as usize) {
+            let credential = &*credential;
+            if credential.Type == CRED_TYPE_GENERIC
+                && CredDeleteW(credential.TargetName, CRED_TYPE_GENERIC, 0) == 0
+                && GetLastError() != ERROR_NOT_FOUND
+            {
+                let length = (0..).take_while(|&index| *credential.TargetName.add(index) != 0).count();
+                let name = String::from_utf16_lossy(std::slice::from_raw_parts(credential.TargetName, length));
+                failures.push(format!("密钥 {name}：{}", std::io::Error::last_os_error()));
+            }
+        }
+        CredFree(list.cast());
+    }
+    failures
+}
+
 #[cfg(test)]
 pub fn delete(name: &str) -> Result<(), String> {
     let target = target(name);

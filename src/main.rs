@@ -37,6 +37,7 @@ mod scroll_stitch;
 mod selection;
 mod selection_geometry;
 mod settings;
+mod setup;
 mod startup;
 mod targets;
 mod text_mark;
@@ -112,6 +113,17 @@ fn main() {
     if let Some(code) = release_command(&args) {
         std::process::exit(code);
     }
+    if let Some(mode) = setup::mode(&args) {
+        let result = unsafe {
+            SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+            setup::run(mode)
+        };
+        if let Err(error) = result {
+            unsafe { show_error(null_mut(), &error) };
+            std::process::exit(1);
+        }
+        return;
+    }
     if let Err(error) = unsafe { run(&args) } {
         unsafe { show_error(null_mut(), &error) };
         std::process::exit(1);
@@ -169,6 +181,7 @@ unsafe fn run(args: &[String]) -> Result<(), String> {
     // After an update: wait for the old process to let go of the tray and
     // the shortcuts, then clean up what the update left behind.
     let updated = update::finish(args);
+    setup::refresh_registration();
     let failures = migrate::run();
     if !failures.is_empty() {
         show_error(

@@ -71,7 +71,8 @@ if ($Command -eq 'help') {
 just-snapshot build CLI (Windows x64)
   .\snapshot.ps1 build     Build the release executable
   .\snapshot.ps1 test      Run release tests
-  .\snapshot.ps1 package   Test, build, and create dist ZIP + SHA256
+  .\snapshot.ps1 package   Test, build, and create the dist ZIP, the setup
+                          executable and their SHA256 files
   .\snapshot.ps1 release -Tag v0.1.0 [-KeyId <id>]
                           Package, sign the update manifest and upload a
                           GitHub Release draft
@@ -148,11 +149,18 @@ try {
             }
             Remove-Item -LiteralPath $resolvedStaging -Recurse
         }
+        # The same executable again: started under a name containing
+        # "setup" it shows the install window (src/setup.rs).
+        $setup = Join-Path $dist "just-snapshot-v$version-setup.exe"
+        Copy-Item "target\$target\release\just-snapshot.exe" $setup -Force
+        foreach ($file in @($zip, $setup)) {
+            $hash = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash.ToLowerInvariant()
+            [IO.File]::WriteAllText("$file.sha256", "$hash  $([IO.Path]::GetFileName($file))`n", [Text.UTF8Encoding]::new($false))
+        }
         $checksum = "$zip.sha256"
-        $hash = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLowerInvariant()
-        [IO.File]::WriteAllText($checksum, "$hash  $([IO.Path]::GetFileName($zip))`n", [Text.UTF8Encoding]::new($false))
         Write-Host "Package: $zip"
-        Write-Host "SHA256:  $checksum"
+        Write-Host "Setup:   $setup"
+        Write-Host "SHA256:  $checksum, $setup.sha256"
         if ($Command -eq 'release') {
             # The bare executable is what the in-app update downloads.
             $exe = Join-Path $dist 'just-snapshot.exe'
@@ -172,7 +180,7 @@ try {
             Invoke-App @('--release-sign', $KeyId, $payloadFile, $latest)
             Remove-Item -LiteralPath $payloadFile
             Write-Host "Signed:  $latest (key $KeyId)"
-            Invoke-Checked gh @('release', 'create', $Tag, $zip, $checksum, $exe, $latest, '--verify-tag', '--draft', '--title', "just-snapshot $Tag", '--notes-file', $notesFile)
+            Invoke-Checked gh @('release', 'create', $Tag, $setup, "$setup.sha256", $zip, $checksum, $exe, $latest, '--verify-tag', '--draft', '--title', "just-snapshot $Tag", '--notes-file', $notesFile)
         }
     }
 } catch {
