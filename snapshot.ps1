@@ -41,7 +41,9 @@ function Invoke-App {
 function Get-ReleaseNotes {
     param([string]$Version)
     $text = Get-Content -LiteralPath (Join-Path $projectRoot 'RELEASE_NOTES.md') -Raw -Encoding UTF8
-    $match = [regex]::Match($text, "(?ms)^##\s+v$([regex]::Escape($Version))\s*$(.*?)(?=^##\s|\z)")
+    # Single quotes: in a double-quoted string PowerShell would run $(.*?).
+    $pattern = '(?ms)^##\s+v' + [regex]::Escape($Version) + '\s*$(.*?)(?=^##\s|\z)'
+    $match = [regex]::Match($text, $pattern)
     $notes = $match.Groups[1].Value.Trim()
     if (-not $match.Success -or -not $notes) { throw "Write the notes for v$Version in RELEASE_NOTES.md (## v$Version) first." }
     return $notes
