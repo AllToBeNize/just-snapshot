@@ -54,6 +54,8 @@ pub struct HintPanel {
     max_height: i32,
     bottom: i32,
     mode: Option<HintMode>,
+    /// Folded to one line that says how to bring the panel back.
+    hidden: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -332,9 +334,24 @@ impl HintPanel {
             max_height,
             bottom,
             mode: None,
+            hidden: false,
         };
         hint.set_mode(source, HintMode::Automatic);
         Ok(hint)
+    }
+
+    /// Folds the panel to its one-line reminder, or opens it again.
+    pub unsafe fn set_hidden(&mut self, source: HDC, hidden: bool) -> Option<[RECT; 2]> {
+        if self.hidden == hidden {
+            return None;
+        }
+        self.hidden = hidden;
+        let mode = self.mode.take().unwrap_or(HintMode::Automatic);
+        self.set_mode(source, mode)
+    }
+
+    pub fn hidden(&self) -> bool {
+        self.hidden
     }
 
     pub unsafe fn set_mode(&mut self, source: HDC, mode: HintMode) -> Option<[RECT; 2]> {
@@ -343,6 +360,13 @@ impl HintPanel {
         }
         let previous = self.bounds;
         self.mode = Some(mode);
+        let hidden = self.hidden;
+        let title_height = if hidden { 0 } else { TITLE_HEIGHT };
+        let sections = if hidden {
+            vec![(w!(""), vec![(HintInput::Bound(Binding::ShowHints), w!("显示快捷键提示"))])]
+        } else {
+            mode.sections()
+        };
         let surface = &self.surface;
         let description_font = typography::font(TextStyle::HintDescription);
         let key_font = typography::font(TextStyle::Ui);
@@ -357,7 +381,7 @@ impl HintPanel {
         }
         let mut columns = Vec::new();
         let mut width = PANEL_INSET;
-        for (title, rows) in mode.sections() {
+        for (title, rows) in sections {
             SelectObject(surface.dc, key_font);
             let mut keys = 0;
             let lines: Vec<_> = rows
@@ -387,9 +411,38 @@ impl HintPanel {
             width += gap + column_width;
             columns.push(Column { title, lines, keys, width: column_width });
         }
+        // The open panel says how to fold it, right in the last column's title
+        // line, so a key pressed by mistake is never a mystery. Typing text
+        // takes the letter, so not while editing.
+        let fold = (!hidden && mode != HintMode::EditText).then(|| {
+            SelectObject(surface.dc, key_font);
+            let caps: Vec<_> = HintInput::Bound(Binding::ShowHints)
+                .keycaps(bindings)
+                .into_iter()
+                .map(|cap| {
+                    let width = cap.width(surface.dc);
+                    (cap, width)
+                })
+                .collect();
+            SelectObject(surface.dc, description_font);
+            let label = w!("隐藏提示");
+            let label_width = text_width(surface.dc, label);
+            (caps, label, label_width)
+        });
+        if let (Some((caps, _, label_width)), Some(last)) = (&fold, columns.last_mut()) {
+            SelectObject(surface.dc, description_font);
+            let needed = text_width(surface.dc, last.title)
+                + COLUMN_GAP
+                + caps.iter().map(|(_, width)| width + KEYCAP_GAP).sum::<i32>()
+                + label_width;
+            if needed > last.width {
+                width += needed - last.width;
+                last.width = needed;
+            }
+        }
         let width = (width + PANEL_INSET).min(self.max_width);
         let rows = columns.iter().map(|column| column.lines.len()).max().unwrap_or(0) as i32;
-        let height = (rows * ROW_HEIGHT + TITLE_HEIGHT + 2 * PANEL_INSET).min(self.max_height);
+        let height = (rows * ROW_HEIGHT + title_height + 2 * PANEL_INSET).min(self.max_height);
         self.bounds.top = self.bottom - height;
         self.bounds.right = self.bounds.left + width;
         let panel = RECT {
@@ -423,6 +476,7 @@ impl HintPanel {
         FrameRect(surface.dc, &panel, brush);
         SetBkMode(surface.dc, TRANSPARENT as i32);
         let mut left = PANEL_INSET;
+        let count = columns.len();
         for (index, column) in columns.into_iter().enumerate() {
             if index > 0 {
                 // A faint rule between columns.
@@ -435,9 +489,23 @@ impl HintPanel {
             SetTextColor(surface.dc, mix(palette.tooltip_text, palette.tooltip, 0.4));
             let mut title = RECT { left, top: PANEL_INSET, right: left + column.width, bottom: PANEL_INSET + TITLE_HEIGHT - 4 };
             DrawTextW(surface.dc, column.title, -1, &mut title, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+            if let Some((caps, label, label_width)) = fold.as_ref().filter(|_| index == count - 1) {
+                let right = left + column.width;
+                let mut text = RECT { left: right - label_width, ..title };
+                DrawTextW(surface.dc, *label, -1, &mut text, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+                let cap_top = (title.top + title.bottom - KEYCAP_HEIGHT) / 2;
+                let mut x = text.left - KEYCAP_GAP - caps.iter().map(|(_, width)| width + KEYCAP_GAP).sum::<i32>() + KEYCAP_GAP;
+                SelectObject(surface.dc, key_font);
+                for (cap, width) in caps {
+                    cap.paint(surface.dc, RECT { left: x, top: cap_top, right: x + width, bottom: cap_top + KEYCAP_HEIGHT });
+                    x += width + KEYCAP_GAP;
+                }
+                SelectObject(surface.dc, description_font);
+                SetTextColor(surface.dc, mix(palette.tooltip_text, palette.tooltip, 0.4));
+            }
             let split = left + column.keys;
             for (row, (caps, cap_width, description)) in column.lines.into_iter().enumerate() {
-                let top = PANEL_INSET + TITLE_HEIGHT + row as i32 * ROW_HEIGHT;
+                let top = PANEL_INSET + title_height + row as i32 * ROW_HEIGHT;
                 if top + ROW_HEIGHT > height {
                     break;
                 }
@@ -670,6 +738,28 @@ mod tests {
     use std::ptr::null_mut;
 
     #[test]
+    fn hidden_hints_fold_to_one_line_and_open_again() {
+        unsafe {
+            let area = RECT { right: 800, bottom: 600, ..Default::default() };
+            let source = Surface::new(null_mut(), area.right, area.bottom).unwrap();
+            let r = |rect: RECT| (rect.left, rect.top, rect.right, rect.bottom);
+            let mut hint = HintPanel::new(source.dc, area).unwrap();
+            let [_, open] = hint.set_mode(source.dc, HintMode::Selected).unwrap();
+            assert!(hint.set_hidden(source.dc, false).is_none(), "already open");
+            let [before, folded] = hint.set_hidden(source.dc, true).unwrap();
+            assert_eq!(r(before), r(open));
+            assert_eq!(folded.bottom, open.bottom, "stays anchored at the bottom");
+            assert_eq!(folded.bottom - folded.top, ROW_HEIGHT + 2 * PANEL_INSET, "one line, no title");
+            assert!(folded.right - folded.left < 300);
+            // Mode changes while folded keep the one line.
+            let [_, still] = hint.set_mode(source.dc, HintMode::Automatic).unwrap();
+            assert_eq!(r(still), r(folded));
+            let [_, reopened] = hint.set_hidden(source.dc, false).unwrap();
+            assert_eq!(r(reopened), r(HintPanel::new(source.dc, area).unwrap().bounds), "back to the full Automatic panel");
+        }
+    }
+
+    #[test]
     fn hint_rows_refresh_by_mode_and_keep_the_bottom_anchor() {
         unsafe {
             let area = RECT {
@@ -689,9 +779,16 @@ mod tests {
             if std::env::var_os("SNAPSHOT_PREVIEW").is_some() {
                 let folder = std::env::temp_dir().join("snapshot-preview");
                 std::fs::create_dir_all(&folder).unwrap();
-                for (name, mode) in [("selected", HintMode::Selected), ("rectangle", HintMode::Annotate(Tool::Rectangle)), ("automatic", HintMode::Automatic)] {
+                for (name, mode, hidden) in [
+                    ("selected", HintMode::Selected, false),
+                    ("rectangle", HintMode::Annotate(Tool::Rectangle), false),
+                    ("automatic", HintMode::Automatic, false),
+                    ("text", HintMode::SelectedText, false),
+                    ("hidden", HintMode::Selected, true),
+                ] {
                     let mut panel = HintPanel::new(source.dc, area).unwrap();
                     panel.set_mode(source.dc, mode);
+                    panel.set_hidden(source.dc, hidden);
                     let canvas = Surface::new(null_mut(), area.right, area.bottom).unwrap();
                     FillRect(canvas.dc, &area, GetStockObject(GRAY_BRUSH));
                     panel.paint(canvas.dc, area);

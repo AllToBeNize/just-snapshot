@@ -73,6 +73,7 @@ impl Action {
             | Binding::RecordPause
             | Binding::RecordScreen
             | Binding::ShowPointer
+            | Binding::ShowHints
             | Binding::ShowKeys
             | Binding::ShowPad => return None,
         })

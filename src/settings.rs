@@ -197,6 +197,8 @@ impl Draft {
             theme: self.theme,
             capture_secondary: self.secondary,
             auto_update: self.auto_update,
+            // Switched from the capture with its key, not in this window.
+            show_hints: crate::show_hints(),
         };
         preferences.validate()?;
         Ok(preferences)
@@ -2216,6 +2218,8 @@ fn binding_icon(binding: Binding) -> Icon {
         Binding::CaptureWindow => Icon::Window,
         Binding::LastCapture => Icon::History,
         Binding::ShowPointer => Icon::MouseLeft,
+        // The same keycap look as the panel it switches; 键鼠显示 is on the other tab.
+        Binding::ShowHints => Icon::Keyboard,
         Binding::RecordScreen => Icon::Record,
         Binding::Record => Icon::Video,
         Binding::RecordPause => Icon::Pause,

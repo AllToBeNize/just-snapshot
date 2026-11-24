@@ -493,7 +493,8 @@ unsafe fn open_selection(instance: HINSTANCE, start: Start) -> io::Result<()> {
     let pointer_monitor = monitor
         .and_then(|info| overlay_rect(info.rcMonitor, bounds))
         .unwrap_or(canvas);
-    let hint = HintPanel::new(source, work_area)?;
+    let mut hint = HintPanel::new(source, work_area)?;
+    hint.set_hidden(source, !crate::show_hints());
     let dimmed = Surface::new(source, width, height)?;
     let live = if record.is_some() {
         // Painted in marker colors, turned into alpha after each paint (see `paint::present_live`).
@@ -891,6 +892,10 @@ unsafe fn handle_message(window: HWND, message: u32, wparam: WPARAM, lparam: LPA
                 if lparam & (1 << 30) == 0 {
                     toggle_pointer(window);
                 }
+            } else if hotkey::current().resolve(Shortcut { modifiers, key }) == Some(Binding::ShowHints) {
+                if lparam & (1 << 30) == 0 {
+                    toggle_hints(window);
+                }
             } else if let Some(action) = hotkey::current()
                 .resolve(Shortcut { modifiers, key })
                 .and_then(Action::from_binding)
@@ -969,6 +974,22 @@ fn point_param(point: POINT) -> LPARAM {
 }
 
 /// Shows or hides the captured mouse pointer in the picture (and in its dimmed copy).
+/// Folds or opens the hint panel and remembers it for later captures.
+unsafe fn toggle_hints(window: HWND) {
+    let changed = SESSION.with_borrow_mut(|session| {
+        let selection = session.as_mut()?;
+        let hidden = !selection.hint.hidden();
+        let bounds = selection.hint.set_hidden(selection.desktop.surface.dc, hidden)?;
+        Some((hidden, bounds))
+    });
+    if let Some((hidden, bounds)) = changed {
+        for rect in bounds {
+            invalidate(window, &rect, 0);
+        }
+        crate::set_show_hints(!hidden);
+    }
+}
+
 unsafe fn toggle_pointer(window: HWND) {
     let changed = SESSION.with_borrow_mut(|session| {
         let selection = session.as_mut()?;

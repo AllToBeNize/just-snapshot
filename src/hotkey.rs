@@ -41,6 +41,8 @@ pub enum Binding {
     LastCapture,
     /// In the capture: show or hide the mouse pointer in the picture.
     ShowPointer,
+    /// In the capture: show or hide the shortcut hint panel; remembered.
+    ShowHints,
     /// Global: pick an area and record it; while recording, stop and save.
     Record,
     /// Global, registered only while recording: pause or resume.
@@ -67,7 +69,7 @@ pub enum Global {
 }
 
 /// In toolbar order, so the settings list reads like the toolbar.
-pub const BINDINGS: [Binding; 25] = [
+pub const BINDINGS: [Binding; 26] = [
     Binding::Capture,
     Binding::Rectangle,
     Binding::Text,
@@ -88,6 +90,7 @@ pub const BINDINGS: [Binding; 25] = [
     Binding::CaptureWindow,
     Binding::LastCapture,
     Binding::ShowPointer,
+    Binding::ShowHints,
     Binding::Record,
     Binding::RecordPause,
     Binding::RecordScreen,
@@ -115,6 +118,7 @@ const NAMES: [&str; BINDINGS.len()] = [
     "capture_window",
     "last_capture",
     "show_pointer",
+    "show_hints",
     "record",
     "record_pause",
     "record_screen",
@@ -141,7 +145,8 @@ const LABELS: [&str; BINDINGS.len()] = [
     "复制",
     "截取窗口",
     "上次截图",
-    "显示 / 隐藏指针",
+    "截图带指针",
+    "快捷键提示",
     "开始 / 停止录像",
     "暂停 / 继续",
     "全屏 / 游戏录像",
@@ -157,6 +162,7 @@ const OPACITY_STEP_KEY: &str = "pin_opacity_step";
 const THEME_KEY: &str = "theme";
 const SECONDARY_KEY: &str = "capture_secondary";
 const AUTO_UPDATE_KEY: &str = "auto_update";
+const HINTS_KEY: &str = "hints";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Preferences {
@@ -167,6 +173,8 @@ pub struct Preferences {
     pub capture_secondary: Option<Shortcut>,
     /// Look for a new version shortly after start-up.
     pub auto_update: bool,
+    /// The shortcut hint panel in the capture; off leaves a one-line reminder.
+    pub show_hints: bool,
 }
 
 impl Default for Preferences {
@@ -177,6 +185,7 @@ impl Default for Preferences {
             theme: Theme::default(),
             capture_secondary: None,
             auto_update: true,
+            show_hints: true,
         }
     }
 }
@@ -228,8 +237,9 @@ pub const DEFAULT: Bindings = Bindings([
         modifiers: MOD_CONTROL | MOD_ALT,
         key: b'R' as u32,
     },
-    // A single key: it only works inside the capture, never system-wide.
-    Shortcut { modifiers: 0, key: b'P' as u32 },
+    // Single keys: they only work inside the capture, never system-wide.
+    Shortcut { modifiers: 0, key: b'T' as u32 },
+    Shortcut { modifiers: 0, key: b'G' as u32 },
     ctrl_alt(b'Z'),
     ctrl_alt(b'P'),
     // Alt+F8, next to the Alt+F9 game recorders use.
@@ -267,8 +277,10 @@ const OLD_DEFAULTS: [(&str, u8); 15] = [
     ("number", b'N'),
     ("magnify", b'M'),
 ];
+/// Single-key defaults that changed in layout 3: still on the old key, they move.
+const LAYOUT_3_MOVES: [(Binding, u8); 1] = [(Binding::ShowPointer, b'P')];
 const LAYOUT_KEY: &str = "layout";
-const LAYOUT: &str = "2";
+const LAYOUT: u32 = 3;
 
 thread_local! {
     static CURRENT: Cell<Bindings> = const { Cell::new(DEFAULT) };
@@ -290,7 +302,7 @@ impl Binding {
     /// May be a single letter or digit with no modifier. Only for keys used
     /// inside the capture; a global one would take the letter from every program.
     pub fn allows_single_key(self) -> bool {
-        self == Self::ShowPointer
+        matches!(self, Self::ShowPointer | Self::ShowHints)
     }
 
     /// Registered with Windows, so it works in any program.
@@ -459,6 +471,7 @@ fn load_from(path: &Path) -> Result<Preferences, String> {
     let mut theme = Theme::default();
     let mut capture_secondary = None;
     let mut auto_update = true;
+    let mut show_hints = true;
     let mut layout = None;
     let mut stored: Vec<(usize, Shortcut)> = Vec::new();
     match fs::read_to_string(path) {
@@ -486,8 +499,11 @@ fn load_from(path: &Path) -> Result<Preferences, String> {
                     };
                 } else if name == AUTO_UPDATE_KEY {
                     auto_update = value.trim() != "off";
+                } else if name == HINTS_KEY {
+                    show_hints = value.trim() != "off";
                 } else if name == LAYOUT_KEY {
-                    layout = Some(value.trim().to_string());
+                    // Unreadable counts as the oldest layout.
+                    layout = Some(value.trim().parse::<u32>().unwrap_or(1));
                 } else if name == THEME_KEY {
                     // An unknown theme falls back to the default instead of failing startup.
                     theme = Theme::parse(value).unwrap_or_default();
@@ -524,7 +540,8 @@ fn load_from(path: &Path) -> Result<Preferences, String> {
         }
         Err(error) => return Err(format!("无法读取 {}。\n{error}", path.display())),
     }
-    if !stored.is_empty() && layout.as_deref() != Some(LAYOUT) {
+    let layout = layout.unwrap_or(1);
+    if !stored.is_empty() && layout < 2 {
         let mut migrated = bindings;
         for (index, shortcut) in &stored {
             let old = OLD_DEFAULTS.iter().find(|(name, _)| *name == NAMES[*index]);
@@ -535,6 +552,17 @@ fn load_from(path: &Path) -> Result<Preferences, String> {
         // Keys the user picked that now collide keep the old layout instead.
         if migrated.validate().is_ok() {
             bindings = migrated;
+        }
+    }
+    if layout < 3 {
+        for (binding, old) in LAYOUT_3_MOVES {
+            let mut migrated = bindings;
+            if migrated.get(binding) == (Shortcut { modifiers: 0, key: u32::from(old) }) {
+                migrated.set(binding, DEFAULT.get(binding));
+                if migrated.validate().is_ok() {
+                    bindings = migrated;
+                }
+            }
         }
     }
     // A binding added in a newer version takes its default unless the user
@@ -561,6 +589,7 @@ fn load_from(path: &Path) -> Result<Preferences, String> {
         theme,
         capture_secondary,
         auto_update,
+        show_hints,
     };
     preferences.validate()?;
     Ok(preferences)
@@ -618,14 +647,15 @@ fn save_to(path: &Path, preferences: Preferences) -> Result<(), String> {
         })
         .collect();
     contents.push_str(&format!(
-        "{SECONDARY_KEY}={}\r\n{OPACITY_STEP_KEY}={}\r\n{THEME_KEY}={}\r\n{AUTO_UPDATE_KEY}={}\r\n{LAYOUT_KEY}={LAYOUT}\r\n",
+        "{SECONDARY_KEY}={}\r\n{OPACITY_STEP_KEY}={}\r\n{THEME_KEY}={}\r\n{AUTO_UPDATE_KEY}={}\r\n{HINTS_KEY}={}\r\n{LAYOUT_KEY}={LAYOUT}\r\n",
         preferences
             .capture_secondary
             .map(Shortcut::label)
             .unwrap_or_default(),
         preferences.opacity_step,
         preferences.theme.key(),
-        if preferences.auto_update { "on" } else { "off" }
+        if preferences.auto_update { "on" } else { "off" },
+        if preferences.show_hints { "on" } else { "off" }
     ));
     fs::create_dir_all(path.parent().expect("settings directory"))
         .map_err(|error| error.to_string())?;
@@ -652,7 +682,8 @@ mod tests {
             "Ctrl+Shift+F10"
         );
         assert_eq!(Shortcut::parse("F1").unwrap().label(), "F1");
-        assert_eq!(DEFAULT.get(Binding::ShowPointer).label(), "P", "the pointer key is a single key");
+        assert_eq!(DEFAULT.get(Binding::ShowPointer).label(), "T", "the pointer key is a single key");
+        assert_eq!(DEFAULT.get(Binding::ShowHints).label(), "G");
         assert_eq!(Shortcut::parse_for(Binding::ShowPointer, "m"), Some(Shortcut { modifiers: 0, key: u32::from(b'M') }));
         assert_eq!(Shortcut::parse_for(Binding::Capture, "M"), None, "global keys need a modifier");
         for value in [
@@ -686,6 +717,26 @@ mod tests {
         preferences.bindings.set(Binding::Undo, ctrl(b'5'));
         save_to(&file, preferences).unwrap();
         assert_eq!(load_from(&file).unwrap().bindings.get(Binding::Undo), ctrl(b'5'));
+        fs::remove_dir_all(&folder).unwrap();
+    }
+
+    #[test]
+    fn the_old_pointer_key_moves_to_t_once() {
+        let folder = env::temp_dir().join(format!("snapshot-layout3-test-{}", std::process::id()));
+        fs::create_dir_all(&folder).unwrap();
+        let file = folder.join("shortcuts.txt");
+        // Saved by 0.5.x: every binding written out, the pointer on its old default.
+        fs::write(&file, "show_pointer=P\r\nlayout=2\r\n").unwrap();
+        let preferences = load_from(&file).unwrap();
+        assert_eq!(preferences.bindings.get(Binding::ShowPointer).label(), "T");
+        assert_eq!(preferences.bindings.get(Binding::ShowHints).label(), "G", "new binding takes its default");
+        assert!(preferences.show_hints, "hints are on unless saved off");
+        // Picked again after the move, P is the user's choice and stays.
+        let mut preferences = preferences;
+        preferences.bindings.set(Binding::ShowPointer, Shortcut::parse_for(Binding::ShowPointer, "P").unwrap());
+        preferences.show_hints = false;
+        save_to(&file, preferences).unwrap();
+        assert_eq!(load_from(&file).unwrap(), preferences);
         fs::remove_dir_all(&folder).unwrap();
     }
 

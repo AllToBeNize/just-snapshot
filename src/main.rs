@@ -166,6 +166,20 @@ fn release_command(args: &[String]) -> Option<i32> {
     })
 }
 
+/// Whether the capture shows its shortcut hint panel.
+pub fn show_hints() -> bool {
+    PREFERENCES.get().is_none_or(|preferences| preferences.show_hints)
+}
+
+/// Remembers the hint panel switch from the capture. The file keeps it for
+/// the next start; if writing fails, the switch still holds until then.
+pub fn set_show_hints(show: bool) {
+    let Some(mut preferences) = PREFERENCES.get() else { return };
+    preferences.show_hints = show;
+    PREFERENCES.set(Some(preferences));
+    let _ = hotkey::save(preferences);
+}
+
 /// Whether the automatic update check is on, for the settings window.
 pub fn auto_update_enabled() -> bool {
     PREFERENCES.get().is_none_or(|preferences| preferences.auto_update)
