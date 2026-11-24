@@ -1,10 +1,12 @@
 //! Floating panels that show input for recordings and streams: a keyboard
 //! and mouse panel (top-left by default) and an Xbox gamepad panel (top-right).
 //! Keys light up as they are pressed. The panels are click-through, topmost
-//! and drawn with per-pixel alpha. Each has a small grip (three bars) at its
-//! bottom edge that drags it anywhere; the grip takes the mouse but is left
-//! out of screen capture, so it never shows in a recording. Position, size
-//! and opacity are stored in `%LOCALAPPDATA%\just-snapshot\overlay.txt`.
+//! and drawn with per-pixel alpha. Each card ends in a strip (three bars and
+//! an arrow) joined to its bottom edge: the bars drag the panel anywhere, the
+//! arrow opens a small popup beside it for place, size and opacity. Strip and
+//! popup take the mouse but are left out of screen capture, so they never show
+//! in a recording. Position, size and opacity are stored in
+//! `%LOCALAPPDATA%\just-snapshot\overlay.txt`.
 //!
 //! Input comes from Raw Input on a message-only window, registered only while
 //! the key panel is shown; the gamepad is polled only while its panel is
@@ -50,9 +52,15 @@ use crate::{
 const PANEL_CLASS: *const u16 = w!("Snapshot.InputPanel");
 const GRIP_CLASS: *const u16 = w!("Snapshot.InputGrip");
 const SINK_CLASS: *const u16 = w!("Snapshot.InputSink");
+const OPTIONS_CLASS: *const u16 = w!("Snapshot.InputOptions");
 const PAD_TIMER: usize = 1;
 const STALE_TIMER: usize = 2;
 const FLASH_TIMER: usize = 3;
+/// On the options popup: closes it once the mouse has stayed away a while.
+const AWAY_TIMER: usize = 4;
+const AWAY_MS: u32 = 500;
+/// Ticks of `AWAY_MS` away from the panel, strip and popup before the popup closes.
+const AWAY_TICKS: u32 = 5;
 const PAD_MS: u32 = 16;
 const PAD_IDLE_MS: u32 = 1000;
 const FLASH_MS: u32 = 260;
@@ -60,8 +68,15 @@ const OTHER_MS: u32 = 1400;
 /// Panel sizes at 100 %, in pixels at 96 DPI.
 const KEYS_SIZE: (f32, f32) = (360.0, 186.0);
 const PAD_SIZE: (f32, f32) = (320.0, 186.0);
-/// The collapsed grip at 96 DPI; it sits just under its panel.
-const GRIP_SIZE: (f32, f32) = (64.0, 18.0);
+/// Height of the strip joined to a panel at 100 %; never under `STRIP_MIN` at 96 DPI.
+const STRIP: f32 = 22.0;
+const STRIP_MIN: f32 = 16.0;
+/// The card's corner radius at 100 %.
+const RADIUS: f32 = 14.0;
+/// The popup's size at 96 DPI.
+const OPTIONS_SIZE: (f32, f32) = (184.0, 164.0);
+/// Size and opacity change by this much per click.
+const STEP: i32 = 10;
 /// Distance from the screen edge for the default places.
 const MARGIN: i32 = 16;
 const WDA_EXCLUDEFROMCAPTURE: u32 = 0x11;
@@ -93,6 +108,32 @@ impl Panel {
 }
 
 pub const PANELS: [Panel; 2] = [Panel::Keys, Panel::Pad];
+
+/// Which side of its panel the strip is on: below, or above when there is no room below.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Side {
+    Below,
+    Above,
+}
+
+/// The two parts of the strip.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Part {
+    /// The bars: drag to move, wheel to resize.
+    Handle,
+    /// The arrow at the right end: opens the options popup.
+    More,
+}
+
+/// A control in the options popup.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Choice {
+    Anchor(usize),
+    /// Smaller (-1) or bigger (+1).
+    Scale(i32),
+    /// Fainter (-1) or stronger (+1).
+    Opacity(i32),
+}
 
 /// A place on the primary screen: a corner, an edge's middle or the center.
 /// Picked in the settings; dragging the panel afterwards moves it freely.
@@ -320,10 +361,17 @@ struct State {
     windows: [HWND; 2],
     grips: [HWND; 2],
     sink: HWND,
+    /// The options popup, shared by both panels.
+    popup: HWND,
     input: Input,
     drag: Option<Drag>,
-    /// The grip under the mouse.
-    hovered: Option<Panel>,
+    /// The strip part under the mouse.
+    hovered: Option<(Panel, Part)>,
+    /// The panel whose options popup is open.
+    options: Option<Panel>,
+    options_hover: Option<Choice>,
+    /// Timer ticks the mouse has been away from the open popup.
+    away: u32,
     listening: bool,
 }
 
@@ -336,6 +384,7 @@ pub unsafe fn register(instance: HINSTANCE) -> io::Result<()> {
         (PANEL_CLASS, panel_proc as unsafe extern "system" fn(HWND, u32, WPARAM, LPARAM) -> LRESULT, IDC_ARROW),
         (GRIP_CLASS, grip_proc, IDC_SIZEALL),
         (SINK_CLASS, sink_proc, IDC_ARROW),
+        (OPTIONS_CLASS, options_proc, IDC_ARROW),
     ] {
         let window_class = WNDCLASSW {
             lpfnWndProc: Some(proc),
@@ -375,15 +424,24 @@ pub unsafe fn start(instance: HINSTANCE) -> io::Result<()> {
         windows[index] = window;
         grips[index] = grip;
     }
+    let popup = CreateWindowExW(style, OPTIONS_CLASS, w!("just-snapshot 面板设置"), WS_POPUP, 0, 0, 1, 1, null_mut(), null_mut(), instance, null());
+    if popup.is_null() {
+        return Err(io::Error::last_os_error());
+    }
+    SetWindowDisplayAffinity(popup, WDA_EXCLUDEFROMCAPTURE);
     STATE.set(Some(State {
         config: OverlayConfig::load(),
         session: None,
         windows,
         grips,
         sink,
+        popup,
         input: Input::default(),
         drag: None,
         hovered: None,
+        options: None,
+        options_hover: None,
+        away: 0,
         listening: false,
     }));
     for panel in PANELS {
@@ -442,6 +500,9 @@ pub unsafe fn raise() {
             SetWindowPos(grip, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
         }
     }
+    if let Some(popup) = STATE.with_borrow(|state| state.as_ref().filter(|state| state.options.is_some()).map(|state| state.popup)) {
+        SetWindowPos(popup, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+    }
 }
 
 /// The recording is over: its panels go away; panels that were on anyway return to their place.
@@ -454,7 +515,19 @@ pub unsafe fn end_session() {
     }
 }
 
-/// Changes one panel's settings; shown and saved right away.
+/// Every view of the panels' settings (the settings window, the recording
+/// picker's option bar, the panel's own popup) reads `config()` and
+/// `current_anchor()`; after any change they all redraw from there.
+unsafe fn notify() {
+    crate::settings::refresh();
+    crate::selection::panels_changed();
+    if STATE.with_borrow(|state| state.as_ref().is_some_and(|state| state.options.is_some())) {
+        draw_options();
+    }
+}
+
+/// Changes one panel's settings: the only way they change. Shown, saved and
+/// passed on to every view right away.
 pub unsafe fn set(panel: Panel, config: PanelConfig) {
     let changed = STATE.with_borrow_mut(|state| {
         let state = state.as_mut()?;
@@ -468,6 +541,7 @@ pub unsafe fn set(panel: Panel, config: PanelConfig) {
     if let Some(config) = changed {
         let _ = config.save();
         apply(panel);
+        notify();
     }
 }
 
@@ -537,6 +611,9 @@ unsafe fn apply(panel: Panel) {
         return;
     };
     if !shown {
+        if STATE.with_borrow(|state| state.as_ref().is_some_and(|state| state.options == Some(panel))) {
+            close_options();
+        }
         ShowWindow(grip, SW_HIDE);
         ShowWindow(window, SW_HIDE);
     } else {
@@ -584,9 +661,9 @@ unsafe fn update_listening() {
     }
 }
 
-/// Draws a panel and puts it, and its grip, on screen where it belongs.
+/// Draws a panel and puts it, and its strip, on screen where it belongs.
 unsafe fn redraw(panel: Panel) {
-    let Some((window, config, session, dragging, image, factor)) = STATE.with_borrow(|state| {
+    let Some((window, config, session, dragging, width, height, factor)) = STATE.with_borrow(|state| {
         let state = state.as_ref()?;
         let window = state.windows[panel.index()];
         let dragging = state.drag.as_ref().is_some_and(|drag| drag.panel == panel);
@@ -595,8 +672,7 @@ unsafe fn redraw(panel: Panel) {
         let session = state.in_session(panel).map(|session| (session.area, session.moved[panel.index()]));
         let fit = session.map(|(area, _)| ((area.right - area.left) / 3, (area.bottom - area.top) / 3));
         let (width, height, factor) = panel_size(window, panel, config.scale, fit);
-        let image = render(panel, &state.input, width, height, factor, config.opacity)?;
-        Some((window, config, session, dragging, image, factor))
+        Some((window, config, session, dragging, width, height, factor))
     }) else {
         return;
     };
@@ -610,13 +686,21 @@ unsafe fn redraw(panel: Panel) {
         Some((_, Some((x, y)))) => POINT { x, y },
         Some((area, None)) => {
             let margin = (12.0 * factor).round() as i32;
-            config.anchor.place(area, image.width, image.height, margin)
+            config.anchor.place(area, width, height, margin)
         }
-        None => origin(panel, config, image.width, image.height),
+        None => origin(panel, config, width, height),
         }
     };
+    let strip = strip_height(window, factor);
+    let side = strip_side(position, width, height, strip);
+    let Some(image) = STATE.with_borrow(|state| render(panel, &state.as_ref()?.input, width, height, factor, config.opacity, Some(side))) else {
+        return;
+    };
     present(window, &image, position);
-    draw_grip(panel, position, image.width, image.height);
+    draw_strip(panel, position, width, height, strip, side, factor);
+    if !dragging && STATE.with_borrow(|state| state.as_ref().is_some_and(|state| state.options == Some(panel))) {
+        draw_options();
+    }
 }
 
 /// The place a panel sits at: its anchor inside the recording area during a
@@ -632,46 +716,230 @@ pub fn current_anchor(panel: Panel) -> Option<Anchor> {
     })
 }
 
-/// The grip: a bar with three lines centered just under the panel (above it
-/// when there is no room below), only for dragging. It is left out of screen
-/// capture, so only the player sees it.
-unsafe fn draw_grip(panel: Panel, panel_origin: POINT, width: i32, height: i32) {
-    let Some((grip, dpi, active)) = STATE.with_borrow(|state| {
+unsafe fn dpi_scale(window: HWND) -> f32 {
+    match GetDpiForWindow(window) {
+        0 => 1.0,
+        dpi => dpi as f32 / 96.0,
+    }
+}
+
+/// The strip's height for a panel drawn at `factor`: it grows with the panel
+/// but stays big enough to grab when the panel is small.
+unsafe fn strip_height(window: HWND, factor: f32) -> i32 {
+    (STRIP * factor).max(STRIP_MIN * dpi_scale(window)).round() as i32
+}
+
+/// Below the panel, unless that runs off the bottom of its screen.
+unsafe fn strip_side(position: POINT, width: i32, height: i32, strip: i32) -> Side {
+    let below = position.y + height;
+    let monitor = MonitorFromPoint(POINT { x: position.x + width / 2, y: below }, MONITOR_DEFAULTTONEAREST);
+    let mut info = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
+    GetMonitorInfoW(monitor, &mut info);
+    if below + strip <= info.rcMonitor.bottom { Side::Below } else { Side::Above }
+}
+
+/// Width of the arrow at the strip's right end.
+fn more_width(height: i32) -> i32 {
+    (height as f32 * 1.6).round() as i32
+}
+
+/// The strip: as wide as the panel and joined to its edge, so the two read as
+/// one card. It is left out of screen capture, so only the player sees it.
+unsafe fn draw_strip(panel: Panel, panel_origin: POINT, width: i32, height: i32, strip: i32, side: Side, factor: f32) {
+    let Some((grip, look)) = STATE.with_borrow(|state| {
         let state = state.as_ref()?;
-        let dpi = match GetDpiForWindow(state.windows[panel.index()]) {
-            0 => 1.0,
-            dpi => dpi as f32 / 96.0,
-        };
         let dragging = state.drag.as_ref().is_some_and(|drag| drag.panel == panel);
-        Some((state.grips[panel.index()], dpi, state.hovered == Some(panel) || dragging))
+        let hovered = state.hovered.filter(|(hovered, _)| *hovered == panel).map(|(_, part)| part);
+        let look = StripLook { opacity: state.config.panels[panel.index()].opacity, hovered, dragging, open: state.options == Some(panel) };
+        Some((state.grips[panel.index()], look))
     }) else {
         return;
     };
-    let Some(image) = render_grip(dpi, active) else { return };
-    let gap = (4.0 * dpi).round() as i32;
-    let x = panel_origin.x + (width - image.width) / 2;
-    let below = panel_origin.y + height + gap;
-    let monitor = MonitorFromPoint(POINT { x: x + image.width / 2, y: below }, MONITOR_DEFAULTTONEAREST);
-    let mut info = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
-    GetMonitorInfoW(monitor, &mut info);
-    let y = if below + image.height <= info.rcMonitor.bottom { below } else { panel_origin.y - gap - image.height };
-    present(grip, &image, POINT { x, y });
+    let Some(image) = render_strip(width, strip, factor, side, look) else { return };
+    let y = match side {
+        Side::Below => panel_origin.y + height,
+        Side::Above => panel_origin.y - strip,
+    };
+    present(grip, &image, POINT { x: panel_origin.x, y });
 }
 
-unsafe fn render_grip(dpi: f32, active: bool) -> Option<Image> {
-    let (width, height) = ((GRIP_SIZE.0 * dpi).round() as i32, (GRIP_SIZE.1 * dpi).round() as i32);
+#[derive(Clone, Copy)]
+struct StripLook {
+    opacity: i32,
+    hovered: Option<Part>,
+    dragging: bool,
+    open: bool,
+}
+
+unsafe fn render_strip(width: i32, height: i32, factor: f32, side: Side, look: StripLook) -> Option<Image> {
     rasterize_rect(width, height, |graphics| {
+        let c = colors(look.opacity);
         let (w, h) = (width as f32, height as f32);
-        let face = if active { argb(theme::palette().accent, 240) } else { argb(0x0010_0e0c, 210) };
-        graphics.fill_round([0.0, 0.0, w, h], h / 2.0, face);
-        graphics.stroke_round([0.5, 0.5, w - 0.5, h - 0.5], h / 2.0, argb(0x00ff_ffff, if active { 120 } else { 60 }), 1.0);
-        // Three bars: the usual "drag me" sign.
-        let (bar, thick, gap) = (22.0 * dpi, (1.6 * dpi).max(1.0), 3.8 * dpi);
+        let u = h / STRIP;
+        // The card's far corners; the edge joined to the panel stays square.
+        let r = RADIUS * factor;
+        let card = match side {
+            Side::Below => [0.0, -r, w, h],
+            Side::Above => [0.0, 0.0, w, h + r],
+        };
+        graphics.fill_round(card, r, c.panel);
+        let seam = if side == Side::Below { 0.5 } else { h - 0.5 };
+        graphics.line((r, seam), (w - r, seam), c.border, 1.0);
+        // Three bars in the middle: the usual "drag me" sign.
+        let more = more_width(height) as f32;
+        let (cx, cy) = (w / 2.0, h / 2.0);
+        if look.hovered == Some(Part::Handle) || look.dragging {
+            let half = 26.0 * u;
+            graphics.fill_round([cx - half, 3.0 * u, cx + half, h - 3.0 * u], 6.0 * u, argb(0x00ff_ffff, 34));
+        }
+        let ink = if look.dragging {
+            argb(theme::palette().accent, 255)
+        } else {
+            argb(0x00ff_ffff, if look.hovered == Some(Part::Handle) { 255 } else { alpha(0.55 + 0.35 * c.strength) })
+        };
+        let (bar, thick, gap) = (22.0 * u, (1.6 * u).max(1.0), 3.8 * u);
         for row in -1..=1 {
-            let y = h / 2.0 + row as f32 * gap;
-            graphics.fill_round([(w - bar) / 2.0, y - thick / 2.0, (w + bar) / 2.0, y + thick / 2.0], thick / 2.0, argb(0x00ff_ffff, 235));
+            let y = cy + row as f32 * gap;
+            graphics.fill_round([cx - bar / 2.0, y - thick / 2.0, cx + bar / 2.0, y + thick / 2.0], thick / 2.0, ink);
+        }
+        // The arrow: points out while closed, back in while its popup is open.
+        let button = [w - more + 2.0 * u, 3.0 * u, w - 4.0 * u, h - 3.0 * u];
+        if look.open || look.hovered == Some(Part::More) {
+            let face = if look.open { argb(theme::palette().accent, 230) } else { argb(0x00ff_ffff, 40) };
+            graphics.fill_round(button, 6.0 * u, face);
+        }
+        let (ax, ay, arm) = ((button[0] + button[2]) / 2.0, cy, 3.6 * u);
+        let tip = if look.open { -arm / 2.0 } else { arm / 2.0 };
+        let arrow = argb(0x00ff_ffff, if look.open || look.hovered == Some(Part::More) { 255 } else { alpha(0.55 + 0.35 * c.strength) });
+        graphics.line((ax - tip, ay - arm), (ax + tip, ay), arrow, (1.7 * u).max(1.2));
+        graphics.line((ax + tip, ay), (ax - tip, ay + arm), arrow, (1.7 * u).max(1.2));
+    })
+}
+
+/// The options popup's controls, in popup pixels at `s` (DPI scale).
+fn options_layout(s: f32) -> Vec<(Choice, [f32; 4])> {
+    let mut controls = Vec::new();
+    let (grid_left, grid_top, cell, cell_gap) = (80.0, 36.0, (28.0, 14.0), 4.0);
+    for anchor in 0..9 {
+        let (column, row) = ((anchor % 3) as f32, (anchor / 3) as f32);
+        let left = grid_left + column * (cell.0 + cell_gap);
+        let top = grid_top + row * (cell.1 + cell_gap);
+        controls.push((Choice::Anchor(anchor), [left, top, left + cell.0, top + cell.1]));
+    }
+    for (top, make) in [(96.0, Choice::Scale as fn(i32) -> Choice), (128.0, Choice::Opacity)] {
+        controls.push((make(-1), [80.0, top, 106.0, top + 26.0]));
+        controls.push((make(1), [146.0, top, 172.0, top + 26.0]));
+    }
+    controls.into_iter().map(|(choice, b)| (choice, b.map(|value| value * s))).collect()
+}
+
+fn options_hit(s: f32, point: POINT) -> Option<Choice> {
+    let (x, y) = (point.x as f32, point.y as f32);
+    options_layout(s).into_iter().find(|(_, b)| x >= b[0] && x < b[2] && y >= b[1] && y < b[3]).map(|(choice, _)| choice)
+}
+
+unsafe fn render_options(panel: Panel, config: PanelConfig, anchor: Option<Anchor>, hover: Option<Choice>, s: f32) -> Option<Image> {
+    let (width, height) = ((OPTIONS_SIZE.0 * s).round() as i32, (OPTIONS_SIZE.1 * s).round() as i32);
+    rasterize_rect(width, height, |graphics| {
+        let palette = theme::palette();
+        let (w, h) = (width as f32, height as f32);
+        graphics.fill_round([0.0, 0.0, w, h], 12.0 * s, argb(0x0018_1614, 244));
+        graphics.stroke_round([0.5, 0.5, w - 0.5, h - 0.5], 12.0 * s, argb(0x00ff_ffff, 40), 1.0);
+        let text = argb(0x00ff_ffff, 235);
+        let soft = argb(0x00ff_ffff, 150);
+        let title = if panel == Panel::Keys { "键鼠面板" } else { "手柄面板" };
+        graphics.text(title, [0.0, 8.0 * s, w, 28.0 * s], 12.0 * s, true, text);
+        for (label, top, bottom) in [("位置", 36.0, 86.0), ("大小", 96.0, 122.0), ("不透明度", 128.0, 154.0)] {
+            graphics.text(label, [8.0 * s, top * s, 74.0 * s, bottom * s], 11.0 * s, false, soft);
+        }
+        for (label, top) in [(format!("{}%", config.scale), 96.0), (format!("{}%", config.opacity), 128.0)] {
+            graphics.text(&label, [106.0 * s, top * s, 146.0 * s, (top + 26.0) * s], 11.5 * s, true, text);
+        }
+        for (choice, b) in options_layout(s) {
+            let hovered = hover == Some(choice);
+            match choice {
+                Choice::Anchor(index) => {
+                    let fill = if anchor == Some(ANCHORS[index]) {
+                        argb(palette.accent, 255)
+                    } else {
+                        argb(0x00ff_ffff, if hovered { 170 } else { 60 })
+                    };
+                    graphics.fill_round(b, 3.0 * s, fill);
+                }
+                Choice::Scale(step) | Choice::Opacity(step) => {
+                    graphics.fill_round(b, 6.0 * s, argb(0x00ff_ffff, if hovered { 56 } else { 24 }));
+                    let (cx, cy, arm) = ((b[0] + b[2]) / 2.0, (b[1] + b[3]) / 2.0, 4.5 * s);
+                    graphics.line((cx - arm, cy), (cx + arm, cy), text, 1.6 * s);
+                    if step > 0 {
+                        graphics.line((cx, cy - arm), (cx, cy + arm), text, 1.6 * s);
+                    }
+                }
+            }
         }
     })
+}
+
+/// Shows the open popup beside its panel (right of it, or left when there is
+/// no room), level with the strip.
+unsafe fn draw_options() {
+    let Some((panel, popup, window, grip, config, hover)) = STATE.with_borrow(|state| {
+        let state = state.as_ref()?;
+        let panel = state.options?;
+        Some((panel, state.popup, state.windows[panel.index()], state.grips[panel.index()], state.config.panels[panel.index()], state.options_hover))
+    }) else {
+        return;
+    };
+    let s = dpi_scale(window);
+    let Some(image) = render_options(panel, config, current_anchor(panel), hover, s) else { return };
+    let (mut card, mut strip) = (RECT::default(), RECT::default());
+    GetWindowRect(window, &mut card);
+    GetWindowRect(grip, &mut strip);
+    let (top, bottom) = (card.top.min(strip.top), card.bottom.max(strip.bottom));
+    let monitor = MonitorFromRect(&card, MONITOR_DEFAULTTONEAREST);
+    let mut info = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
+    GetMonitorInfoW(monitor, &mut info);
+    let screen = info.rcMonitor;
+    let gap = (6.0 * s).round() as i32;
+    let x = if card.right + gap + image.width <= screen.right { card.right + gap } else { card.left - gap - image.width };
+    let y = if strip.top >= card.top { bottom - image.height } else { top };
+    let y = y.min(screen.bottom - image.height).max(screen.top);
+    present(popup, &image, POINT { x, y });
+    ShowWindow(popup, SW_SHOWNOACTIVATE);
+    SetWindowPos(popup, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+}
+
+/// The arrow on a strip: opens that panel's popup, or closes it.
+unsafe fn toggle_options(panel: Panel) {
+    let Some((popup, open)) = STATE.with_borrow(|state| state.as_ref().map(|state| (state.popup, state.options))) else { return };
+    if open.is_some() {
+        close_options();
+    }
+    if open != Some(panel) {
+        STATE.with_borrow_mut(|state| {
+            if let Some(state) = state.as_mut() {
+                state.options = Some(panel);
+                state.options_hover = None;
+                state.away = 0;
+            }
+        });
+        SetTimer(popup, AWAY_TIMER, AWAY_MS, None);
+    }
+    redraw(panel);
+}
+
+unsafe fn close_options() {
+    let Some((popup, panel)) = STATE.with_borrow_mut(|state| {
+        let state = state.as_mut()?;
+        state.options_hover = None;
+        Some((state.popup, state.options.take()?))
+    }) else {
+        return;
+    };
+    KillTimer(popup, AWAY_TIMER);
+    ShowWindow(popup, SW_HIDE);
+    if STATE.with_borrow(|state| state.as_ref().is_some_and(|state| state.shown(panel))) {
+        redraw(panel);
+    }
 }
 
 unsafe fn present(window: HWND, image: &Image, position: POINT) {
@@ -771,11 +1039,18 @@ fn colors(opacity: i32) -> Colors {
     }
 }
 
-unsafe fn render(panel: Panel, input: &Input, width: i32, height: i32, factor: f32, opacity: i32) -> Option<Image> {
+/// Draws a panel. `strip` is the side its strip joins on, which stays square.
+unsafe fn render(panel: Panel, input: &Input, width: i32, height: i32, factor: f32, opacity: i32, strip: Option<Side>) -> Option<Image> {
     rasterize_rect(width, height, |graphics| {
         let c = colors(opacity);
         let f = |value: f32| value * factor;
-        graphics.fill_round([0.0, 0.0, width as f32, height as f32], f(14.0), c.panel);
+        let (w, h, r) = (width as f32, height as f32, f(RADIUS));
+        let card = match strip {
+            Some(Side::Below) => [0.0, 0.0, w, h + r],
+            Some(Side::Above) => [0.0, -r, w, h],
+            None => [0.0, 0.0, w, h],
+        };
+        graphics.fill_round(card, r, c.panel);
         match panel {
             Panel::Keys => draw_keys(graphics, input, &c, &f),
             Panel::Pad => draw_pad(graphics, input, &c, &f),
@@ -1070,15 +1345,15 @@ unsafe fn finish_drag() {
         state.session.as_mut().filter(|session| session.shown[panel.index()]).map(|session| session.moved[panel.index()] = Some(position))
     });
     if temporary.is_some() {
+        // Not a setting, but the place grids no longer light an anchor.
         redraw(panel);
+        notify();
         return;
     }
     let mut config = config().panels[panel.index()];
     config.position = Some(position);
     set(panel, config);
     redraw(panel);
-    // The settings' place grid no longer shows an anchor.
-    crate::settings::refresh();
 }
 
 /// A place picked for a panel: it goes there (inside the recording area
@@ -1097,7 +1372,8 @@ pub unsafe fn pick_anchor(panel: Panel, anchor: Anchor) {
     };
     set(panel, config);
     redraw(panel);
-    crate::settings::refresh();
+    // Leaving a dragged place during a recording changes no setting, only what the grids light.
+    notify();
 }
 
 /// Changes a panel's opacity by `step` percent.
@@ -1106,16 +1382,48 @@ pub unsafe fn step_opacity(panel: Panel, step: i32) {
     config.opacity += step;
     set(panel, config);
     redraw(panel);
-    crate::settings::refresh();
 }
 
-/// The grip takes the mouse for its panel: drag it to move the panel
-/// anywhere; the wheel resizes the panel, Ctrl+wheel changes its opacity.
+/// Changes a panel's size by `step` percent.
+unsafe fn step_scale(panel: Panel, step: i32) {
+    let mut config = config().panels[panel.index()];
+    config.scale += step;
+    set(panel, config);
+    redraw(panel);
+}
+
+/// The strip part at `x` (strip pixels).
+unsafe fn part_at(window: HWND, x: i32) -> Part {
+    let mut client = RECT::default();
+    GetClientRect(window, &mut client);
+    if x >= client.right - more_width(client.bottom) { Part::More } else { Part::Handle }
+}
+
+unsafe fn cursor_part(window: HWND) -> Part {
+    let mut cursor = POINT::default();
+    GetCursorPos(&mut cursor);
+    ScreenToClient(window, &mut cursor);
+    part_at(window, cursor.x)
+}
+
+/// The strip takes the mouse for its panel: drag the bars to move the panel
+/// anywhere, click the arrow for the options popup; the wheel resizes the
+/// panel, Ctrl+wheel changes its opacity.
 unsafe extern "system" fn grip_proc(window: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     match message {
         WM_MOUSEACTIVATE => return MA_NOACTIVATE as LRESULT,
+        WM_SETCURSOR if cursor_part(window) == Part::More => {
+            SetCursor(LoadCursorW(null_mut(), IDC_HAND));
+            return 1;
+        }
+        WM_LBUTTONDOWN if cursor_part(window) == Part::More => {
+            if let Some(panel) = grip_of(window) {
+                toggle_options(panel);
+            }
+        }
         WM_LBUTTONDOWN => {
             if let Some(panel) = grip_of(window) {
+                close_options();
                 let mut cursor = POINT::default();
                 GetCursorPos(&mut cursor);
                 STATE.with_borrow_mut(|state| {
@@ -1131,11 +1439,13 @@ unsafe extern "system" fn grip_proc(window: HWND, message: u32, wparam: WPARAM, 
         }
         WM_MOUSEMOVE => {
             let Some(panel) = grip_of(window) else { return 0 };
-            let (drag, entered, panel_window) = STATE.with_borrow_mut(|state| {
-                let Some(state) = state.as_mut() else { return (None, false, null_mut()) };
-                let entered = state.hovered != Some(panel);
-                state.hovered = Some(panel);
-                (state.drag.as_ref().map(|drag| drag.grab), entered, state.windows[panel.index()])
+            let part = cursor_part(window);
+            let (drag, entered, changed, panel_window) = STATE.with_borrow_mut(|state| {
+                let Some(state) = state.as_mut() else { return (None, false, false, null_mut()) };
+                let entered = state.hovered.is_none_or(|(hovered, _)| hovered != panel);
+                let changed = state.hovered != Some((panel, part));
+                state.hovered = Some((panel, part));
+                (state.drag.as_ref().map(|drag| drag.grab), entered, changed, state.windows[panel.index()])
             });
             if entered {
                 let mut track = TRACKMOUSEEVENT { cbSize: size_of::<TRACKMOUSEEVENT>() as u32, dwFlags: TME_LEAVE, hwndTrack: window, dwHoverTime: 0 };
@@ -1151,13 +1461,13 @@ unsafe extern "system" fn grip_proc(window: HWND, message: u32, wparam: WPARAM, 
                 let flags = SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE;
                 SetWindowPos(panel_window, null_mut(), x, y, 0, 0, flags);
                 SetWindowPos(window, null_mut(), x + grip_bounds.left - panel_bounds.left, y + grip_bounds.top - panel_bounds.top, 0, 0, flags);
-            } else if entered {
+            } else if changed {
                 redraw(panel);
             }
         }
         windows_sys::Win32::UI::Controls::WM_MOUSELEAVE => {
             let panel = STATE.with_borrow_mut(|state| state.as_mut()?.hovered.take());
-            if let Some(panel) = panel {
+            if let Some((panel, _)) = panel {
                 redraw(panel);
             }
         }
@@ -1177,7 +1487,6 @@ unsafe extern "system" fn grip_proc(window: HWND, message: u32, wparam: WPARAM, 
                     config.scale += notches * 10;
                 }
                 set(panel, config);
-                crate::settings::refresh();
             }
         }
         _ => return DefWindowProcW(window, message, wparam, lparam),
@@ -1185,7 +1494,82 @@ unsafe extern "system" fn grip_proc(window: HWND, message: u32, wparam: WPARAM, 
     0
 }
 
-/// The panels never take the mouse (they are click-through); only the grip does.
+/// The options popup: nine places, size and opacity for the panel it was opened from.
+unsafe extern "system" fn options_proc(window: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    let hit = |lparam: LPARAM| options_hit(dpi_scale(window), crate::selection_geometry::mouse_point(lparam));
+    match message {
+        WM_MOUSEACTIVATE => return MA_NOACTIVATE as LRESULT,
+        WM_SETCURSOR => {
+            let mut cursor = POINT::default();
+            GetCursorPos(&mut cursor);
+            ScreenToClient(window, &mut cursor);
+            let over = options_hit(dpi_scale(window), cursor).is_some();
+            SetCursor(LoadCursorW(null_mut(), if over { IDC_HAND } else { IDC_ARROW }));
+            return 1;
+        }
+        WM_MOUSEMOVE => {
+            let hover = hit(lparam);
+            let changed = STATE.with_borrow_mut(|state| {
+                let state = state.as_mut()?;
+                state.away = 0;
+                (state.options_hover != hover).then(|| state.options_hover = hover)
+            });
+            if changed.is_some() {
+                let mut track = TRACKMOUSEEVENT { cbSize: size_of::<TRACKMOUSEEVENT>() as u32, dwFlags: TME_LEAVE, hwndTrack: window, dwHoverTime: 0 };
+                TrackMouseEvent(&mut track);
+                draw_options();
+            }
+        }
+        windows_sys::Win32::UI::Controls::WM_MOUSELEAVE => {
+            STATE.with_borrow_mut(|state| {
+                if let Some(state) = state.as_mut() {
+                    state.options_hover = None;
+                }
+            });
+            draw_options();
+        }
+        WM_LBUTTONDOWN => {
+            let panel = STATE.with_borrow(|state| state.as_ref()?.options);
+            if let (Some(panel), Some(choice)) = (panel, hit(lparam)) {
+                match choice {
+                    Choice::Anchor(index) => pick_anchor(panel, ANCHORS[index]),
+                    Choice::Scale(step) => step_scale(panel, step * STEP),
+                    Choice::Opacity(step) => step_opacity(panel, step * STEP),
+                }
+            }
+        }
+        WM_TIMER if wparam == AWAY_TIMER => {
+            // Closes once the mouse has been away from the panel, its strip and the popup for a while.
+            let Some((panel_window, grip)) = STATE.with_borrow(|state| {
+                let state = state.as_ref()?;
+                let panel = state.options?;
+                Some((state.windows[panel.index()], state.grips[panel.index()]))
+            }) else {
+                KillTimer(window, AWAY_TIMER);
+                return 0;
+            };
+            let mut cursor = POINT::default();
+            GetCursorPos(&mut cursor);
+            let near = [window, panel_window, grip].into_iter().any(|target| {
+                let mut bounds = RECT::default();
+                GetWindowRect(target, &mut bounds);
+                crate::selection_geometry::contains(bounds, cursor)
+            });
+            let away = STATE.with_borrow_mut(|state| {
+                let state = state.as_mut()?;
+                state.away = if near { 0 } else { state.away + 1 };
+                Some(state.away)
+            });
+            if away.is_some_and(|away| away >= AWAY_TICKS) {
+                close_options();
+            }
+        }
+        _ => return DefWindowProcW(window, message, wparam, lparam),
+    }
+    0
+}
+
+/// The panels never take the mouse (they are click-through); only the strip does.
 unsafe extern "system" fn panel_proc(window: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     match message {
         WM_MOUSEACTIVATE => MA_NOACTIVATE as LRESULT,
@@ -1247,11 +1631,35 @@ mod tests {
             finish_drag();
             assert_eq!(config().panels[0].position, Some((300, 240)), "and is dropped where it was let go");
             let state = STATE.take().unwrap();
-            for window in state.grips.into_iter().chain(state.windows).chain([state.sink]) {
+            for window in state.grips.into_iter().chain(state.windows).chain([state.sink, state.popup]) {
                 DestroyWindow(window);
             }
             TEST_FOLDER.set(None);
             let _ = fs::remove_dir_all(&folder);
+        }
+    }
+
+    /// `top` with `bottom` under it.
+    fn stack(top: &Image, bottom: &Image) -> Image {
+        let mut pixels = top.pixels.clone();
+        pixels.extend_from_slice(&bottom.pixels);
+        Image { width: top.width, height: top.height + bottom.height, pixels }
+    }
+
+    #[test]
+    fn options_controls_sit_inside_the_popup_without_overlapping() {
+        for s in [1.0, 1.5] {
+            let controls = options_layout(s);
+            assert_eq!(controls.len(), 9 + 4);
+            for (index, (_, a)) in controls.iter().enumerate() {
+                assert!(a[0] >= 0.0 && a[1] >= 0.0 && a[2] <= OPTIONS_SIZE.0 * s && a[3] <= OPTIONS_SIZE.1 * s);
+                for (_, b) in &controls[index + 1..] {
+                    assert!(a[2] <= b[0] || b[2] <= a[0] || a[3] <= b[1] || b[3] <= a[1], "{a:?} and {b:?} overlap");
+                }
+            }
+            let (choice, b) = controls[12];
+            assert_eq!(options_hit(s, POINT { x: (b[0] + 1.0) as i32, y: (b[1] + 1.0) as i32 }), Some(choice));
+            assert_eq!(options_hit(s, POINT { x: 2, y: 2 }), None);
         }
     }
 
@@ -1286,8 +1694,12 @@ mod tests {
             for (name, panel, opacity) in [("keys", Panel::Keys, 100), ("keys-40", Panel::Keys, 40), ("pad", Panel::Pad, 100), ("pad-40", Panel::Pad, 40)] {
                 let (width, height) = panel.base();
                 let factor = 1.5;
-                let image = render(panel, &input, (width * factor) as i32, (height * factor) as i32, factor, opacity).unwrap();
-                // Over a light "game" picture so the transparency shows, with the grip where it sits on screen.
+                let image = render(panel, &input, (width * factor) as i32, (height * factor) as i32, factor, opacity, Some(Side::Below)).unwrap();
+                // The strip joined under it, as on screen (hovered arrow on the 40 % ones, popup open on the pad).
+                let look = StripLook { opacity, hovered: (opacity < 100).then_some(Part::More), dragging: false, open: name == "pad" };
+                let strip = render_strip(image.width, (STRIP * factor).round() as i32, factor, Side::Below, look).unwrap();
+                let image = stack(&image, &strip);
+                // Over a light "game" picture so the transparency shows.
                 let mut flat = image.clone();
                 for (index, pixel) in flat.pixels.chunks_exact_mut(4).enumerate() {
                     let checker = if (index % image.width as usize / 24 + index / image.width as usize / 24) % 2 == 0 { 200 } else { 150 };
@@ -1299,20 +1711,19 @@ mod tests {
                 }
                 flat.save_png(&folder.join(format!("overlay-{name}.png"))).unwrap();
             }
-            // The grip, at rest and under the mouse, at 150 %.
-            for (name, active) in [("grip", false), ("grip-hover", true)] {
-                let mut image = render_grip(1.5, active).unwrap();
-                for pixel in image.pixels.chunks_exact_mut(4) {
-                    let alpha = u32::from(pixel[3]);
-                    for channel in &mut pixel[..3] {
-                        *channel = (u32::from(*channel) + 170 * (255 - alpha) / 255) as u8;
-                    }
-                    pixel[3] = 255;
+            // The options popup at 150 %, hovering a place.
+            let config = PanelConfig { anchor: Anchor::TopRight, ..PanelConfig::default_for(Panel::Pad) };
+            let mut image = render_options(Panel::Pad, config, Some(Anchor::TopRight), Some(Choice::Anchor(4)), 1.5).unwrap();
+            for pixel in image.pixels.chunks_exact_mut(4) {
+                let alpha = u32::from(pixel[3]);
+                for channel in &mut pixel[..3] {
+                    *channel = (u32::from(*channel) + 170 * (255 - alpha) / 255) as u8;
                 }
-                image.save_png(&folder.join(format!("overlay-{name}.png"))).unwrap();
+                pixel[3] = 255;
             }
+            image.save_png(&folder.join("overlay-options.png")).unwrap();
             input.pad = None;
-            let image = render(Panel::Pad, &input, 320, 186, 1.0, 90).unwrap();
+            let image = render(Panel::Pad, &input, 320, 186, 1.0, 90, None).unwrap();
             assert_eq!((image.width, image.height), (320, 186));
         }
     }

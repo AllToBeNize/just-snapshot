@@ -1,5 +1,6 @@
 //! Everything on screen while recording: a red frame just outside the area
-//! and a small control bar (time, pause, stop, cancel) that turns into a
+//! and a small control bar (time, key / gamepad panel switches, pause, stop,
+//! cancel) that turns into a
 //! result card when the file is saved (open, show in folder, make a GIF).
 //! Both are excluded from screen capture, so they never end up in the video.
 //! Recording options live in `%LOCALAPPDATA%\just-snapshot\recording.txt`.
@@ -164,6 +165,10 @@ enum Phase {
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Button {
+    /// Shows or hides the key and mouse panel inside the recording.
+    Keys,
+    /// Shows or hides the gamepad panel inside the recording.
+    Pad,
     Pause,
     Stop,
     Cancel,
@@ -257,6 +262,7 @@ fn next_path(width: i32, height: i32) -> Result<PathBuf, String> {
 
 /// Records the whole screen the active window is on, like a game recorder:
 /// no area to pick, no countdown, the bar tucked into the screen's corner.
+/// The key / gamepad panels picked last time show on that screen.
 pub unsafe fn start_screen(owner: HWND) {
     let mut foreground = GetForegroundWindow();
     if foreground.is_null() {
@@ -274,8 +280,8 @@ pub unsafe fn start_screen(owner: HWND) {
 /// Starts recording `area` (screen coordinates), shown with a frame and the
 /// control bar. They appear at once; the encoder and sound devices open on a
 /// helper thread, which can take a moment, and the clock starts when they are
-/// ready. An area recording with the countdown on waits three seconds first,
-/// and shows the key / pad panels picked on its toolbar inside the area.
+/// ready. An area recording with the countdown on waits three seconds first.
+/// The key / pad panels picked on the toolbar (or last time) show inside the area.
 pub unsafe fn start(owner: HWND, area: RECT, options: Options, kind: Kind) {
     if is_busy() {
         return;
@@ -300,7 +306,7 @@ pub unsafe fn start(owner: HWND, area: RECT, options: Options, kind: Kind) {
         0 => 1.0,
         dpi => dpi as f32 / 96.0,
     };
-    if kind == Kind::Area && (options.show_keys || options.show_pad) {
+    if options.show_keys || options.show_pad {
         crate::input_overlay::show_in(area, [options.show_keys, options.show_pad]);
     }
     let countdown = kind == Kind::Area && options.countdown;
@@ -408,6 +414,30 @@ unsafe fn started(result: Result<Recording, String>) {
     draw_frame();
     draw_bar();
     SetTimer(bar, TICK_TIMER, 250, None);
+}
+
+/// The key or gamepad panel switch on the bar: shows or hides that panel
+/// inside the recording, and remembers it for the next one.
+unsafe fn toggle_panel(button: Button) {
+    let Some((area, options)) = STATE.with_borrow_mut(|state| {
+        let state = state.as_mut()?;
+        match button {
+            Button::Keys => state.options.show_keys = !state.options.show_keys,
+            _ => state.options.show_pad = !state.options.show_pad,
+        }
+        Some((state.area, state.options))
+    }) else {
+        return;
+    };
+    let mut saved = load_options();
+    (saved.show_keys, saved.show_pad) = (options.show_keys, options.show_pad);
+    let _ = save_options(saved);
+    if options.show_keys || options.show_pad {
+        crate::input_overlay::show_in(area, [options.show_keys, options.show_pad]);
+    } else {
+        crate::input_overlay::end_session();
+    }
+    draw_bar();
 }
 
 /// Pause or resume, from the bar or the global shortcut.
@@ -549,7 +579,9 @@ unsafe fn draw_frame() {
 fn buttons(phase: &Phase) -> &'static [Button] {
     match phase {
         // Starting already shows the recording bar, so nothing moves when the clock starts.
-        Phase::Countdown { .. } | Phase::Starting { .. } | Phase::Recording { .. } => &[Button::Pause, Button::Stop, Button::Cancel],
+        Phase::Countdown { .. } | Phase::Starting { .. } | Phase::Recording { .. } => {
+            &[Button::Keys, Button::Pad, Button::Pause, Button::Stop, Button::Cancel]
+        }
         Phase::Saved(_) => &[Button::Open, Button::Folder, Button::Gif, Button::Close],
         Phase::Converted(_) => &[Button::Open, Button::Folder, Button::Close],
         Phase::Failed(_) => &[Button::Close],
@@ -573,14 +605,16 @@ fn bar_layout(phase: &Phase, scale: f32) -> (i32, i32, Vec<(Button, RECT)>) {
         Button::Gif => 74.0,
         _ => 34.0,
     };
-    let width = s(12.0 + text + buttons.iter().map(|b| button(b) + 4.0).sum::<f32>() + 8.0);
+    // A little more room between the panel switches and the recording's own buttons.
+    let gap = |button: &Button| if *button == Button::Pad { 10.0 } else { 4.0 };
+    let width = s(12.0 + text + buttons.iter().map(|b| button(b) + gap(b)).sum::<f32>() + 8.0);
     let height = s(44.0);
     let mut left = s(12.0 + text);
     let places = buttons
         .iter()
         .map(|b| {
             let rect = RECT { left, top: s(6.0), right: left + s(button(b)), bottom: height - s(6.0) };
-            left = rect.right + s(4.0);
+            left = rect.right + s(gap(b));
             (*b, rect)
         })
         .collect();
@@ -594,6 +628,8 @@ fn button_label(button: Button, phase: &Phase) -> (Option<Icon>, &'static str) {
             _ => (Some(Icon::Pause), ""),
         },
         Button::Stop => (Some(Icon::Stop), ""),
+        Button::Keys => (Some(Icon::Keyboard), ""),
+        Button::Pad => (Some(Icon::Gamepad), ""),
         Button::Cancel | Button::Close => (Some(Icon::Close), ""),
         Button::Open => (None, "打开"),
         Button::Folder => (Some(Icon::Folder), ""),
@@ -649,8 +685,14 @@ unsafe fn draw_bar() {
             for (button, rect) in &places {
                 let bounds = [rect.left as f32, rect.top as f32, rect.right as f32, rect.bottom as f32];
                 let hover = state.hovered == Some(*button);
+                let on = match button {
+                    Button::Keys => state.options.show_keys,
+                    Button::Pad => state.options.show_pad,
+                    _ => false,
+                };
                 let face = match button {
                     Button::Stop => argb(RED, if hover { 255 } else { 220 }),
+                    _ if on => argb(palette.accent, if hover { 255 } else { 220 }),
                     _ => argb(0x00ff_ffff, if hover { 50 } else { 22 }),
                 };
                 graphics.fill_round(bounds, s(7.0), face);
@@ -787,6 +829,7 @@ unsafe fn make_gif(bar: HWND) {
 
 unsafe fn press(bar: HWND, button: Button) {
     match button {
+        Button::Keys | Button::Pad => toggle_panel(button),
         Button::Pause => toggle_pause(),
         Button::Stop => stop(false),
         Button::Cancel => stop(true),
@@ -932,7 +975,11 @@ mod tests {
     #[test]
     fn the_bar_grows_with_its_phase() {
         let (recording, _, buttons) = bar_layout(&Phase::Recording { paused_since: None }, 1.0);
-        assert_eq!(buttons.len(), 3);
+        assert_eq!(buttons.iter().map(|(button, _)| *button).collect::<Vec<_>>(), vec![Button::Keys, Button::Pad, Button::Pause, Button::Stop, Button::Cancel]);
+        for pair in buttons.windows(2) {
+            assert!(pair[0].1.right < pair[1].1.left, "buttons do not overlap");
+        }
+        assert!(buttons.last().unwrap().1.right <= recording, "and stay inside the bar");
         let summary = Summary { path: PathBuf::from("a.mp4"), seconds: 3.0, frames: 90, dropped: 0, warnings: Vec::new(), cancelled: false };
         let (saved, _, buttons) = bar_layout(&Phase::Saved(summary), 1.0);
         assert_eq!(buttons.iter().map(|(button, _)| *button).collect::<Vec<_>>(), vec![Button::Open, Button::Folder, Button::Gif, Button::Close]);

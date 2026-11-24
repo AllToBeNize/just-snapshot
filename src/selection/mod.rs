@@ -83,6 +83,8 @@ use text::*;
 const CLASS: *const u16 = w!("Snapshot.Selection");
 const FINISH_TEXT: u32 = WM_APP + 3;
 const TEXT_INPUT_CLICK: u32 = WM_APP + 8;
+/// A key / gamepad panel was changed on the panel itself (see `panels_changed`).
+const PANELS_CHANGED: u32 = WM_APP + 10;
 const TEXT_CARET_TIMER: usize = 3;
 
 thread_local! {
@@ -413,6 +415,15 @@ pub unsafe fn reopen(instance: HINSTANCE, region: RECT) -> io::Result<()> {
 /// Opens the overlay to pick an area to record; its toolbar starts the recording.
 pub unsafe fn open_record(instance: HINSTANCE) -> io::Result<()> {
     open_selection(instance, Start::Record)
+}
+
+/// A panel's place, size or opacity was changed on the panel's own popup:
+/// the recording picker's option bar, if it is open, shows the new values.
+pub unsafe fn panels_changed() {
+    let window = FindWindowW(CLASS, null());
+    if !window.is_null() {
+        PostMessageW(window, PANELS_CHANGED, 0, 0);
+    }
 }
 
 pub fn has_last() -> bool {
@@ -774,6 +785,11 @@ unsafe fn handle_message(window: HWND, message: u32, wparam: WPARAM, lparam: LPA
             }
         }
         SIZE_DONE => finish_size_input(window, lparam as HWND, wparam != 0),
+        PANELS_CHANGED => {
+            if let Some(bounds) = SESSION.with_borrow(|session| Some(session.as_ref()?.panel_bar?.bounds)) {
+                invalidate(window, &bounds, 0);
+            }
+        }
         FINISH_TEXT => {
             if SESSION.with_borrow(|session| {
                 session

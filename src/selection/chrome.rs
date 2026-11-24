@@ -158,9 +158,7 @@ pub(super) unsafe fn change_panel(window: HWND, choice: crate::panel_options::Pa
         PanelChoice::Anchor(panel, anchor) => crate::input_overlay::pick_anchor(panel, crate::input_overlay::ANCHORS[anchor]),
         PanelChoice::Opacity(panel, step) => crate::input_overlay::step_opacity(panel, step * STEP),
     }
-    if let Some(bounds) = SESSION.with_borrow(|session| Some(session.as_ref()?.panel_bar?.bounds)) {
-        invalidate(window, &bounds, 0);
-    }
+    // The bar redraws from the panels' settings when they tell every view (`selection::panels_changed`).
 }
 
 pub(super) unsafe fn change_option(window: HWND, choice: Choice) {
