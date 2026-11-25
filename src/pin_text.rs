@@ -618,7 +618,7 @@ mod tests {
     #[test]
     fn double_click_picks_identifiers_like_a_code_editor() {
         let mut layer = TextLayer::new();
-        layer.status = Status::Ready(vec![code_line("layout_mode=E_WindowPlacementAnchors.Environment, tool_tip=None")]);
+        layer.status = Status::Ready(vec![code_line("layout_mode=E_WindowPlacementAnchors.Centered, tool_tip=None")]);
         let view = View { origin: POINT { x: 0, y: 0 }, zoom: 1.0, scale: 1.0 };
         // Inside Placement, character 25.
         layer.select_word(view, POINT { x: 25 * 8 + 3, y: 7 });

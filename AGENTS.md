@@ -27,6 +27,8 @@ Build and test on Windows only. `snapshot.ps1` locates Cargo and the Visual Stud
 
 ## Release Flow
 
+Everything here is public: code, comments, tests, commit messages, release notes and `latest.json`. Never carry over content from the screenshots or projects a bug was reported with (other projects' code, identifiers, paths, logs, people or internal names, credentials); use made-up generic examples (`MAX_RETRY_COUNT`, `user_name`). Search the diff and the notes for such words before every commit and release.
+
 1. Bump `version` in `Cargo.toml`, run `.\snapshot.ps1 build` to sync `Cargo.lock`, write the user-facing notes under `## vX.Y.Z` in `RELEASE_NOTES.md` (Chinese, one `- ` item per change: what users notice, not commit titles), and commit.
 2. `git tag vX.Y.Z`, `git push origin HEAD`, `git push origin vX.Y.Z`.
 3. In the publishing machine's desktop session (the release key is in its Credential Manager, which remote shells cannot read): `.\snapshot.ps1 release -Tag vX.Y.Z [-KeyId <id>]`. It creates a **draft** with the setup executable, the ZIP, their SHA256 files, the bare `just-snapshot.exe` and the signed `latest.json`, with the notes as the release text. It refuses to run on a dirty tree, without notes for the version, when the remote tag is not at `HEAD`, when the key is missing or not in `TRUSTED_KEYS`, or when a release for the tag already exists.

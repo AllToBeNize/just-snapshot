@@ -123,7 +123,7 @@ pub fn recognize(image: &Image, folder: &Path) -> Result<Vec<Line>, String> {
 
 /// Small text gets cut inside identifiers, mostly at underscores; read
 /// apart, each piece sees half the character at the cut (`user_` +
-/// `_spec`, or `user.` + `_name`). Boxes on one row that touch, at the
+/// `_name`, or `user.` + `_name`). Boxes on one row that touch, at the
 /// same text height, are read as one box instead: the recognizer reads the
 /// whole run and puts any spaces in itself.
 fn join_touching(mut boxes: Vec<Region>) -> Vec<Region> {
@@ -709,7 +709,7 @@ mod tests {
         assert_eq!(lines[0].text(), "if user_name is not None:");
         assert!(lines[0].attached(2), "double-click crosses the cut");
         // Boxes that only touch at the cut.
-        let lines = merge_rows(vec![piece(38.3, 86.0, "u_cfg_"), piece(86.0, 132.5, "_out_"), piece(128.6, 172.9, "proxy")]);
+        let lines = merge_rows(vec![piece(38.3, 86.0, "u_cfg_"), piece(86.0, 132.5, "_out_"), piece(128.6, 172.9, "path")]);
         assert_eq!(lines[0].text(), "u_cfg_out_path");
     }
 
