@@ -1207,14 +1207,7 @@ unsafe fn present(window: HWND, pin: &Pin) {
     let Ok(surface) = Surface::new(null_mut(), width, height) else { return };
     paint_pin(window, pin, surface.dc, RECT { left: 0, top: 0, right: width, bottom: height });
     GdiFlush();
-    let edge = if pin.selected {
-        Edge::Selected
-    } else if pin.hovering {
-        Edge::Hovered
-    } else {
-        Edge::Plain
-    };
-    compose(surface.bytes_mut(width, height), width, height, pin.image_rect(), edge, theme::palette().accent);
+    compose(surface.bytes_mut(width, height), width, height, pin.image_rect(), pin.edge(), theme::palette().accent);
     let blend = BLENDFUNCTION {
         BlendOp: AC_SRC_OVER as u8,
         BlendFlags: 0,
@@ -1233,11 +1226,27 @@ enum Edge {
     Plain,
     Hovered,
     Selected,
+    /// Selected and under the pointer: the selection ring with the hover's
+    /// red around it.
+    SelectedHovered,
+}
+
+impl Pin {
+    fn edge(&self) -> Edge {
+        match (self.selected, self.hovering) {
+            (true, true) => Edge::SelectedHovered,
+            (true, false) => Edge::Selected,
+            (false, true) => Edge::Hovered,
+            (false, false) => Edge::Plain,
+        }
+    }
 }
 
 /// Turns the painted pin into premultiplied BGRA: the image opaque, around
 /// it a soft see-through shadow, and a thin ring hugging the image: red-blue
-/// on hover, the accent blue when selected (the ring color over the shadow).
+/// on hover, the accent blue when selected; a selected pin under the pointer
+/// gets a band from red outside to the accent inside (the color over the
+/// shadow).
 fn compose(pixels: &mut [u8], width: i32, height: i32, image: RECT, edge: Edge, accent: u32) {
     let glow = GLOW as f32;
     for y in 0..height {
@@ -1260,6 +1269,14 @@ fn compose(pixels: &mut [u8], width: i32, height: i32, image: RECT, edge: Edge, 
                 Edge::Plain => (0, 0.0),
                 Edge::Hovered => (mix(HOVER_RED, accent, 0.5), ring(1.5, 0.55)),
                 Edge::Selected => (accent, ring(2.0, 0.85)),
+                // The selection ring as it is, with the hover's red in a
+                // 5 px band around it, denser towards the image.
+                Edge::SelectedHovered => {
+                    let blue = ring(2.0, 0.85);
+                    let inward = (1.0 - distance / 5.0).clamp(0.0, 1.0);
+                    let red = (0.18 + 0.37 * inward) * (5.0 - distance).clamp(0.0, 1.0);
+                    if blue >= red { (accent, blue) } else { (mix(HOVER_RED, accent, inward * 0.5), red) }
+                }
             };
             let alpha = ring_alpha + shadow * (1.0 - ring_alpha);
             // Premultiplied: the shadow is black, so only the ring adds color.
@@ -1890,6 +1907,14 @@ mod tests {
         compose(&mut pixels, width, height, image, Edge::Selected, 0x00ff_8040);
         let ring = &pixels[((middle * width + GLOW - 1) * 4) as usize..][..4];
         assert!(ring[0] > ring[2], "{ring:?}");
+        // Selected under the pointer: the same blue ring, and red reaching
+        // further out than either ring.
+        assert_eq!(alpha(Edge::SelectedHovered, GLOW - 1, middle), alpha(Edge::Selected, GLOW - 1, middle));
+        assert!(alpha(Edge::SelectedHovered, GLOW - 4, middle) > alpha(Edge::Selected, GLOW - 4, middle) + 30);
+        let mut pixels = vec![0u8; (width * height * 4) as usize];
+        compose(&mut pixels, width, height, image, Edge::SelectedHovered, 0x00ff_8040);
+        let outer = &pixels[((middle * width + GLOW - 4) * 4) as usize..][..4];
+        assert!(outer[2] > outer[0], "red outside: {outer:?}");
     }
 
     #[test]
@@ -2048,27 +2073,33 @@ mod tests {
             let (hovered, hovered_pin) = all[1];
             set_hover(hovered, &mut *hovered_pin, true, false);
             for (index, (window, _)) in pins().into_iter().enumerate() {
-                let mut bounds = RECT::default();
-                GetWindowRect(window, &mut bounds);
-                let (width, height) = (bounds.right - bounds.left, bounds.bottom - bounds.top);
-                let surface = Surface::new(null_mut(), width, height).unwrap();
                 let pin = GetWindowLongPtrW(window, GWLP_USERDATA) as *const Pin;
-                paint_pin(window, &*pin, surface.dc, RECT { left: 0, top: 0, right: width, bottom: height });
-                GdiFlush();
-                let edge = if (*pin).selected { Edge::Selected } else if (*pin).hovering { Edge::Hovered } else { Edge::Plain };
-                compose(surface.bytes_mut(width, height), width, height, (*pin).image_rect(), edge, theme::palette().accent);
-                let bounds = RECT { left: 0, top: 0, right: width, bottom: height };
-                let mut picture = crate::capture::Desktop { bounds, surface }.crop(bounds).unwrap();
-                // Over a mid-gray desktop, as the window would show.
-                for pixel in picture.pixels.chunks_exact_mut(4) {
-                    let keep = 255 - u32::from(pixel[3]);
-                    for channel in &mut pixel[..3] {
-                        *channel = (u32::from(*channel) + 90 * keep / 255) as u8;
-                    }
-                    pixel[3] = 255;
-                }
                 let name = if window == first { "selected-pinned" } else if window == hovered { "hovered" } else { "plain" };
-                picture.save_png(&folder.join(format!("pin-{index}-{name}.png"))).unwrap();
+                let mut looks = vec![((*pin).edge(), name)];
+                if window == first {
+                    // The selected pin under the pointer as well.
+                    looks.push((Edge::SelectedHovered, "selected-hovered"));
+                }
+                for (edge, name) in looks {
+                    let mut bounds = RECT::default();
+                    GetWindowRect(window, &mut bounds);
+                    let (width, height) = (bounds.right - bounds.left, bounds.bottom - bounds.top);
+                    let surface = Surface::new(null_mut(), width, height).unwrap();
+                    paint_pin(window, &*pin, surface.dc, RECT { left: 0, top: 0, right: width, bottom: height });
+                    GdiFlush();
+                    compose(surface.bytes_mut(width, height), width, height, (*pin).image_rect(), edge, theme::palette().accent);
+                    let bounds = RECT { left: 0, top: 0, right: width, bottom: height };
+                    let mut picture = crate::capture::Desktop { bounds, surface }.crop(bounds).unwrap();
+                    // Over a mid-gray desktop, as the window would show.
+                    for pixel in picture.pixels.chunks_exact_mut(4) {
+                        let keep = 255 - u32::from(pixel[3]);
+                        for channel in &mut pixel[..3] {
+                            *channel = (u32::from(*channel) + 90 * keep / 255) as u8;
+                        }
+                        pixel[3] = 255;
+                    }
+                    picture.save_png(&folder.join(format!("pin-{index}-{name}.png"))).unwrap();
+                }
             }
             close_all();
         }
