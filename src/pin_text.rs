@@ -251,7 +251,8 @@ impl TextLayer {
                         let start = if word_index == first.0 { first.1 } else { 0 };
                         let end = if word_index == last.0 { last.1 } else { usize::MAX };
                         let text: String = word.text.chars().skip(start).take(end.saturating_sub(start)).collect();
-                        (!text.is_empty()).then(|| ocr::Word { text, ..word.clone() })
+                        let carets = word.carets.iter().skip(start).take(text.chars().count() + 1).copied().collect();
+                        (!text.is_empty()).then(|| ocr::Word { text, carets, ..word.clone() })
                     })
                     .collect();
                 Line { words }
@@ -473,8 +474,12 @@ fn weight(character: char, fixed: bool) -> f32 {
     }
 }
 
-/// The x of the caret before character `offset` of `word`, in image pixels.
+/// The x of the caret before character `offset` of `word`, in image pixels:
+/// where the recognizer placed it, else estimated from the word's box.
 fn caret_x(word: &ocr::Word, offset: usize, fixed: bool) -> f32 {
+    if word.carets.len() == length(word) + 1 {
+        return word.carets[offset.min(word.carets.len() - 1)];
+    }
     let weights: Vec<f32> = word.text.chars().map(|character| weight(character, fixed)).collect();
     let total: f32 = weights.iter().sum::<f32>().max(f32::EPSILON);
     let before: f32 = weights.iter().take(offset).sum();
@@ -544,6 +549,7 @@ mod tests {
                         text: (*text).into(),
                         rect: [left, top, left + 24.0, top + 14.0],
                         spaced: false,
+                        carets: Vec::new(),
                     }
                 })
                 .collect(),
@@ -603,7 +609,7 @@ mod tests {
             .split(' ')
             .map(|piece| {
                 let width = piece.chars().count() as f32 * 8.0;
-                let word = Word { text: piece.into(), rect: [left, 0.0, left + width, 14.0], spaced: false };
+                let word = Word { text: piece.into(), rect: [left, 0.0, left + width, 14.0], spaced: false, carets: Vec::new() };
                 left += width + 8.0;
                 word
             })
@@ -642,7 +648,7 @@ mod tests {
             word.rect[0] += 100.0;
             word.rect[2] += 100.0;
         }
-        let number = Line { words: vec![Word { text: "564".into(), rect: [2.0, 1.0, 30.0, 15.0], spaced: false }] };
+        let number = Line { words: vec![Word { text: "564".into(), rect: [2.0, 1.0, 30.0, 15.0], spaced: false, carets: Vec::new() }] };
         let mut layer = TextLayer::new();
         layer.status = Status::Ready(vec![number, code]);
         let view = View { origin: POINT { x: 0, y: 0 }, zoom: 1.0, scale: 1.0 };

@@ -161,7 +161,7 @@ mod tests {
     use crate::ocr::Word;
 
     fn line(rect: [f32; 4]) -> Line {
-        Line { words: vec![Word { text: "x".into(), rect, spaced: false }] }
+        Line { words: vec![Word { text: "x".into(), rect, spaced: false, carets: Vec::new() }] }
     }
 
     /// A light page with two dark "text" bars.

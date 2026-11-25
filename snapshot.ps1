@@ -36,6 +36,74 @@ function Invoke-App {
     }
 }
 
+# Runs a command line on a desktop of its own and returns its exit code.
+# The tests open real capture overlays and pins; on the user's desktop
+# (release runs there for the signing key) they would flash on screen.
+function Invoke-OnHiddenDesktop {
+    param([string]$CommandLine)
+    if (-not ('HiddenDesktop' -as [type])) {
+        Add-Type -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+public static class HiddenDesktop {
+    [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    static extern IntPtr CreateDesktopW(string name, IntPtr device, IntPtr mode, uint flags, uint access, IntPtr attributes);
+    [DllImport("user32.dll")]
+    static extern bool CloseDesktop(IntPtr desktop);
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    struct StartupInfo {
+        public int cb; public string reserved; public string desktop; public string title;
+        public int x, y, width, height, columns, rows, fill, flags;
+        public short show, reserved2; public IntPtr reserved3, input, output, error;
+    }
+    [StructLayout(LayoutKind.Sequential)]
+    struct ProcessInformation { public IntPtr process, thread; public int processId, threadId; }
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    static extern bool CreateProcessW(string application, string commandLine, IntPtr processAttributes, IntPtr threadAttributes,
+        bool inheritHandles, uint flags, IntPtr environment, string directory, ref StartupInfo startup, out ProcessInformation information);
+    [DllImport("kernel32.dll")]
+    static extern uint WaitForSingleObject(IntPtr handle, uint milliseconds);
+    [DllImport("kernel32.dll")]
+    static extern bool GetExitCodeProcess(IntPtr process, out int code);
+    [DllImport("kernel32.dll")]
+    static extern bool CloseHandle(IntPtr handle);
+
+    public static int Run(string commandLine, string directory) {
+        const string name = "just-snapshot-tests";
+        // GENERIC_ALL; the desktop goes away with its last handle.
+        IntPtr desktop = CreateDesktopW(name, IntPtr.Zero, IntPtr.Zero, 0, 0x10000000, IntPtr.Zero);
+        if (desktop == IntPtr.Zero) throw new Win32Exception();
+        try {
+            var startup = new StartupInfo { desktop = name };
+            startup.cb = Marshal.SizeOf(startup);
+            ProcessInformation information;
+            // CREATE_NO_WINDOW: output goes to the file the command line redirects to.
+            if (!CreateProcessW(null, commandLine, IntPtr.Zero, IntPtr.Zero, false, 0x08000000, IntPtr.Zero, directory, ref startup, out information))
+                throw new Win32Exception();
+            WaitForSingleObject(information.process, 0xFFFFFFFF);
+            int code;
+            GetExitCodeProcess(information.process, out code);
+            CloseHandle(information.thread);
+            CloseHandle(information.process);
+            return code;
+        } finally {
+            CloseDesktop(desktop);
+        }
+    }
+}
+'@
+    }
+    $log = Join-Path ([IO.Path]::GetTempPath()) ('just-snapshot-tests-' + [guid]::NewGuid() + '.log')
+    try {
+        $code = [HiddenDesktop]::Run("cmd.exe /d /c $CommandLine > `"$log`" 2>&1", $projectRoot)
+        if (Test-Path -LiteralPath $log) { Get-Content -LiteralPath $log -Encoding UTF8 | Out-Host }
+    } finally {
+        Remove-Item -LiteralPath $log -ErrorAction SilentlyContinue
+    }
+    if ($code -ne 0) { throw "$CommandLine failed (exit $code)." }
+}
+
 # The section "## v<version>" of RELEASE_NOTES.md: what users read in the
 # update card and on the release page.
 function Get-ReleaseNotes {
@@ -126,7 +194,9 @@ try {
     }
     Initialize-BuildTools
     if ($Command -in @('test', 'package', 'release')) {
-        Invoke-Checked cargo @('test', '--release', '--locked', '--target', $target, '--target-dir', 'target')
+        # Compile here so errors show as they come, then run off screen.
+        Invoke-Checked cargo @('test', '--release', '--locked', '--target', $target, '--target-dir', 'target', '--no-run')
+        Invoke-OnHiddenDesktop "cargo test --release --locked --target $target --target-dir target"
     }
     if ($Command -ne 'test') {
         Invoke-Checked cargo @('build', '--release', '--locked', '--target', $target, '--target-dir', 'target')

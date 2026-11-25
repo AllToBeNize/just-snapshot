@@ -15,7 +15,7 @@ Build and test on Windows only. `snapshot.ps1` locates Cargo and the Visual Stud
 | Command | Purpose |
 | --- | --- |
 | `.\snapshot.ps1 build` | Release build: `target/x86_64-pc-windows-msvc/release/just-snapshot.exe` |
-| `.\snapshot.ps1 test` | Run all unit tests |
+| `.\snapshot.ps1 test` | Run all unit tests (`test`, `package` and `release` run them on a desktop of their own, `Invoke-OnHiddenDesktop`: they open real overlays and pins, which would flash on the user's screen when releasing from the desktop session) |
 | `.\snapshot.ps1 package` | Test, build, then write `dist/just-snapshot-v<version>-windows-x64.zip`, `dist/just-snapshot-v<version>-setup.exe` and a `.sha256` for each |
 | `.\snapshot.ps1 release -Tag vX.Y.Z` | Package and create a draft GitHub Release (needs `gh auth login`) |
 
@@ -84,7 +84,7 @@ Release keys: one ECDSA P-256 key per publishing machine, created there with `.\
 | `http.rs` | Blocking HTTPS POST over WinHTTP (system proxy and TLS); call off the UI thread |
 | `credential.rs` | Windows Credential Manager secrets named `just-snapshot/<name>`. The ignored round-trip test needs the desktop session |
 | `digest.rs` | MD5 / SHA-256 from CNG for request signatures |
-| `pin_text.rs` | Text layer of a pin: character selection in reading order (`Pos` is line, word, characters before the caret; OCR boxes only words, so `caret_x` places characters by typical width; a drag starts after 3 px, a click or a click off the text clears) (double-click picks a code-editor word at character level: letters, digits and `_` together, a CJK run, or one mark, crossing OCR words only where `Line::attached`; carets use equal widths when `monospace` finds the Latin words equally wide per character; the third click within the double-click time selects the line; of lines side by side at one height, like a gutter of line numbers beside code, `nearest` takes the one closest along x), hit testing (text selects, the rest drags the pin), copy, painting. `<test binary> pin_text --ignored` renders previews; `<test binary> pinned --ignored --nocapture` runs a real pin through recognition |
+| `pin_text.rs` | Text layer of a pin: character selection in reading order (`Pos` is line, word, characters before the caret; `caret_x` uses `Word::carets` where the engine placed each character (PaddleOCR: halfway between CTC columns, `paddle_ocr::carets`), else places characters by typical width (Windows OCR boxes only words); a drag starts after 3 px, a click or a click off the text clears) (double-click picks a code-editor word at character level: letters, digits and `_` together, a CJK run, or one mark, crossing OCR words only where `Line::attached`; carets use equal widths when `monospace` finds the Latin words equally wide per character; the third click within the double-click time selects the line; of lines side by side at one height, like a gutter of line numbers beside code, `nearest` takes the one closest along x), hit testing (text selects, the rest drags the pin), copy, painting. `<test binary> pin_text --ignored` renders previews; `<test binary> pinned --ignored --nocapture` runs a real pin through recognition |
 
 ## UI Conventions
 

@@ -31,6 +31,10 @@ pub struct Word {
     /// The source had a gap before this word, so the text gets a space here
     /// even where the characters alone would not call for one.
     pub spaced: bool,
+    /// The x of the caret before each character and after the last, where
+    /// the recognizer places characters (PaddleOCR); empty when it only
+    /// boxes whole words (Windows OCR).
+    pub carets: Vec<f32>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -297,6 +301,7 @@ fn recognize_strip(
             line.words.push(Word {
                 text: word.Text()?.to_string_lossy(),
                 spaced: false,
+                carets: Vec::new(),
                 rect: [
                     rect.X / scale,
                     rect.Y / scale + top as f32,
@@ -394,6 +399,7 @@ pub(crate) mod tests {
             text: text.into(),
             rect: [left, 0.0, left + 10.0, 10.0],
             spaced: false,
+            carets: Vec::new(),
         }
     }
 
@@ -403,7 +409,7 @@ pub(crate) mod tests {
     }
 
     fn at(text: &str, left: f32, width: f32) -> Word {
-        Word { text: text.into(), rect: [left, 0.0, left + width, 16.0], spaced: false }
+        Word { text: text.into(), rect: [left, 0.0, left + width, 16.0], spaced: false, carets: Vec::new() }
     }
 
     #[test]

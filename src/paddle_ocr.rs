@@ -199,6 +199,9 @@ fn join_words(row: &mut Vec<Word>, words: &mut Vec<Word>) {
     if let Some(last) = repeated.filter(|&last| twice(last)) {
         first.text.drain(..last.len_utf8());
         first.rect[0] = first.rect[0].max(before.rect[2]);
+        if !first.carets.is_empty() {
+            first.carets.remove(0);
+        }
     }
     // Word boxes reach a little past their characters, so a space between
     // words leaves a gap of about a third of the height, a cut inside a word
@@ -470,16 +473,21 @@ fn line(region: Region, decoded: &Decoded) -> Line {
             (left, right)
         })
         .collect();
-    // (text, left, right, spaced)
+    let carets = carets(region, decoded);
+    // (text, left, right, spaced, carets)
     let mut words = Vec::new();
-    let mut current: Option<(String, f32, f32, bool)> = None;
+    let mut current: Option<(String, f32, f32, bool, Vec<f32>)> = None;
     let mut pending_space = false;
-    let finish = |current: &mut Option<(String, f32, f32, bool)>, words: &mut Vec<Word>| {
-        if let Some((text, left, right, spaced)) = current.take() {
-            words.push(Word { text, rect: [left, region.top as f32, right, region.bottom as f32], spaced });
+    let finish = |current: &mut Option<(String, f32, f32, bool, Vec<f32>)>, words: &mut Vec<Word>| {
+        if let Some((text, left, right, spaced, carets)) = current.take() {
+            words.push(Word { text, rect: [left, region.top as f32, right, region.bottom as f32], spaced, carets });
         }
     };
     for (index, ((text, column), &(left, right))) in characters.iter().zip(&edges).enumerate() {
+        let (before, after) = carets[index];
+        // A token of several characters shares its slot evenly.
+        let count = text.chars().count().max(1);
+        let inside = (1..count).map(move |part| before + (after - before) * part as f32 / count as f32);
         let gap = index > 0 && column - characters[index - 1].1 > WORD_GAP_COLUMNS;
         if text.trim().is_empty() {
             finish(&mut current, &mut words);
@@ -494,20 +502,50 @@ fn line(region: Region, decoded: &Decoded) -> Line {
         let spaced = std::mem::take(&mut pending_space) && !words.is_empty();
         if is_cjk(text) {
             finish(&mut current, &mut words);
-            current = Some((text.clone(), left, right, spaced));
+            current = Some((text.clone(), left, right, spaced, std::iter::once(before).chain(inside).chain([after]).collect()));
             finish(&mut current, &mut words);
         } else {
             match &mut current {
-                Some((word, _, end, _)) => {
+                Some((word, _, end, _, word_carets)) => {
                     word.push_str(text);
                     *end = right;
+                    // The caret between two characters: halfway from one to the next.
+                    let last = word_carets.last_mut().unwrap();
+                    *last = (*last + before) / 2.0;
+                    word_carets.extend(inside.chain([after]));
                 }
-                None => current = Some((text.clone(), left, right, spaced)),
+                None => current = Some((text.clone(), left, right, spaced, std::iter::once(before).chain(inside).chain([after]).collect())),
             }
         }
     }
     finish(&mut current, &mut words);
     Line { words }
+}
+
+/// Where each character starts and ends along x. CTC emits a character at
+/// the output column of its middle; it reaches half the line's character
+/// pitch either side (the typical step between neighbors' columns), so
+/// carets fall halfway between neighbors.
+fn carets(region: Region, decoded: &Decoded) -> Vec<(f32, f32)> {
+    let characters = &decoded.characters;
+    let column_width = region.width() as f32 / decoded.columns.max(1.0);
+    // Steps between neighbors inside words; a space is read wider.
+    let mut steps: Vec<usize> = characters
+        .windows(2)
+        .filter(|pair| pair.iter().all(|(text, _)| !text.trim().is_empty()))
+        .map(|pair| pair[1].1 - pair[0].1)
+        .filter(|&step| step > 0 && step <= WORD_GAP_COLUMNS)
+        .collect();
+    steps.sort_unstable();
+    let pitch = steps.get(steps.len() / 2).map_or(2.0, |&step| step as f32);
+    let half = pitch / 2.0 * column_width;
+    characters
+        .iter()
+        .map(|(_, column)| {
+            let middle = region.left as f32 + (*column as f32 + 0.5) * column_width;
+            (middle - half, middle + half)
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -593,7 +631,7 @@ mod tests {
                 println!("  {}", line.text());
                 if std::env::var_os("SNAPSHOT_OCR_WORDS").is_some() {
                     for word in &line.words {
-                        println!("    {:?} {:?} spaced={}", word.text, word.rect, word.spaced);
+                        println!("    {:?} {:?} spaced={} carets={:?}", word.text, word.rect, word.spaced, word.carets.iter().map(|x| x.round() as i32).collect::<Vec<_>>());
                     }
                 }
             }
@@ -610,7 +648,7 @@ mod tests {
     fn boxes_side_by_side_join_into_one_line_but_columns_stay_apart() {
         let piece = |left: i32, top: i32, width: i32, text: &str| {
             let region = Region { left, top, right: left + width, bottom: top + 20 };
-            let word = Word { text: text.into(), rect: [left as f32, top as f32, (left + width) as f32, (top + 20) as f32], spaced: false };
+            let word = Word { text: text.into(), rect: [left as f32, top as f32, (left + width) as f32, (top + 20) as f32], spaced: false, carets: Vec::new() };
             (region, Line { words: vec![word] })
         };
         let lines = merge_rows(vec![
@@ -622,6 +660,19 @@ mod tests {
         ]);
         let texts: Vec<String> = lines.iter().map(Line::text).collect();
         assert_eq!(texts, ["PY: Warning: QQ", "Actor", "next"]);
+    }
+
+    #[test]
+    fn carets_sit_between_the_characters_where_they_were_read() {
+        // "a=E b": a column 4 px wide, characters every 2 columns, the space wider.
+        let region = Region { left: 100, top: 0, right: 180, bottom: 20 };
+        let characters = [("a", 1), ("=", 3), ("E", 5), (" ", 8), ("b", 11)];
+        let decoded = Decoded { characters: characters.iter().map(|(text, column)| (text.to_string(), *column)).collect(), score: 1.0, columns: 20.0 };
+        let words = line(region, &decoded).words;
+        assert_eq!(words.len(), 2);
+        // Middles at 106, 114, 122: carets halfway, the ends one pitch (8 px) apart.
+        assert_eq!(words[0].carets, [102.0, 110.0, 118.0, 126.0]);
+        assert_eq!(words[1].carets, [142.0, 150.0]);
     }
 
     #[test]
@@ -643,7 +694,7 @@ mod tests {
     fn identifiers_cut_into_boxes_join_back_without_spaces() {
         let piece = |left: f32, right: f32, text: &str| {
             let region = Region { left: left as i32, top: 0, right: right as i32, bottom: 18 };
-            (region, Line { words: vec![Word { text: text.into(), rect: [left, 0.0, right, 18.0], spaced: false }] })
+            (region, Line { words: vec![Word { text: text.into(), rect: [left, 0.0, right, 18.0], spaced: false, carets: Vec::new() }] })
         };
         // Read from a pin: the underscore at the cut came back in both boxes.
         let lines = merge_rows(vec![
