@@ -92,6 +92,8 @@ enum Target {
     Service,
     /// The engine settings beside the image search shortcut.
     SearchService,
+    /// The recognition engine (快速 / 准确) beside the extract text shortcut.
+    OcrService,
     /// Opens the save settings: folder, file names, auto-save, shadow, border.
     Output,
     Tab(usize),
@@ -277,6 +279,7 @@ struct Layout {
     mascot: RECT,
     service: RECT,
     search_service: RECT,
+    ocr_service: RECT,
     toggle: RECT,
     auto_update: RECT,
     output: RECT,
@@ -352,15 +355,21 @@ impl Layout {
             keys[index] = rect(right - ROW_KEYS, top + 6, right, top + ROW - 6);
         }
 
-        // A gear after the two-character "翻译" and "识图" labels: icon 12 + 20,
-        // gap 10, two 14 px characters, gap 4.
-        let gear = |row: RECT| {
-            let left = row.left + s(12 + 20 + 10 + 28 + 4);
+        // A gear after a label of `characters` 14 px characters: icon 12 + 20,
+        // gap 10, the label, gap 4.
+        let gear = |row: RECT, characters: i32| {
+            let left = row.left + s(12 + 20 + 10 + 14 * characters + 4);
             let top = (row.top + row.bottom) / 2 - s(12);
             RECT { left, top, right: left + s(24), bottom: top + s(24) }
         };
-        let service = gear(rows[Binding::Translate as usize]);
-        let search_service = gear(rows[Binding::SearchImage as usize]);
+        let service = gear(rows[Binding::Translate as usize], 2);
+        let search_service = gear(rows[Binding::SearchImage as usize], 2);
+        let ocr_service = gear(rows[Binding::ExtractText as usize], 4);
+        // The shortcut field starts after the gear in rows that have one.
+        for (binding, gear) in [(Binding::Translate, service), (Binding::SearchImage, search_service), (Binding::ExtractText, ocr_service)] {
+            let key = &mut keys[binding as usize];
+            key.left = key.left.max(gear.right + s(4));
+        }
 
         let right = WIDTH - PAD - 18;
         let row_top = |row: i32, height: i32| general_top + GENERAL_ROW * row + (GENERAL_ROW - height) / 2;
@@ -496,6 +505,7 @@ impl Layout {
             clear,
             service,
             search_service,
+            ocr_service,
             toggle,
             auto_update,
             output,
@@ -531,6 +541,7 @@ impl Layout {
                         (Target::ClearSecondary, self.clear),
                         (Target::Service, self.service),
                         (Target::SearchService, self.search_service),
+                        (Target::OcrService, self.ocr_service),
                         (Target::Output, self.output),
                     ])
                     .chain((0..THEMES.len()).map(|index| (Target::Theme(index), self.themes[index])))
@@ -852,6 +863,11 @@ unsafe fn activate(window: HWND, target: Target) {
         Target::Service => {
             if let Err(error) = translate_settings::open(window) {
                 crate::show_error(window, &format!("无法打开翻译设置。\n{error}"));
+            }
+        }
+        Target::OcrService => {
+            if let Err(error) = crate::ocr_settings::open(window) {
+                crate::show_error(window, &format!("无法打开文字识别设置。\n{error}"));
             }
         }
         Target::SearchService => {
@@ -1782,6 +1798,7 @@ impl<'a> Painter<'a> {
         }
         self.service_link(Target::Service, self.layout.service);
         self.service_link(Target::SearchService, self.layout.search_service);
+        self.service_link(Target::OcrService, self.layout.ocr_service);
     }
 
     /// A shortcut drawn as keycaps, right-aligned in its field.

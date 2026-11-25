@@ -1,6 +1,7 @@
-//! Text recognition with the OCR engine built into Windows
-//! (`Windows.Media.Ocr`): offline, no setup, recognizer languages follow the
-//! user's Windows languages.
+//! Text recognition. `recognize` uses the engine chosen in the settings:
+//! 快速 is the OCR engine built into Windows (`Windows.Media.Ocr`, below):
+//! offline, no setup, recognizer languages follow the user's Windows
+//! languages. 准确 is PaddleOCR from the downloaded pack (`paddle_ocr`).
 //!
 //! The engine reads text about 18 px and taller well but garbles smaller UI
 //! text, so small text is recognized again on a smoothly enlarged copy.
@@ -27,6 +28,9 @@ const STRIP_OVERLAP: i32 = 160;
 pub struct Word {
     pub text: String,
     pub rect: [f32; 4],
+    /// The source had a gap before this word, so the text gets a space here
+    /// even where the characters alone would not call for one.
+    pub spaced: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -51,7 +55,14 @@ impl Line {
 
     /// The text of `words[from..to]`, spaced the way it reads.
     pub fn text_of(&self, from: usize, to: usize) -> String {
-        join(self.words[from..to].iter().map(|word| word.text.as_str()))
+        let mut text = String::new();
+        for (index, word) in self.words[from..to].iter().enumerate() {
+            if index > 0 && (word.spaced || needs_space(&text, &word.text)) {
+                text.push(' ');
+            }
+            text.push_str(&word.text);
+        }
+        text
     }
 
     pub fn text(&self) -> String {
@@ -59,20 +70,11 @@ impl Line {
     }
 }
 
-/// Joins words, putting a space only between two words that both border on
-/// Latin letters or digits. The Chinese recognizer returns every character
-/// as its own word, and those must not be spaced apart.
-pub fn join<'a>(words: impl IntoIterator<Item = &'a str>) -> String {
-    let mut text = String::new();
-    for word in words {
-        let spaced = text.chars().next_back().is_some_and(is_latin)
-            && word.chars().next().is_some_and(is_latin);
-        if spaced {
-            text.push(' ');
-        }
-        text.push_str(word);
-    }
-    text
+/// A space goes only between two words that both border on Latin letters
+/// or digits. The Chinese recognizer returns every character as its own
+/// word, and those must not be spaced apart.
+fn needs_space(before: &str, word: &str) -> bool {
+    before.chars().next_back().is_some_and(is_latin) && word.chars().next().is_some_and(is_latin)
 }
 
 fn is_latin(c: char) -> bool {
@@ -84,8 +86,20 @@ pub fn text(lines: &[Line]) -> String {
     lines.iter().map(Line::text).collect::<Vec<_>>().join("\r\n")
 }
 
-/// Recognizes the text in `image`. Blocks; run it off the UI thread.
+/// Recognizes the text in `image` with the chosen engine. Blocks; run it
+/// off the UI thread.
 pub fn recognize(image: &Image) -> Result<Vec<Line>, String> {
+    match crate::ocr_pack::engine() {
+        crate::ocr_pack::Engine::Fast => recognize_windows(image),
+        crate::ocr_pack::Engine::Accurate if !crate::ocr_pack::installed() => Err(
+            "「准确」档的识别包还没下载完。\n请在设置里「提取文本」旁的齿轮中下载，或者切回「快速」档。".into(),
+        ),
+        crate::ocr_pack::Engine::Accurate => crate::paddle_ocr::recognize(image, &crate::ocr_pack::folder()?),
+    }
+}
+
+/// Recognizes with the Windows engine.
+pub fn recognize_windows(image: &Image) -> Result<Vec<Line>, String> {
     let lines = recognize_at(image, 1)?;
     match median_height(&lines) {
         Some(height) if height >= SMALL_TEXT => Ok(lines),
@@ -131,23 +145,23 @@ fn recognize_at(image: &Image, upscale: i32) -> Result<Vec<Line>, String> {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-struct Strip {
-    top: i32,
-    bottom: i32,
+pub(crate) struct Strip {
+    pub(crate) top: i32,
+    pub(crate) bottom: i32,
     /// The part whose lines this strip keeps; neighbors keep the rest of the overlap.
     keep_top: i32,
     keep_bottom: i32,
 }
 
 impl Strip {
-    fn owns(self, y: f32) -> bool {
+    pub(crate) fn owns(self, y: f32) -> bool {
         y >= self.keep_top as f32 && y < self.keep_bottom as f32
     }
 }
 
 /// Splits `height` into strips no taller than `limit`, overlapping by
 /// `STRIP_OVERLAP`; each line is kept by the strip that owns its center.
-fn strips(height: i32, limit: i32) -> Vec<Strip> {
+pub(crate) fn strips(height: i32, limit: i32) -> Vec<Strip> {
     if height <= limit {
         return vec![Strip {
             top: 0,
@@ -205,6 +219,7 @@ fn recognize_strip(
             let rect = word.BoundingRect()?;
             line.words.push(Word {
                 text: word.Text()?.to_string_lossy(),
+                spaced: false,
                 rect: [
                     rect.X / scale,
                     rect.Y / scale + top as f32,
@@ -301,15 +316,25 @@ pub(crate) mod tests {
         Word {
             text: text.into(),
             rect: [left, 0.0, left + 10.0, 10.0],
+            spaced: false,
         }
+    }
+
+    fn join(words: &[&str]) -> String {
+        let line = Line { words: words.iter().map(|text| word(text, 0.0)).collect() };
+        line.text()
     }
 
     #[test]
     fn chinese_characters_join_without_spaces_and_latin_words_with() {
-        assert_eq!(join(["识", "别", "文", "字"]), "识别文字");
-        assert_eq!(join(["Hello", "world"]), "Hello world");
-        assert_eq!(join(["打开", "Snapshot", "设置", "v0.1"]), "打开Snapshot设置v0.1");
-        assert_eq!(join(["Ctrl+C", "复制"]), "Ctrl+C复制");
+        assert_eq!(join(&["识", "别", "文", "字"]), "识别文字");
+        assert_eq!(join(&["Hello", "world"]), "Hello world");
+        assert_eq!(join(&["打开", "Snapshot", "设置", "v0.1"]), "打开Snapshot设置v0.1");
+        assert_eq!(join(&["Ctrl+C", "复制"]), "Ctrl+C复制");
+        let mut gap = Line { words: vec![word("PY:", 0.0), word("Warning:", 30.0)] };
+        assert_eq!(gap.text(), "PY:Warning:");
+        gap.words[1].spaced = true;
+        assert_eq!(gap.text(), "PY: Warning:", "a gap in the source keeps its space");
         let line = Line {
             words: vec![word("快捷键", 0.0), word("Ctrl", 20.0), word("8", 40.0)],
         };
@@ -370,7 +395,7 @@ pub(crate) mod tests {
         // printed for reference (enlarging helps, but some letters still slip).
         for px in [12, 13, 14, 16, 18, 20, 24] {
             let image = unsafe { sample("识别文字 Snapshot 保存到 C:\\Users\\eric\\Pictures", px, true) };
-            let found = text(&recognize(&image).unwrap());
+            let found = text(&recognize_windows(&image).unwrap());
             println!("{px}px: {found}");
             if px >= 16 {
                 for expected in ["识别文字", "保存到", "Users", "Pictures"] {

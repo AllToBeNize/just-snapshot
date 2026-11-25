@@ -21,6 +21,9 @@ mod input_overlay;
 mod migrate;
 mod mosaic;
 mod ocr;
+mod ocr_pack;
+mod ocr_settings;
+mod paddle_ocr;
 mod output;
 mod output_settings;
 mod panel_options;
@@ -233,6 +236,7 @@ unsafe fn run(args: &[String]) -> Result<(), String> {
     settings::register(instance).map_err(|error| error.to_string())?;
     translate_settings::register().map_err(|error| error.to_string())?;
     image_search_settings::register().map_err(|error| error.to_string())?;
+    ocr_settings::register().map_err(|error| error.to_string())?;
     output_settings::register().map_err(|error| error.to_string())?;
     input_overlay::register(instance).map_err(|error| error.to_string())?;
     recording_ui::register(instance).map_err(|error| error.to_string())?;

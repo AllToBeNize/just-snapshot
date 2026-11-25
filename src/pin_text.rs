@@ -359,6 +359,7 @@ mod tests {
                     Word {
                         text: (*text).into(),
                         rect: [left, top, left + 24.0, top + 14.0],
+                        spaced: false,
                     }
                 })
                 .collect(),

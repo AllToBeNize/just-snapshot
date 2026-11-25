@@ -225,6 +225,12 @@ impl Settings {
     }
 }
 
+/// Where to fetch a file from the GitHub releases: GitHub, then each mirror
+/// from `update.txt`, as `(name, url)`.
+pub fn sources(url: &str) -> Vec<(String, String)> {
+    Settings::load().sources(url)
+}
+
 /// Never offer `version` again on automatic checks.
 pub fn skip(version: &str) -> Result<(), String> {
     let mut settings = Settings::load();

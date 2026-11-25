@@ -10,7 +10,7 @@
 | 录像 | 区域录像或全屏录像存为 MP4，可录系统声音和麦克风，录完一键转 GIF |
 | 按键显示 | 屏幕上悬浮键鼠 / Xbox 手柄面板，按下的键高亮 |
 | 贴图 | 把截图钉在屏幕最前面，可缩放、调透明度、分组 |
-| 提取文字 | 离线识别文字和二维码 / 条形码，在贴图上直接拖选复制 |
+| 提取文字 | 离线识别文字和二维码 / 条形码，在贴图上直接拖选复制；可选更准的 PaddleOCR 引擎 |
 | 翻译 | 识别后翻译，译文盖在原文位置；默认免费服务，也可接 OpenAI 兼容接口、DeepL、百度、有道 |
 | 识图 | 把截图交给 Google Lens 或 Yandex 以图搜图，结果在浏览器打开；也能接自己的识图接口 |
 | 找回上次截图 | 误按 `Esc` 后一键回到上次的画面、选区和标注 |
@@ -96,7 +96,18 @@
 
 ## 提取文字与翻译
 
-- **提取文字** `Ctrl+E`：截图变成贴图并离线识别文字（用 Windows 自带 OCR，语言跟随系统已装语言包）。在文字上拖选、双击选整行，`Ctrl+C` 复制选中或全部。二维码 / 条形码会用蓝框标出，单击复制内容，`Ctrl+单击` 打开网址。
+- **提取文字** `Ctrl+E`：截图变成贴图并离线识别文字。在文字上拖选、双击选整行，`Ctrl+C` 复制选中或全部。二维码 / 条形码会用蓝框标出，单击复制内容，`Ctrl+单击` 打开网址。
+
+### 识别引擎
+
+在设置「提取文本」一行的齿轮里选：
+
+| 档位 | 引擎 | 特点 |
+| --- | --- | --- |
+| 快速（默认） | Windows 自带 OCR | 立即可用、速度快，语言跟随系统已装语言包；小字、反色文字和代码名容易认错 |
+| 准确 | [PaddleOCR](https://github.com/PaddlePaddle/PaddleOCR) PP-OCRv5（ONNX Runtime 本地运行） | 中英混排、代码名、小字明显更准，每次多花几秒；第一次选它时下载约 37 MB 的识别包（运行库和模型，逐个校验 SHA-256），之后全程离线 |
+
+识别包放在 `%LOCALAPPDATA%\just-snapshot\ocr\pp-ocrv5\`，从 GitHub 的 `ocr-pack-v1` 发布下载，GitHub 连不上时同样走 `update.txt` 里的镜像。
 - **翻译** `Ctrl+F`：识别后翻译，译文按原底色、原字色盖在原文上，左上角按钮切换原文 / 译文。旁边小窗显示完整译文，可切换目标语言（默认中译英、其他译中）、复制、出错重试。
 
 ### 翻译服务
@@ -130,7 +141,10 @@
 
 ## 贴图
 
-`Ctrl+T` 把截图钉在屏幕最前面：左键拖动，滚轮缩放，`Ctrl+滚轮` 调透明度，`Esc` 或双击关闭。右键菜单可以复制、保存、识图、取消置顶、分组；托盘菜单「贴图」里按组显示 / 隐藏或全部关闭。
+`Ctrl+T` 把截图钉在屏幕最前面：左键拖动，滚轮缩放，`Ctrl+滚轮` 调透明度，`Esc` 或双击关闭。右键菜单可以复制、保存、识图、取消置顶、分组、隐藏；托盘菜单「贴图」里按组显示 / 隐藏或全部关闭（「全部显示」也会找回单独隐藏的贴图）。
+
+- **多选**：按住 `Ctrl` 点贴图把它加入或移出选中，选中的贴图有一圈强调色边框。拖动其中一张，选中的会一起移动；滚轮缩放、`Ctrl+滚轮` 调透明度、`Esc` 关闭也都作用于全部选中的；右键菜单里的置顶、隐藏、分组（「把选中的 N 张放进新组」）、关闭同样一起生效。不按 `Ctrl` 点一张没选中的贴图就取消选择。
+- **在其他贴图上面**：右键勾上后，这张贴图始终压在其他贴图上面，点别的贴图也不会盖住它。
 
 ## 设置
 
@@ -157,6 +171,7 @@
 | `overlay.txt` | 按键面板的显示状态、位置、大小、不透明度 |
 | `translate.txt` | 翻译服务商和非密钥参数 |
 | `image_search.txt` | 识图引擎（没有这个文件时用内置的 Google、Yandex） |
+| `ocr.txt` | 文字识别档位（快速 / 准确） |
 | `update.txt` | 更新镜像（`mirrors=https://镜像1/;https://镜像2/`，GitHub 失败后依次尝试）和跳过的版本 |
 
 ## 扩展开发
@@ -187,7 +202,7 @@
 | 输出（复制 / 保存 / 贴图） | `output.rs`、`output_settings.rs`、`clipboard_data.rs`、`pinned.rs` |
 | 长截图 | `scroll_capture.rs`、`scroll_stitch.rs`、`scroll_input.rs` |
 | 录像与按键显示 | `recorder.rs`、`recording_ui.rs`、`gif_export.rs`、`input_overlay.rs` |
-| 文字识别与翻译 | `ocr.rs`、`codes.rs`、`pin_text.rs`、`translate.rs`、`pin_translate.rs` |
+| 文字识别与翻译 | `ocr.rs`、`paddle_ocr.rs`、`ocr_pack.rs`、`ocr_settings.rs`、`codes.rs`、`pin_text.rs`、`translate.rs`、`pin_translate.rs` |
 | 识图 | `image_search.rs`、`image_search_settings.rs` |
 | 设置、主题、图标 | `settings.rs`、`theme.rs`、`icons.rs`、`icons/lucide.rs` |
 | 安装与更新 | `setup.rs`、`update.rs`、`update_ui.rs` |

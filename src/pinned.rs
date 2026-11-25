@@ -79,6 +79,9 @@ const MENU_TOPMOST: usize = 3;
 const MENU_NEW_GROUP: usize = 4;
 const MENU_HIDE_GROUP: usize = 5;
 const MENU_CLOSE: usize = 6;
+const MENU_ABOVE: usize = 7;
+const MENU_HIDE: usize = 8;
+const MENU_DESELECT: usize = 9;
 /// "Move to group N" items start here.
 const MENU_GROUP: usize = 100;
 /// The image search engines, past any group number.
@@ -142,6 +145,13 @@ struct Pin {
     /// Pins are shown and hidden by group from the tray.
     group: u32,
     topmost: bool,
+    /// Kept above the other pins even when they are clicked.
+    above: bool,
+    /// Picked with Ctrl+click; dragging, the wheel, Esc and the menu act on
+    /// every selected pin together.
+    selected: bool,
+    /// Hidden on its own (not with its group) until the tray shows pins again.
+    hidden: bool,
     note: String,
     /// The image with the translation drawn over the original lines.
     translated: Option<Surface>,
@@ -313,6 +323,9 @@ pub unsafe fn open(image: Image, bounds: RECT, mode: Mode) -> io::Result<()> {
         fonts: Fonts::new(scale),
         group: CURRENT_GROUP.get(),
         topmost: true,
+        above: false,
+        selected: false,
+        hidden: false,
         note: String::new(),
         translated: None,
         show_original: false,
@@ -344,6 +357,8 @@ pub unsafe fn open(image: Image, bounds: RECT, mode: Mode) -> io::Result<()> {
     if recognize {
         start_recognition(window, &mut *pin);
     }
+    // A new pin starts on top; pins kept above the others go back over it.
+    raise_above_pins();
     Ok(())
 }
 
@@ -389,7 +404,7 @@ fn is_hidden(group: u32) -> bool {
 /// Shows or hides every pin, with its translation popup.
 unsafe fn apply_visibility() {
     for (window, pin) in pins() {
-        let show = if is_hidden((*pin).group) { SW_HIDE } else { SW_SHOWNOACTIVATE };
+        let show = if is_hidden((*pin).group) || (*pin).hidden { SW_HIDE } else { SW_SHOWNOACTIVATE };
         ShowWindow(window, show);
         if !(*pin).popup.is_null() {
             ShowWindow((*pin).popup, show);
@@ -399,20 +414,120 @@ unsafe fn apply_visibility() {
 
 pub unsafe fn set_all_hidden(hidden: bool) {
     let all: Vec<u32> = if hidden { groups().into_iter().map(|(group, ..)| group).collect() } else { Vec::new() };
+    if !hidden {
+        // "全部显示" also brings back pins hidden on their own.
+        for (_, pin) in pins() {
+            (*pin).hidden = false;
+        }
+    }
     HIDDEN_GROUPS.set(all);
     apply_visibility();
 }
 
-/// Shows a hidden group or hides a shown one.
+/// Shows a hidden group or hides a shown one. Showing a group also brings
+/// back its pins that were hidden on their own.
 pub unsafe fn toggle_group(group: u32) {
-    HIDDEN_GROUPS.with_borrow_mut(|hidden| {
+    let shown = HIDDEN_GROUPS.with_borrow_mut(|hidden| {
         if let Some(index) = hidden.iter().position(|&other| other == group) {
             hidden.remove(index);
+            true
         } else {
             hidden.push(group);
+            false
         }
     });
+    if shown {
+        for (_, pin) in pins().into_iter().filter(|&(_, pin)| (*pin).group == group) {
+            (*pin).hidden = false;
+        }
+    }
     apply_visibility();
+}
+
+/// The pins an action on `window` applies to: every selected pin when it is
+/// one of them, else just it.
+unsafe fn targets(window: HWND) -> Vec<(HWND, *mut Pin)> {
+    let all = pins();
+    let in_selection = all.iter().any(|&(other, pin)| other == window && (*pin).selected);
+    all.into_iter()
+        .filter(|&(other, pin)| if in_selection { (*pin).selected } else { other == window })
+        .collect()
+}
+
+unsafe fn set_selected(window: HWND, pin: &mut Pin, selected: bool) {
+    if pin.selected != selected {
+        pin.selected = selected;
+        InvalidateRect(window, null(), 0);
+    }
+}
+
+/// Ctrl+click: adds the pin to the selection or takes it out.
+unsafe fn toggle_selected(window: HWND, pin: &mut Pin) {
+    set_selected(window, pin, !pin.selected);
+}
+
+/// A plain click on a pin outside the selection ends the selection.
+unsafe fn click_without_ctrl(window: HWND, pin: &Pin) {
+    if !pin.selected {
+        for (other, other_pin) in pins() {
+            if other != window {
+                set_selected(other, &mut *other_pin, false);
+            }
+        }
+    }
+}
+
+fn ctrl_down() -> bool {
+    unsafe { GetKeyState(i32::from(VK_CONTROL)) < 0 }
+}
+
+/// Puts the pins kept above the others back on top of the pin stack. A
+/// hidden one stays hidden: the z-order changes without showing it.
+unsafe fn raise_above_pins() {
+    for (window, pin) in pins() {
+        if (*pin).above {
+            SetWindowPos(window, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        }
+    }
+}
+
+/// Moves the other selected pins along with `window`, which is being dragged to `next`.
+unsafe fn drag_selection(window: HWND, next: RECT) {
+    let mut current = RECT::default();
+    GetWindowRect(window, &mut current);
+    let (dx, dy) = (next.left - current.left, next.top - current.top);
+    if dx == 0 && dy == 0 {
+        return;
+    }
+    for (other, _) in targets(window).into_iter().filter(|&(other, _)| other != window) {
+        let mut bounds = RECT::default();
+        GetWindowRect(other, &mut bounds);
+        SetWindowPos(other, null_mut(), bounds.left + dx, bounds.top + dy, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+}
+
+/// Zooms the pin by `factor`, keeping its top-left corner.
+unsafe fn zoom_by(window: HWND, pin: &mut Pin, factor: f64) {
+    pin.zoom = (pin.zoom * factor).clamp(0.15, 4.0);
+    let (width, height) = pin.window_size();
+    SetWindowPos(window, null_mut(), 0, 0, width, height, SWP_NOMOVE | SWP_NOACTIVATE | SWP_NOZORDER);
+    show_badge(window, pin, Badge::Zoom);
+}
+
+unsafe fn change_opacity(window: HWND, pin: &mut Pin, notches: i32) {
+    let opacity = (pin.opacity + notches * i32::from(opacity_step())).clamp(MIN_OPACITY, 100);
+    let alpha = ((opacity * 255 + 50) / 100) as u8;
+    if SetLayeredWindowAttributes(window, 0, alpha, LWA_ALPHA) != 0 {
+        pin.opacity = opacity;
+    }
+    show_badge(window, pin, Badge::Opacity);
+}
+
+unsafe fn show_badge(window: HWND, pin: &mut Pin, badge: Badge) {
+    if SetTimer(window, BADGE_TIMER, BADGE_DURATION_MS, None) != 0 {
+        pin.badge = Some(badge);
+    }
+    InvalidateRect(window, null(), 0);
 }
 
 pub unsafe fn close_all() {
@@ -424,6 +539,9 @@ pub unsafe fn close_all() {
 /// Keeps a pin above other windows, or lets them cover it.
 unsafe fn set_topmost(window: HWND, pin: &mut Pin, topmost: bool) {
     pin.topmost = topmost;
+    if !topmost {
+        pin.above = false;
+    }
     let after = if topmost { HWND_TOPMOST } else { HWND_NOTOPMOST };
     SetWindowPos(window, after, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
     if !pin.popup.is_null() {
@@ -457,12 +575,16 @@ unsafe fn save_image(window: HWND, pin: &mut Pin) {
     }
 }
 
-/// The right-click menu: copy, save, image search, stay on top, groups and close.
+/// The right-click menu: copy, save, image search, stay on top, groups and
+/// close. With several pins selected, the window and group items act on all of them.
 unsafe fn context_menu(window: HWND, pin: &mut Pin) {
     let menu = CreatePopupMenu();
     if menu.is_null() {
         return;
     }
+    let targets = targets(window);
+    let count = targets.len();
+    let several = |single: &str, many: &str| crate::wide(&if count > 1 { many.replace("{n}", &count.to_string()) } else { single.to_string() });
     AppendMenuW(menu, MF_STRING, MENU_COPY, w!("复制图片\tCtrl+C"));
     AppendMenuW(menu, MF_STRING, MENU_SAVE, w!("保存…"));
     // A settings file that cannot be read still leaves the way to fix it.
@@ -473,7 +595,11 @@ unsafe fn context_menu(window: HWND, pin: &mut Pin) {
         AppendMenuW(menu, MF_POPUP, search_menu as usize, w!("识图"));
     }
     AppendMenuW(menu, MF_SEPARATOR, 0, null());
-    AppendMenuW(menu, MF_STRING | if pin.topmost { MF_CHECKED } else { 0 }, MENU_TOPMOST, w!("置顶"));
+    let check = |on: bool| if on { MF_CHECKED } else { 0 };
+    let topmost_label = several("置顶", "置顶（选中的 {n} 张）");
+    AppendMenuW(menu, MF_STRING | check(pin.topmost), MENU_TOPMOST, topmost_label.as_ptr());
+    let above_label = several("在其他贴图上面", "在其他贴图上面（选中的 {n} 张）");
+    AppendMenuW(menu, MF_STRING | check(pin.above), MENU_ABOVE, above_label.as_ptr());
     let groups_menu = CreatePopupMenu();
     let groups = groups();
     let newest = groups.iter().map(|&(group, ..)| group).max().unwrap_or(1);
@@ -484,13 +610,20 @@ unsafe fn context_menu(window: HWND, pin: &mut Pin) {
             AppendMenuW(groups_menu, flags, MENU_GROUP + *group as usize, label.as_ptr());
         }
         AppendMenuW(groups_menu, MF_SEPARATOR, 0, null());
-        AppendMenuW(groups_menu, MF_STRING, MENU_NEW_GROUP, w!("移到新组"));
-        let label = crate::wide(&format!("分组：组 {}", pin.group));
+        let new_group = several("移到新组", "把选中的 {n} 张放进新组");
+        AppendMenuW(groups_menu, MF_STRING, MENU_NEW_GROUP, new_group.as_ptr());
+        let label = crate::wide(&if count > 1 { format!("分组（选中的 {count} 张）") } else { format!("分组：组 {}", pin.group) });
         AppendMenuW(menu, MF_POPUP, groups_menu as usize, label.as_ptr());
     }
+    let hide_label = several("隐藏这张", "隐藏选中的 {n} 张");
+    AppendMenuW(menu, MF_STRING, MENU_HIDE, hide_label.as_ptr());
     AppendMenuW(menu, MF_STRING, MENU_HIDE_GROUP, w!("隐藏本组"));
+    if count > 1 {
+        AppendMenuW(menu, MF_STRING, MENU_DESELECT, w!("取消选择"));
+    }
     AppendMenuW(menu, MF_SEPARATOR, 0, null());
-    AppendMenuW(menu, MF_STRING, MENU_CLOSE, w!("关闭\tEsc"));
+    let close_label = several("关闭\tEsc", "关闭选中的 {n} 张\tEsc");
+    AppendMenuW(menu, MF_STRING, MENU_CLOSE, close_label.as_ptr());
     let mut cursor = POINT::default();
     GetCursorPos(&mut cursor);
     let chosen = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_NONOTIFY | TPM_RIGHTBUTTON, cursor.x, cursor.y, 0, window, null());
@@ -498,11 +631,42 @@ unsafe fn context_menu(window: HWND, pin: &mut Pin) {
     match chosen as usize {
         MENU_COPY => copy_image(window, pin),
         MENU_SAVE => save_image(window, pin),
-        MENU_TOPMOST => set_topmost(window, pin, !pin.topmost),
+        MENU_TOPMOST => {
+            let topmost = !pin.topmost;
+            for (other, other_pin) in &targets {
+                set_topmost(*other, &mut **other_pin, topmost);
+            }
+        }
+        MENU_ABOVE => {
+            let above = !pin.above;
+            for (other, other_pin) in &targets {
+                if above && !(**other_pin).topmost {
+                    set_topmost(*other, &mut **other_pin, true);
+                }
+                (**other_pin).above = above;
+            }
+            raise_above_pins();
+        }
+        MENU_HIDE => {
+            for (_, other_pin) in &targets {
+                (**other_pin).hidden = true;
+                (**other_pin).selected = false;
+            }
+            apply_visibility();
+        }
+        MENU_DESELECT => {
+            for (other, other_pin) in &targets {
+                set_selected(*other, &mut **other_pin, false);
+            }
+        }
         MENU_NEW_GROUP => {
-            pin.group = newest + 1;
-            CURRENT_GROUP.set(pin.group);
-            toast(window, pin, format!("已移到组 {}，新贴图也会放进这一组", pin.group));
+            let group = newest + 1;
+            for (_, other_pin) in &targets {
+                (**other_pin).group = group;
+            }
+            CURRENT_GROUP.set(group);
+            let moved = if count > 1 { format!("{count} 张已放进组 {group}") } else { format!("已移到组 {group}") };
+            toast(window, pin, format!("{moved}，新贴图也会放进这一组"));
         }
         MENU_HIDE_GROUP => toggle_group(pin.group),
         id if (MENU_SEARCH..MENU_SEARCH + crate::image_search::MENU_IDS).contains(&id) => {
@@ -523,16 +687,18 @@ unsafe fn context_menu(window: HWND, pin: &mut Pin) {
             }
         }
         MENU_CLOSE => {
-            DestroyWindow(window);
+            for (other, _) in targets {
+                DestroyWindow(other);
+            }
         }
         id if id > MENU_GROUP => {
             let group = (id - MENU_GROUP) as u32;
-            if group != pin.group {
-                pin.group = group;
-                CURRENT_GROUP.set(group);
-                // Joining a hidden group hides the pin with it.
-                apply_visibility();
+            for (_, other_pin) in &targets {
+                (**other_pin).group = group;
             }
+            CURRENT_GROUP.set(group);
+            // Joining a hidden group hides the pins with it.
+            apply_visibility();
         }
         _ => {}
     }
@@ -921,11 +1087,28 @@ unsafe extern "system" fn window_proc(
                 }
             }
         }
+        WM_NCLBUTTONDOWN if !pin.is_null() && wparam == HTCAPTION as usize => {
+            if ctrl_down() {
+                toggle_selected(window, &mut *pin);
+                SetForegroundWindow(window);
+                return 0;
+            }
+            click_without_ctrl(window, &*pin);
+            return DefWindowProcW(window, message, wparam, lparam);
+        }
+        WM_LBUTTONDOWN if !pin.is_null() && ctrl_down() => {
+            toggle_selected(window, &mut *pin);
+        }
+        WM_MOVING if !pin.is_null() && (*pin).selected => {
+            drag_selection(window, *(lparam as *const RECT));
+            return DefWindowProcW(window, message, wparam, lparam);
+        }
         WM_LBUTTONDOWN if !pin.is_null() && (*pin).over_toggle(window, mouse_point(lparam)) => {
             (*pin).show_original = !(*pin).show_original;
             InvalidateRect(window, null(), 0);
         }
         WM_LBUTTONDOWN if !pin.is_null() => {
+            click_without_ctrl(window, &*pin);
             let point = mouse_point(lparam);
             let view = (*pin).view(window);
             let code = (*pin).text.as_ref().and_then(|text| text.code_at(view, point));
@@ -1064,8 +1247,15 @@ unsafe extern "system" fn window_proc(
             }
             InvalidateRect(window, null(), 0);
         }
-        WM_WINDOWPOSCHANGED if !pin.is_null() && !(*pin).popup.is_null() => {
-            place_popup(window, &*pin);
+        WM_WINDOWPOSCHANGED if !pin.is_null() => {
+            if !(*pin).popup.is_null() {
+                place_popup(window, &*pin);
+            }
+            // Another pin came to the front: the ones kept above go back over it.
+            let flags = (*(lparam as *const WINDOWPOS)).flags;
+            if flags & SWP_NOZORDER == 0 && !(*pin).above {
+                raise_above_pins();
+            }
             return DefWindowProcW(window, message, wparam, lparam);
         }
         WM_ERASEBKGND => return 1,
@@ -1083,7 +1273,13 @@ unsafe extern "system" fn window_proc(
             if cleared {
                 InvalidateRect(window, null(), 0);
             } else {
-                DestroyWindow(window);
+                // Esc on a selected pin closes the whole selection.
+                for (other, _) in targets(window) {
+                    DestroyWindow(other);
+                }
+                if IsWindow(window) != 0 {
+                    DestroyWindow(window);
+                }
             }
         }
         WM_KEYDOWN if !pin.is_null() && GetKeyState(i32::from(VK_CONTROL)) < 0 => {
@@ -1115,40 +1311,24 @@ unsafe extern "system" fn window_proc(
             if !(*pin).popup.is_null() && WindowFromPoint(mouse_point(lparam)) == (*pin).popup {
                 return SendMessageW((*pin).popup, message, wparam, lparam);
             }
-            let badge = if wparam & 8 != 0 {
+            // A selected pin zooms or fades the whole selection with it.
+            let targets = targets(window);
+            if wparam & 8 != 0 {
                 let pending = (*pin).opacity_wheel_remainder + delta;
                 (*pin).opacity_wheel_remainder = pending % WHEEL_NOTCH;
                 let notches = pending / WHEEL_NOTCH;
                 if notches == 0 {
                     return 0;
                 }
-                let opacity =
-                    ((*pin).opacity + notches * i32::from(opacity_step())).clamp(MIN_OPACITY, 100);
-                let alpha = ((opacity * 255 + 50) / 100) as u8;
-                if SetLayeredWindowAttributes(window, 0, alpha, LWA_ALPHA) != 0 {
-                    (*pin).opacity = opacity;
+                for (other, other_pin) in targets {
+                    change_opacity(other, &mut *other_pin, notches);
                 }
-                Badge::Opacity
             } else {
-                let zoom = ((*pin).zoom * 1.15_f64.powf(f64::from(delta) / f64::from(WHEEL_NOTCH)))
-                    .clamp(0.15, 4.0);
-                (*pin).zoom = zoom;
-                let (width, height) = (*pin).window_size();
-                SetWindowPos(
-                    window,
-                    null_mut(),
-                    0,
-                    0,
-                    width,
-                    height,
-                    SWP_NOMOVE | SWP_NOACTIVATE | SWP_NOZORDER,
-                );
-                Badge::Zoom
-            };
-            if SetTimer(window, BADGE_TIMER, BADGE_DURATION_MS, None) != 0 {
-                (*pin).badge = Some(badge);
+                let factor = 1.15_f64.powf(f64::from(delta) / f64::from(WHEEL_NOTCH));
+                for (other, other_pin) in targets {
+                    zoom_by(other, &mut *other_pin, factor);
+                }
             }
-            InvalidateRect(window, null(), 0);
         }
         WM_TIMER if !pin.is_null() && wparam == BADGE_TIMER => {
             KillTimer(window, BADGE_TIMER);
@@ -1202,6 +1382,15 @@ unsafe extern "system" fn window_proc(
                 let palette = theme::palette();
                 let label = if (*pin).show_original { TOGGLE_TRANSLATION } else { TOGGLE_ORIGINAL };
                 ui::button(dc, button, label, (*pin).fonts.small, palette, false, palette.card, 7.0 * (*pin).scale);
+            }
+            if (*pin).selected {
+                // A solid accent frame over the image edge marks the selection.
+                SetDCBrushColor(dc, palette.accent);
+                let mut frame = bounds;
+                for _ in 0..(*pin).s(3).max(2) {
+                    FrameRect(dc, &frame, brush);
+                    InflateRect(&mut frame, -1, -1);
+                }
             }
             if let Some(badge) = (*pin).badge {
                 paint_badge(dc, bounds, &*pin, badge);
@@ -1397,6 +1586,50 @@ mod tests {
             let copy = pin_image(&*pin).unwrap();
             assert_eq!((copy.width, copy.height), (40, 30));
             assert_eq!(copy.pixels[..3], [128, 128, 128]);
+
+            // Ctrl+click picks pins; actions on a selected pin reach the whole selection.
+            let current = pins();
+            assert_eq!(current.len(), 3);
+            let [(a, pa), (b, pb), (c, pc)] = [current[0], current[1], current[2]];
+            toggle_selected(a, &mut *pa);
+            toggle_selected(b, &mut *pb);
+            let mut picked: Vec<isize> = targets(a).iter().map(|(window, _)| *window as isize).collect();
+            picked.sort();
+            let mut expected = vec![a as isize, b as isize];
+            expected.sort();
+            assert_eq!(picked, expected);
+            assert_eq!(targets(c).len(), 1, "a pin outside the selection acts alone");
+            let rect = |window: HWND| {
+                let mut bounds = RECT::default();
+                GetWindowRect(window, &mut bounds);
+                (bounds.left, bounds.top)
+            };
+            let (before_a, before_b, before_c) = (rect(a), rect(b), rect(c));
+            drag_selection(a, RECT { left: before_a.0 + 30, top: before_a.1 + 20, right: 0, bottom: 0 });
+            assert_eq!(rect(b), (before_b.0 + 30, before_b.1 + 20), "the selection moves together");
+            assert_eq!(rect(c), before_c);
+            SendMessageW(a, WM_MOUSEWHEEL, (WHEEL_NOTCH as usize) << 16, 0);
+            assert!((*pa).zoom > 1.0 && (*pb).zoom > 1.0 && (*pc).zoom == 1.0, "the wheel zooms the selection");
+            click_without_ctrl(c, &*pc);
+            assert!(!(*pa).selected && !(*pb).selected, "a plain click elsewhere ends the selection");
+
+            // Hidden on its own until the tray shows everything again.
+            (*pc).hidden = true;
+            apply_visibility();
+            assert!(shown(c) == 0);
+            set_all_hidden(false);
+            assert!(shown(c) != 0);
+
+            // Kept above the other pins even when another comes to the front.
+            set_topmost(a, &mut *pa, true);
+            (*pa).above = true;
+            raise_above_pins();
+            SetWindowPos(b, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+            let mut above = GetWindow(b, GW_HWNDPREV);
+            while !above.is_null() && above != a {
+                above = GetWindow(above, GW_HWNDPREV);
+            }
+            assert!(above == a, "the pin kept above stays over the raised one");
             close_all();
             assert!(pins().is_empty());
             CURRENT_GROUP.set(1);

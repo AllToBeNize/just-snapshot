@@ -65,10 +65,12 @@ pub const EXE: &str = "just-snapshot.exe";
 const UNINSTALL_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\just-snapshot";
 const SHORTCUT: &str = "just-snapshot.lnk";
 /// Written next to the executable; removed again by uninstalling.
-const NOTICES: [(&str, &str); 3] = [
+const NOTICES: [(&str, &str); 5] = [
     ("LICENSE.txt", include_str!("../LICENSE")),
     (r"licenses\lucide.txt", include_str!("../licenses/lucide.txt")),
     (r"licenses\rxing.txt", include_str!("../licenses/rxing.txt")),
+    (r"licenses\onnxruntime.txt", include_str!("../licenses/onnxruntime.txt")),
+    (r"licenses\paddleocr.txt", include_str!("../licenses/paddleocr.txt")),
 ];
 /// How long a running copy gets to leave the tray before installing goes on.
 const STOP_WAIT_MS: u32 = 5_000;
