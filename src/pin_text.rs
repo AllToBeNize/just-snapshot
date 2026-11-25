@@ -143,6 +143,16 @@ impl TextLayer {
         pos.is_some() && std::mem::replace(&mut self.focus, pos) != pos
     }
 
+    /// Double-click: the token under the point, up to the nearest spaces.
+    pub fn select_word(&mut self, view: View, point: POINT) {
+        if let Some((line, word)) = nearest(self.lines(), view.to_image(point)) {
+            let (from, to) = self.lines()[line].token(word);
+            self.anchor = Some((line, from));
+            self.focus = Some((line, to));
+        }
+    }
+
+    /// Triple-click: the whole line.
     pub fn select_line(&mut self, view: View, point: POINT) {
         if let Some((line, _)) = nearest(self.lines(), view.to_image(point)) {
             self.anchor = Some((line, 0));

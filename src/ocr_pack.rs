@@ -8,6 +8,11 @@ use std::{
     fs,
     io::{self, BufWriter, Write},
     path::{Path, PathBuf},
+    sync::atomic::{AtomicBool, AtomicIsize, Ordering},
+};
+use windows_sys::Win32::{
+    Foundation::{HWND, LPARAM, WPARAM},
+    UI::WindowsAndMessaging::PostMessageW,
 };
 
 use crate::{digest, http, paddle_ocr};
@@ -131,6 +136,55 @@ const NOTICES: [(&str, &str); 2] = [
     ("onnxruntime-license.txt", include_str!("../licenses/onnxruntime.txt")),
     ("paddleocr-license.txt", include_str!("../licenses/paddleocr.txt")),
 ];
+
+static DOWNLOADING: AtomicBool = AtomicBool::new(false);
+static CANCEL: AtomicBool = AtomicBool::new(false);
+/// The window that hears about the download; a reopened settings window takes over.
+static TARGET: AtomicIsize = AtomicIsize::new(0);
+
+/// Sends the running download's messages to `window` from now on.
+pub fn retarget(window: HWND) {
+    TARGET.store(window as isize, Ordering::Release);
+}
+
+pub fn is_downloading() -> bool {
+    DOWNLOADING.load(Ordering::Acquire)
+}
+
+pub fn cancel_download() {
+    CANCEL.store(true, Ordering::Release);
+}
+
+/// Downloads the pack in the background. Posts `progress` to `window` with
+/// bytes done in `wparam` and the total in `lparam`, then `done` with an
+/// owned `Box<Result<(), String>>` in `lparam`. False if one is already running.
+pub fn start_download(window: HWND, progress: u32, done: u32) -> bool {
+    if DOWNLOADING.swap(true, Ordering::AcqRel) {
+        return false;
+    }
+    CANCEL.store(false, Ordering::Release);
+    retarget(window);
+    std::thread::spawn(move || {
+        let target = || TARGET.load(Ordering::Acquire);
+        let mut last = u64::MAX;
+        let result = install(|got, total| {
+            // About two hundred progress messages for the whole pack.
+            if got * 200 / total.max(1) != last {
+                last = got * 200 / total.max(1);
+                unsafe { PostMessageW(target() as HWND, progress, got as WPARAM, total as LPARAM) };
+            }
+            !CANCEL.load(Ordering::Acquire)
+        });
+        DOWNLOADING.store(false, Ordering::Release);
+        let result = Box::into_raw(Box::new(result));
+        unsafe {
+            if PostMessageW(target() as HWND, done, 0, result as LPARAM) == 0 {
+                drop(Box::from_raw(result));
+            }
+        }
+    });
+    true
+}
 
 fn verify(path: &Path, file: &PackFile) -> Result<(), String> {
     let bytes = fs::read(path).map_err(|error| format!("无法读取下载的文件：{error}"))?;

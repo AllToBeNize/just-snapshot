@@ -68,6 +68,79 @@ impl Line {
     pub fn text(&self) -> String {
         self.text_of(0, self.words.len())
     }
+
+    /// `words[index]` follows the word before it with no space between,
+    /// like the characters of one Chinese phrase.
+    pub fn attached(&self, index: usize) -> bool {
+        if index == 0 || index >= self.words.len() {
+            return false;
+        }
+        let (before, word) = (&self.words[index - 1], &self.words[index]);
+        let height = (word.rect[3] - word.rect[1]).max(before.rect[3] - before.rect[1]);
+        // A visible gap in the picture separates too, whatever the characters.
+        let gap = word.rect[0] - before.rect[2];
+        !word.spaced && !needs_space(&before.text, &word.text) && gap <= height * 0.3
+    }
+
+    /// The words that read as one token around `index`, the way a terminal
+    /// picks a word on double-click: everything up to the nearest space.
+    pub fn token(&self, index: usize) -> (usize, usize) {
+        let mut from = index;
+        while self.attached(from) {
+            from -= 1;
+        }
+        let mut to = index;
+        while self.attached(to + 1) {
+            to += 1;
+        }
+        (from, to)
+    }
+}
+
+/// Drops what is not text at the ends of each line: the outliner's actor
+/// icons, tree arrows and bullets come back as stray characters (`0`, `、／`,
+/// `v`, `C`). Only lone characters next to real text go: a symbol, or a
+/// letter or digit as wide as it is tall (glyphs are narrower than icons),
+/// set apart from the rest of the line.
+pub fn drop_icons(lines: Vec<Line>) -> Vec<Line> {
+    lines
+        .into_iter()
+        .filter_map(|mut line| {
+            while line.words.len() > 1 && is_icon(&line.words[0], &line.words[1], true) {
+                line.words.remove(0);
+                line.words[0].spaced = false;
+            }
+            while line.words.len() > 1 && is_icon(&line.words[line.words.len() - 1], &line.words[line.words.len() - 2], false) {
+                line.words.pop();
+            }
+            (!line.words.is_empty()).then_some(line)
+        })
+        .collect()
+}
+
+/// `word` is a stray character beside `neighbor`. Icons stand before
+/// names, so a square letter or digit only counts at the `leading` end.
+fn is_icon(word: &Word, neighbor: &Word, leading: bool) -> bool {
+    let mut characters = word.text.chars();
+    let (Some(character), None) = (characters.next(), characters.next()) else { return false };
+    let [left, top, right, bottom] = word.rect;
+    let (width, height) = (right - left, (bottom - top).max(1.0));
+    let gap = if neighbor.rect[0] >= right { neighbor.rect[0] - right } else { left - neighbor.rect[2] };
+    let apart = gap >= height * 0.25;
+    let ideograph = ('\u{3400}'..='\u{9fff}').contains(&character) || ('\u{f900}'..='\u{faff}').contains(&character);
+    // Openers and marks that do start real text.
+    let kept = "([{<\"'“‘「『（《【#$@%&/\\".contains(character);
+    if ideograph || kept {
+        return false;
+    }
+    // A lone mark never starts a line of text, but may end one (「你好。」)
+    // unless it stands apart; a lone letter or digit only goes when it
+    // looks like an icon.
+    if character.is_alphanumeric() {
+        leading && apart && width >= height * 0.8
+    } else {
+        leading || apart
+    }
 }
 
 /// A space goes only between two words that both border on Latin letters
@@ -89,6 +162,10 @@ pub fn text(lines: &[Line]) -> String {
 /// Recognizes the text in `image` with the chosen engine. Blocks; run it
 /// off the UI thread.
 pub fn recognize(image: &Image) -> Result<Vec<Line>, String> {
+    recognize_with_engine(image).map(drop_icons)
+}
+
+fn recognize_with_engine(image: &Image) -> Result<Vec<Line>, String> {
     match crate::ocr_pack::engine() {
         crate::ocr_pack::Engine::Fast => recognize_windows(image),
         crate::ocr_pack::Engine::Accurate if !crate::ocr_pack::installed() => Err(
@@ -325,6 +402,44 @@ pub(crate) mod tests {
         line.text()
     }
 
+    fn at(text: &str, left: f32, width: f32) -> Word {
+        Word { text: text.into(), rect: [left, 0.0, left + width, 16.0], spaced: false }
+    }
+
+    #[test]
+    fn double_click_tokens_stop_at_spaces_like_a_terminal() {
+        let line = Line { words: vec![at("0", 0.0, 15.0), at("复", 30.0, 15.0), at("制", 45.0, 15.0), at("Recast-Nav", 70.0, 90.0), at("(Editor)", 170.0, 60.0)] };
+        assert_eq!(line.token(1), (1, 2), "a Chinese phrase is one token");
+        assert_eq!(line.token(3), (3, 3));
+        // 复制 then Latin with no space between reads 复制Recast-Nav: one token.
+        let mut joined = line.clone();
+        joined.words[3].rect = [60.0, 0.0, 150.0, 16.0];
+        assert!(joined.attached(3));
+        joined.words[3].spaced = true;
+        assert!(!joined.attached(3) && joined.token(2) == (1, 2));
+    }
+
+    #[test]
+    fn stray_icon_characters_leave_the_ends_of_lines() {
+        let line = |words: Vec<Word>| Line { words };
+        let lines = drop_icons(vec![
+            // The actor icon read as 0, square and set apart.
+            line(vec![at("0", 0.0, 15.0), at("RecastNavMesh-Default", 26.0, 160.0)]),
+            // Mesh icon read as 、／.
+            line(vec![at("、", 0.0, 8.0), at("／", 9.0, 11.0), at("Sphere", 28.0, 50.0)]),
+            // Real one-letter words stay: narrow, or close to the text.
+            line(vec![at("a", 0.0, 8.0), at("cat", 14.0, 24.0), at("W", 44.0, 14.0)]),
+            line(vec![at("（", 0.0, 15.0), at("注", 15.0, 15.0)]),
+            line(vec![at("v", 0.0, 12.0)]),
+            line(vec![at("你", 0.0, 15.0), at("好", 15.0, 15.0), at("。", 31.0, 6.0)]),
+            // The target point's crosshair read as ．+．
+            line(vec![at("．", 0.0, 2.0), at("+", 2.0, 14.0), at("．", 17.0, 2.0), at("TargetPoint0", 27.0, 91.0)]),
+        ]);
+        let texts: Vec<String> = lines.iter().map(Line::text).collect();
+        assert_eq!(texts, ["RecastNavMesh-Default", "Sphere", "a cat W", "（注", "v", "你好。", "TargetPoint0"]);
+        assert!(lines[0].words[0].rect[0] > 20.0, "the selection starts at the text");
+    }
+
     #[test]
     fn chinese_characters_join_without_spaces_and_latin_words_with() {
         assert_eq!(join(&["识", "别", "文", "字"]), "识别文字");
@@ -401,6 +516,31 @@ pub(crate) mod tests {
                 for expected in ["识别文字", "保存到", "Users", "Pictures"] {
                     assert!(found.contains(expected), "{px}px: {found}");
                 }
+            }
+        }
+    }
+
+    /// Prints every line's words with their boxes for the PNGs in
+    /// `SNAPSHOT_OCR_IMAGES`, with the Windows engine.
+    /// Run with `<test binary> ocr::tests::windows_words --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn windows_words() {
+        let Some(folder) = std::env::var_os("SNAPSHOT_OCR_IMAGES") else { return };
+        for entry in std::fs::read_dir(folder).unwrap().flatten() {
+            if entry.path().extension().is_none_or(|extension| extension != "png") {
+                continue;
+            }
+            let image = crate::app_icon::decode(&std::fs::read(entry.path()).unwrap()).unwrap();
+            println!("== {}", entry.file_name().to_string_lossy());
+            let lines = recognize_windows(&image).unwrap();
+            for line in &lines {
+                let words: Vec<String> = line.words.iter().map(|word| format!("{}@{:.0}-{:.0}x{:.0}", word.text, word.rect[0], word.rect[2], word.rect[3] - word.rect[1])).collect();
+                println!("  {}", words.join(" | "));
+            }
+            println!("-- without icons");
+            for line in drop_icons(lines) {
+                println!("  {}", line.text());
             }
         }
     }

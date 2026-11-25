@@ -96,11 +96,11 @@
 
 ## 提取文字与翻译
 
-- **提取文字** `Ctrl+E`：截图变成贴图并离线识别文字。在文字上拖选、双击选整行，`Ctrl+C` 复制选中或全部。二维码 / 条形码会用蓝框标出，单击复制内容，`Ctrl+单击` 打开网址。
+- **提取文字** `Ctrl+E`：截图变成贴图并离线识别文字。在文字上拖选，双击选一个词（像终端一样到空格为止，`UI_TabControl`、路径都算一个词），三击选整行，`Ctrl+C` 复制选中或全部。行首的图标（比如 UE 大纲里的小图标）不会被当成文字。二维码 / 条形码会用蓝框标出，单击复制内容，`Ctrl+单击` 打开网址。
 
 ### 识别引擎
 
-在设置「提取文本」一行的齿轮里选：
+在设置的「识别与服务」页选（「提取文本」一行的齿轮也会跳到这里）：
 
 | 档位 | 引擎 | 特点 |
 | --- | --- | --- |
@@ -202,7 +202,7 @@
 | 输出（复制 / 保存 / 贴图） | `output.rs`、`output_settings.rs`、`clipboard_data.rs`、`pinned.rs` |
 | 长截图 | `scroll_capture.rs`、`scroll_stitch.rs`、`scroll_input.rs` |
 | 录像与按键显示 | `recorder.rs`、`recording_ui.rs`、`gif_export.rs`、`input_overlay.rs` |
-| 文字识别与翻译 | `ocr.rs`、`paddle_ocr.rs`、`ocr_pack.rs`、`ocr_settings.rs`、`codes.rs`、`pin_text.rs`、`translate.rs`、`pin_translate.rs` |
+| 文字识别与翻译 | `ocr.rs`、`paddle_ocr.rs`、`ocr_pack.rs`、`codes.rs`、`pin_text.rs`、`translate.rs`、`pin_translate.rs` |
 | 识图 | `image_search.rs`、`image_search_settings.rs` |
 | 设置、主题、图标 | `settings.rs`、`theme.rs`、`icons.rs`、`icons/lucide.rs` |
 | 安装与更新 | `setup.rs`、`update.rs`、`update_ui.rs` |

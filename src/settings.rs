@@ -30,6 +30,7 @@ use crate::{
     hotkey::{Binding, Bindings, Preferences, Shortcut, BINDINGS, DEFAULT_OPACITY_STEP},
     icons::{self, Icon},
     overlay_ui::monitor_info,
+    ocr_pack,
     pinned, retry_hotkey,
     selection_geometry::{contains, mouse_point},
     startup,
@@ -73,8 +74,20 @@ const CHIP_GAP: i32 = 6;
 const SECONDARY: usize = BINDINGS.len();
 /// Bindings from here on belong to the recording tab.
 const RECORD_START: usize = Binding::Record as usize;
-/// The two tabs: screenshots, and recording with the input display.
-const TABS: [&str; 2] = ["截图", "录像与按键显示"];
+/// Rows per column of the recording tab's shortcuts.
+const RECORD_ROWS: i32 = 3;
+/// Rows of the services tab's recognition card.
+const OCR_ROWS: i32 = 2;
+/// The tabs: screenshots, recording with the input display, and the
+/// recognition and online services.
+const TABS: [&str; 3] = ["截图", "录像与按键显示", "识别与服务"];
+/// The services tab.
+const SERVICES_TAB: usize = 2;
+/// Posted by the recognition pack download: `wparam` bytes done, `lparam` the total.
+const OCR_PROGRESS: u32 = WM_APP + 30;
+/// The download ended; `lparam` owns a `Box<Result<(), String>>`.
+const OCR_DONE: u32 = WM_APP + 31;
+const OCR_ENGINES: [ocr_pack::Engine; 2] = [ocr_pack::Engine::Fast, ocr_pack::Engine::Accurate];
 const ANCHOR_CELL: (i32, i32) = (30, 20);
 const FIELDS: usize = BINDINGS.len() + 1;
 
@@ -92,8 +105,12 @@ enum Target {
     Service,
     /// The engine settings beside the image search shortcut.
     SearchService,
-    /// The recognition engine (快速 / 准确) beside the extract text shortcut.
+    /// The gear beside the extract text shortcut: opens the services tab.
     OcrService,
+    /// 快速 or 准确 text recognition on the services tab.
+    OcrEngine(usize),
+    /// Downloads the accurate recognition pack, or cancels the download.
+    OcrDownload,
     /// Opens the save settings: folder, file names, auto-save, shadow, border.
     Output,
     Tab(usize),
@@ -145,6 +162,7 @@ struct Draft {
     theme: Theme,
     secondary: Option<Shortcut>,
     record: crate::recorder::Options,
+    ocr: ocr_pack::Engine,
 }
 
 impl Draft {
@@ -157,6 +175,7 @@ impl Draft {
             theme: Theme::default(),
             secondary: None,
             record: crate::recorder::Options::default(),
+            ocr: ocr_pack::Engine::Fast,
         }
     }
 
@@ -231,6 +250,14 @@ struct State {
     tab: usize,
     /// The recording folder as chosen in this window; saved with the rest.
     record_folder: String,
+    /// The accurate recognition pack is downloaded.
+    ocr_installed: bool,
+    /// Bytes done and total while the pack downloads.
+    ocr_progress: Option<(u64, u64)>,
+    ocr_error: Option<String>,
+    /// What the services tab says about the translation and image search setup.
+    translate_summary: String,
+    search_summary: String,
 }
 
 thread_local! {
@@ -243,7 +270,19 @@ thread_local! {
 struct Layout {
     scale: f32,
     tab: usize,
-    tabs: [RECT; 2],
+    /// The services tab: text recognition, translation and image search.
+    ocr_label: RECT,
+    ocr_card: RECT,
+    ocr_engines: [RECT; 2],
+    ocr_download: RECT,
+    ocr_status: RECT,
+    translate_label: RECT,
+    translate_card: RECT,
+    translate_button: RECT,
+    search_label: RECT,
+    search_card: RECT,
+    search_button: RECT,
+    tabs: [RECT; 3],
     record_label: RECT,
     record_keys: RECT,
     record_options: RECT,
@@ -401,21 +440,29 @@ impl Layout {
         let tabs = [
             rect(tab_left, 12, tab_left + 72, 42),
             rect(tab_left + 80, 12, tab_left + 80 + 136, 42),
+            rect(tab_left + 224, 12, tab_left + 224 + 112, 42),
         ];
         let mut ty = HEADER;
         let record_label = rect(PAD, ty, WIDTH - PAD, ty + LABEL);
         ty += LABEL;
-        let record_rows = 2;
-        let record_keys = rect(PAD, ty, WIDTH - PAD, ty + ROW * record_rows + CARD_INSET * 2);
+        // Two wide columns, so names like 「开始 / 停止录像」 fit beside their keys.
+        let record_column = (WIDTH - PAD * 2 - CARD_INSET * 2) / 2;
+        let record_keys = rect(PAD, ty, WIDTH - PAD, ty + ROW * RECORD_ROWS + CARD_INSET * 2);
         for index in RECORD_START..BINDINGS.len() {
             let slot = (index - RECORD_START) as i32;
-            let left = PAD + CARD_INSET + (slot / record_rows) * column;
-            let top = ty + CARD_INSET + (slot % record_rows) * ROW;
-            rows[index] = rect(left, top, left + column, top + ROW);
-            let right = left + column - 8;
+            let left = PAD + CARD_INSET + (slot / RECORD_ROWS) * record_column;
+            let top = ty + CARD_INSET + (slot % RECORD_ROWS) * ROW;
+            rows[index] = rect(left, top, left + record_column, top + ROW);
+            let right = left + record_column - 8;
             keys[index] = rect(right - ROW_KEYS, top + 6, right, top + ROW - 6);
         }
-        ty += ROW * record_rows + CARD_INSET * 2 + SECTION_GAP;
+        // A name keeps its full width; the shortcut field starts after it.
+        // Keycaps are right-aligned, so only the empty left part goes.
+        for (index, binding) in BINDINGS.iter().enumerate().skip(1) {
+            let name_right = rows[index].left + s(12 + 20 + 10 + label_width(binding.label()) + 8);
+            keys[index].left = keys[index].left.max(name_right);
+        }
+        ty += ROW * RECORD_ROWS + CARD_INSET * 2 + SECTION_GAP;
         let record_options = rect(PAD, ty, WIDTH - PAD, ty + GENERAL_ROW * 4);
         let option_top = |row: i32, height: i32| ty + GENERAL_ROW * row + (GENERAL_ROW - height) / 2;
         let half_right = WIDTH / 2 - 18;
@@ -457,6 +504,31 @@ impl Layout {
             panel_opacity[panel] = stepper(grid_top + 42);
         }
 
+        // Services tab: three cards of rows like the general settings.
+        let mut sy = HEADER;
+        let ocr_label = rect(PAD, sy, WIDTH - PAD, sy + LABEL);
+        sy += LABEL;
+        let ocr_card = rect(PAD, sy, WIDTH - PAD, sy + GENERAL_ROW * OCR_ROWS);
+        let service_row = |top: i32, row: i32, height: i32| top + GENERAL_ROW * row + (GENERAL_ROW - height) / 2;
+        let engine_top = service_row(sy, 0, 30);
+        let ocr_engines = [
+            rect(right - CHIP * 2 - CHIP_GAP, engine_top, right - CHIP - CHIP_GAP, engine_top + 30),
+            rect(right - CHIP, engine_top, right, engine_top + 30),
+        ];
+        let download_top = service_row(sy, 1, 30);
+        let ocr_download = rect(right - 112, download_top, right, download_top + 30);
+        let ocr_status = rect(PAD + 18, sy + GENERAL_ROW, right - 112 - 12, sy + GENERAL_ROW * 2);
+        sy += GENERAL_ROW * OCR_ROWS + SECTION_GAP;
+        let translate_label = rect(PAD, sy, WIDTH - PAD, sy + LABEL);
+        sy += LABEL;
+        let translate_card = rect(PAD, sy, WIDTH - PAD, sy + GENERAL_ROW);
+        let translate_button = rect(right - 76, service_row(sy, 0, 30), right, service_row(sy, 0, 30) + 30);
+        sy += GENERAL_ROW + SECTION_GAP;
+        let search_label = rect(PAD, sy, WIDTH - PAD, sy + LABEL);
+        sy += LABEL;
+        let search_card = rect(PAD, sy, WIDTH - PAD, sy + GENERAL_ROW);
+        let search_button = rect(right - 76, service_row(sy, 0, 30), right, service_row(sy, 0, 30) + 30);
+
         let button_top = y + (FOOTER - 34) / 2;
         let mascot = rect(WIDTH - 4, HEADER + 4, TOTAL - PAD / 2, y);
         let save = rect(TOTAL - PAD - 84, button_top, TOTAL - PAD, button_top + 34);
@@ -470,6 +542,17 @@ impl Layout {
         Self {
             scale,
             tab,
+            ocr_label,
+            ocr_card,
+            ocr_engines,
+            ocr_download,
+            ocr_status,
+            translate_label,
+            translate_card,
+            translate_button,
+            search_label,
+            search_card,
+            search_button,
             tabs,
             record_label,
             record_keys,
@@ -524,7 +607,7 @@ impl Layout {
     }
 
     fn targets(&self) -> Box<dyn Iterator<Item = (Target, RECT)> + '_> {
-        let common = (0..2)
+        let common = (0..TABS.len())
             .map(|index| (Target::Tab(index), self.tabs[index]))
             .chain([
                 (Target::Close, self.close),
@@ -532,6 +615,18 @@ impl Layout {
                 (Target::Cancel, self.cancel),
                 (Target::Save, self.save),
             ]);
+        if self.tab == SERVICES_TAB {
+            return Box::new(
+                (0..2)
+                    .map(|index| (Target::OcrEngine(index), self.ocr_engines[index]))
+                    .chain([
+                        (Target::OcrDownload, self.ocr_download),
+                        (Target::Service, self.translate_button),
+                        (Target::SearchService, self.search_button),
+                    ])
+                    .chain(common),
+            );
+        }
         if self.tab == 0 {
             Box::new(
                 (0..RECORD_START)
@@ -651,6 +746,7 @@ pub unsafe fn open(owner: HWND, instance: HINSTANCE) -> io::Result<()> {
         theme: theme::current(),
         secondary: global_hotkey::shortcuts().get(1).copied(),
         record: crate::recording_ui::load_options(),
+        ocr: ocr_pack::engine(),
     };
     install(window, owner, draft);
     WINDOW.set(window);
@@ -686,7 +782,15 @@ unsafe fn install(window: HWND, owner: HWND, draft: Draft) {
         mascot: crate::app_icon::decode(MASCOT_ART),
         tab: 0,
         record_folder: crate::recording_ui::load_folder(),
+        ocr_installed: ocr_pack::installed(),
+        ocr_progress: ocr_pack::is_downloading().then_some((0, ocr_pack::total_size())),
+        ocr_error: None,
+        translate_summary: translate_summary(),
+        search_summary: search_summary(),
     }));
+    if ocr_pack::is_downloading() {
+        ocr_pack::retarget(window);
+    }
     refresh_capture_status(window);
 }
 
@@ -866,9 +970,30 @@ unsafe fn activate(window: HWND, target: Target) {
             }
         }
         Target::OcrService => {
-            if let Err(error) = crate::ocr_settings::open(window) {
-                crate::show_error(window, &format!("无法打开文字识别设置。\n{error}"));
+            stop_recording(window);
+            with_state(|state| state.tab = SERVICES_TAB);
+            redraw(window);
+        }
+        Target::OcrEngine(index) => {
+            let engine = OCR_ENGINES[index];
+            let fetch = with_state(|state| {
+                state.draft.ocr = engine;
+                state.ocr_error = None;
+                engine == ocr_pack::Engine::Accurate && !state.ocr_installed && state.ocr_progress.is_none()
+            });
+            if fetch == Some(true) {
+                start_ocr_download(window);
             }
+            redraw(window);
+        }
+        Target::OcrDownload if STATE.with_borrow(|state| state.as_ref().is_some_and(|state| state.ocr_installed)) => {}
+        Target::OcrDownload => {
+            if ocr_pack::is_downloading() {
+                ocr_pack::cancel_download();
+            } else {
+                start_ocr_download(window);
+            }
+            redraw(window);
         }
         Target::SearchService => {
             if let Err(error) = crate::image_search_settings::open(window) {
@@ -942,6 +1067,17 @@ unsafe fn activate(window: HWND, target: Target) {
 }
 
 unsafe fn save(window: HWND) {
+    let waiting = STATE.with_borrow(|state| {
+        state.as_ref().is_some_and(|state| state.draft.ocr == ocr_pack::Engine::Accurate && !state.ocr_installed)
+    });
+    if waiting {
+        with_state(|state| {
+            state.tab = SERVICES_TAB;
+            state.notice = Notice::Error("「准确」档要等识别包下载完才能保存".into());
+        });
+        redraw(window);
+        return;
+    }
     let Some((owner, draft, folder)) = STATE.with_borrow(|state| {
         state
             .as_ref()
@@ -955,6 +1091,7 @@ unsafe fn save(window: HWND) {
         .and_then(|preferences| apply_preferences(owner, preferences, draft.start_at_login))
         .and_then(|()| crate::recording_ui::save_options(draft.record))
         .and_then(|()| crate::recording_ui::save_folder(&folder))
+        .and_then(|()| ocr_pack::set_engine(draft.ocr))
     {
         Ok(()) => {
             DestroyWindow(window);
@@ -965,6 +1102,43 @@ unsafe fn save(window: HWND) {
             redraw(window);
             crate::show_error(window, &error);
         }
+    }
+}
+
+unsafe fn start_ocr_download(window: HWND) {
+    if ocr_pack::start_download(window, OCR_PROGRESS, OCR_DONE) {
+        with_state(|state| {
+            state.ocr_error = None;
+            state.ocr_progress = Some((0, ocr_pack::total_size()));
+        });
+    }
+}
+
+/// A label's width in 96-DPI pixels in the body font: CJK characters are
+/// square, the rest about half as wide.
+fn label_width(text: &str) -> i32 {
+    text.chars()
+        .map(|c| match c {
+            ' ' => 4,
+            c if c.is_ascii() => 8,
+            _ => 15,
+        })
+        .sum()
+}
+
+/// "当前：…" for the translation service.
+fn translate_summary() -> String {
+    let provider = crate::translate::Config::load().ok().and_then(|config| config.provider).unwrap_or(crate::translate::Provider::Free);
+    format!("当前：{}", provider.name())
+}
+
+/// The image search engines in menu order.
+fn search_summary() -> String {
+    let names: Vec<String> = crate::image_search::load().unwrap_or_default().into_iter().map(|engine| engine.name).collect();
+    if names.is_empty() {
+        "还没有识图引擎".into()
+    } else {
+        format!("菜单里依次是：{}", names.join("、"))
     }
 }
 
@@ -1145,8 +1319,35 @@ unsafe extern "system" fn window_proc(
         WM_CLOSE => {
             DestroyWindow(window);
         }
+        OCR_PROGRESS => {
+            with_state(|state| state.ocr_progress = Some((wparam as u64, lparam as u64)));
+            redraw(window);
+        }
+        OCR_DONE => {
+            let result = *Box::from_raw(lparam as *mut Result<(), String>);
+            with_state(|state| {
+                state.ocr_progress = None;
+                state.ocr_installed = ocr_pack::installed();
+                state.ocr_error = match result {
+                    Ok(()) => None,
+                    Err(error) if error == crate::http::CANCELLED => None,
+                    Err(error) => Some(error),
+                };
+            });
+            redraw(window);
+        }
+        WM_ACTIVATE if (wparam & 0xffff) as u32 != WA_INACTIVE => {
+            // The translation or image search window may have changed them.
+            with_state(|state| {
+                state.translate_summary = translate_summary();
+                state.search_summary = search_summary();
+            });
+            redraw(window);
+            return DefWindowProcW(window, message, wparam, lparam);
+        }
         WM_DESTROY => {
             KillTimer(window, ANIMATION_TIMER);
+            // A pack download keeps going; it finishes into the pack folder.
             STATE.take();
             if WINDOW.get() == window {
                 WINDOW.set(null_mut());
@@ -1263,6 +1464,11 @@ impl<'a> Painter<'a> {
         self.mascot();
         if self.state.tab == 1 {
             self.record_tab();
+            self.footer();
+            return;
+        }
+        if self.state.tab == SERVICES_TAB {
+            self.services_tab();
             self.footer();
             return;
         }
@@ -1396,6 +1602,111 @@ impl<'a> Painter<'a> {
         self.text(RECT { left: minus.right, right: plus.left, ..minus }, value, self.state.fonts.key, palette.text, DT_CENTER | DT_VCENTER);
     }
 
+    /// The 识别与服务 tab: the recognition engine with its pack, and the
+    /// translation and image search services, each with its own window.
+    unsafe fn services_tab(&self) {
+        let layout = &self.layout;
+        let palette = self.palette;
+        let state = self.state;
+        for (rect, label) in [
+            (layout.ocr_label, "文字识别　·　提取文本和翻译都用它"),
+            (layout.translate_label, "翻译"),
+            (layout.search_label, "识图"),
+        ] {
+            let rect = RECT { left: rect.left + self.s(4), bottom: rect.bottom - self.s(6), ..rect };
+            self.text(rect, label, state.fonts.small, palette.secondary, DT_LEFT | DT_BOTTOM);
+        }
+        for card in [layout.ocr_card, layout.translate_card, layout.search_card] {
+            self.card(card);
+        }
+        let row = self.s(GENERAL_ROW);
+        let left = layout.ocr_card.left + self.s(18);
+        let middle = |card: RECT, line: i32| card.top + row * line + row / 2;
+
+        // Recognition engine.
+        let engine = state.draft.ocr;
+        let description = match engine {
+            ocr_pack::Engine::Fast => "快速：Windows 自带，立即可用；小字、反色文字和代码名容易认错",
+            ocr_pack::Engine::Accurate => "准确：PaddleOCR，中英混排和代码名更准，每次多花几秒",
+        };
+        self.row_text(left, layout.ocr_engines[0].left - self.s(12), middle(layout.ocr_card, 0), "识别引擎", description);
+        for (index, candidate) in OCR_ENGINES.into_iter().enumerate() {
+            let label = match candidate {
+                ocr_pack::Engine::Fast => "快速",
+                ocr_pack::Engine::Accurate => "准确",
+            };
+            self.chip(layout.ocr_engines[index], label, engine == candidate, Target::OcrEngine(index));
+        }
+        let divider_top = layout.ocr_card.top + row;
+        ui::fill(
+            self.dc,
+            RECT { left: layout.ocr_card.left + self.s(18), top: divider_top, right: layout.ocr_card.right - self.s(18), bottom: divider_top + 1 },
+            palette.divider,
+        );
+        let megabytes = |bytes: u64| format!("{:.1} MB", bytes as f64 / 1_048_576.0);
+        let (title, detail, color) = match (&state.ocr_error, state.ocr_progress) {
+            (Some(error), _) => ("识别包下载失败", error.lines().next().unwrap_or_default().to_string(), palette.error),
+            (None, Some((done, total))) => (
+                "正在下载识别包",
+                format!("{}%（{} / {}）", done * 100 / total.max(1), megabytes(done), megabytes(total)),
+                palette.secondary,
+            ),
+            (None, None) if state.ocr_installed => ("识别包已就绪", "「准确」档全程离线识别".to_string(), palette.success),
+            (None, None) => (
+                "识别包",
+                format!("只有「准确」档需要，约 {}，下载后全程离线", megabytes(ocr_pack::total_size())),
+                palette.secondary,
+            ),
+        };
+        // While downloading, a bar takes the right part of the status line.
+        let bar_width = self.s(150);
+        let status = match state.ocr_progress {
+            Some(_) => RECT { right: layout.ocr_status.right - bar_width - self.s(12), ..layout.ocr_status },
+            None => layout.ocr_status,
+        };
+        let status_middle = middle(layout.ocr_card, 1);
+        self.text(
+            RECT { left: status.left, top: status_middle - self.s(21), right: status.right, bottom: status_middle },
+            title,
+            state.fonts.body,
+            if color == palette.secondary { palette.text } else { color },
+            DT_LEFT | DT_BOTTOM | DT_END_ELLIPSIS,
+        );
+        self.text(
+            RECT { left: status.left, top: status_middle + self.s(2), right: status.right, bottom: status_middle + self.s(21) },
+            &detail,
+            state.fonts.small,
+            palette.secondary,
+            DT_LEFT | DT_TOP | DT_END_ELLIPSIS,
+        );
+        if let Some((done, total)) = state.ocr_progress {
+            let bar = RECT {
+                left: layout.ocr_status.right - bar_width,
+                top: status_middle - self.s(2),
+                right: layout.ocr_status.right,
+                bottom: status_middle + self.s(2),
+            };
+            if let Some(graphics) = Graphics::new(self.dc) {
+                graphics.fill_round(ui::to_f(bar), self.f(1.5), argb(palette.key_border, 255));
+                let filled = RECT { right: bar.left + ((bar.right - bar.left) as u64 * done / total.max(1)) as i32, ..bar };
+                graphics.fill_round(ui::to_f(filled), self.f(1.5), argb(palette.accent, 255));
+            }
+        }
+        let radius = self.f(8.0);
+        if !state.ocr_installed {
+            let label = if state.ocr_progress.is_some() { "取消下载" } else { "下载识别包" };
+            ui::button(self.dc, layout.ocr_download, label, state.fonts.body, palette, false, self.face(Target::OcrDownload, palette.key_face), radius);
+        }
+
+        // Translation and image search.
+        let translate_left = layout.translate_card.left + self.s(18);
+        self.row_text(translate_left, layout.translate_button.left - self.s(12), middle(layout.translate_card, 0), "翻译服务", &state.translate_summary);
+        ui::button(self.dc, layout.translate_button, "设置…", state.fonts.body, palette, false, self.face(Target::Service, palette.key_face), radius);
+        let search_left = layout.search_card.left + self.s(18);
+        self.row_text(search_left, layout.search_button.left - self.s(12), middle(layout.search_card, 0), "识图接口", &state.search_summary);
+        ui::button(self.dc, layout.search_button, "设置…", state.fonts.body, palette, false, self.face(Target::SearchService, palette.key_face), radius);
+    }
+
     /// The 录像与按键显示 tab.
     unsafe fn record_tab(&self) {
         let palette = self.palette;
@@ -1408,7 +1719,7 @@ impl<'a> Painter<'a> {
         }
         // Shortcuts, two to a column.
         for index in RECORD_START..BINDINGS.len() {
-            self.binding_row(index, (index - RECORD_START) % 2 == 1);
+            self.binding_row(index, (index - RECORD_START) % RECORD_ROWS as usize != 0);
         }
         // Options: three rows, two settings each.
         let card = layout.record_options;
@@ -2305,6 +2616,7 @@ mod tests {
         cases.extend([
             ("occupied".into(), 1.0, Draft::defaults(), CaptureStatus::Occupied, None, 0),
             ("record-tab".into(), 1.0, Draft::defaults(), CaptureStatus::Active, None, 0),
+            ("services-tab".into(), 1.0, Draft { ocr: ocr_pack::Engine::Accurate, ..Draft::defaults() }, CaptureStatus::Active, None, 0),
             (
                 "recording".into(),
                 1.0,
@@ -2363,8 +2675,17 @@ mod tests {
                     tracking: false,
                     animating: false,
                     mascot: crate::app_icon::decode(MASCOT_ART),
-                    tab: usize::from(name == "record-tab"),
+                    tab: match name.as_str() {
+                        "record-tab" => 1,
+                        "services-tab" => SERVICES_TAB,
+                        _ => 0,
+                    },
                     record_folder: String::new(),
+                    ocr_installed: false,
+                    ocr_progress: (name == "services-tab").then_some((15_000_000, ocr_pack::total_size())),
+                    ocr_error: None,
+                    translate_summary: "当前：免费翻译".into(),
+                    search_summary: "菜单里依次是：Google、Yandex".into(),
                 };
                 let layout = Layout::new(scale);
                 let bounds = RECT {
@@ -2445,7 +2766,7 @@ mod tests {
     #[test]
     fn every_target_is_hit_at_its_center_on_any_scale() {
         for scale in [1.0, 1.25, 1.5, 2.0] {
-            for tab in 0..2 {
+            for tab in 0..TABS.len() {
             let layout = Layout::for_tab(scale, tab);
             for (target, rect) in layout.targets() {
                 let center = POINT {

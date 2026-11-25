@@ -30,7 +30,7 @@ use windows_sys::{
             HiDpi::GetDpiForWindow,
             Shell::ShellExecuteW,
             Input::KeyboardAndMouse::{
-                GetKeyState, ReleaseCapture, SetCapture, TrackMouseEvent, TME_LEAVE,
+                GetDoubleClickTime, GetKeyState, ReleaseCapture, SetCapture, TrackMouseEvent, TME_LEAVE,
                 TME_NONCLIENT, TRACKMOUSEEVENT, VK_CONTROL, VK_ESCAPE,
             },
             WindowsAndMessaging::*,
@@ -152,6 +152,8 @@ struct Pin {
     selected: bool,
     /// Hidden on its own (not with its group) until the tray shows pins again.
     hidden: bool,
+    /// When and where the last double-click was, so a third click selects the line.
+    double_click: Option<(u32, POINT)>,
     note: String,
     /// The image with the translation drawn over the original lines.
     translated: Option<Surface>,
@@ -326,6 +328,7 @@ pub unsafe fn open(image: Image, bounds: RECT, mode: Mode) -> io::Result<()> {
         above: false,
         selected: false,
         hidden: false,
+        double_click: None,
         note: String::new(),
         translated: None,
         show_original: false,
@@ -475,6 +478,14 @@ unsafe fn click_without_ctrl(window: HWND, pin: &Pin) {
             }
         }
     }
+}
+
+/// A press soon after a double-click, close to it, is the third click.
+unsafe fn is_triple_click(pin: &mut Pin, point: POINT) -> bool {
+    let Some((time, at)) = pin.double_click.take() else { return false };
+    let soon = (GetMessageTime() as u32).wrapping_sub(time) <= GetDoubleClickTime();
+    let near = (point.x - at.x).abs() <= GetSystemMetrics(SM_CXDOUBLECLK) && (point.y - at.y).abs() <= GetSystemMetrics(SM_CYDOUBLECLK);
+    soon && near && pin.text.is_some()
 }
 
 fn ctrl_down() -> bool {
@@ -1107,6 +1118,13 @@ unsafe extern "system" fn window_proc(
             (*pin).show_original = !(*pin).show_original;
             InvalidateRect(window, null(), 0);
         }
+        WM_LBUTTONDOWN if !pin.is_null() && is_triple_click(&mut *pin, mouse_point(lparam)) => {
+            let view = (*pin).view(window);
+            if let Some(text) = &mut (*pin).text {
+                text.select_line(view, mouse_point(lparam));
+                InvalidateRect(window, null(), 0);
+            }
+        }
         WM_LBUTTONDOWN if !pin.is_null() => {
             click_without_ctrl(window, &*pin);
             let point = mouse_point(lparam);
@@ -1140,9 +1158,11 @@ unsafe extern "system" fn window_proc(
             }
         }
         WM_LBUTTONDBLCLK if !pin.is_null() => {
+            // Like a terminal: double-click picks the word, a third click the line.
+            (*pin).double_click = Some((GetMessageTime() as u32, mouse_point(lparam)));
             let view = (*pin).view(window);
             if let Some(text) = &mut (*pin).text {
-                text.select_line(view, mouse_point(lparam));
+                text.select_word(view, mouse_point(lparam));
                 InvalidateRect(window, null(), 0);
             }
         }
