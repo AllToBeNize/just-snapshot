@@ -295,11 +295,7 @@ unsafe fn compose(selection: &Selection, area: RECT, region: Option<HRGN>) {
         bar.paint(dc, selection.panel_bar_hover);
     }
     // Last, so no bar stacked against the toolbar covers it.
-    if let Some((bounds, label)) = selection
-        .toolbar
-        .zip(selection.toolbar_hover)
-        .and_then(|(toolbar, action)| tooltip(selection, toolbar, action))
-        .filter(|(bounds, _)| intersect(*bounds, area).is_some())
+    if let Some((bounds, label)) = current_tip(selection).filter(|(bounds, _)| intersect(*bounds, area).is_some())
     {
         paint_tooltip(dc, bounds, label.as_ptr());
     }

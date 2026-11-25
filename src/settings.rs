@@ -90,6 +90,8 @@ enum Target {
     ClearSecondary,
     /// "服务设置" beside the translate shortcut.
     Service,
+    /// The engine settings beside the image search shortcut.
+    SearchService,
     /// Opens the save settings: folder, file names, auto-save, shadow, border.
     Output,
     Tab(usize),
@@ -274,6 +276,7 @@ struct Layout {
     /// The column the mascot stands in.
     mascot: RECT,
     service: RECT,
+    search_service: RECT,
     toggle: RECT,
     auto_update: RECT,
     output: RECT,
@@ -349,16 +352,15 @@ impl Layout {
             keys[index] = rect(right - ROW_KEYS, top + 6, right, top + ROW - 6);
         }
 
-        // A gear after the "翻译" label: icon 12 + 20, gap 10, two 14 px characters, gap 4.
-        let translate_row = rows[Binding::Translate as usize];
-        let service_left = translate_row.left + s(12 + 20 + 10 + 28 + 4);
-        let service_top = (translate_row.top + translate_row.bottom) / 2 - s(12);
-        let service = RECT {
-            left: service_left,
-            top: service_top,
-            right: service_left + s(24),
-            bottom: service_top + s(24),
+        // A gear after the two-character "翻译" and "识图" labels: icon 12 + 20,
+        // gap 10, two 14 px characters, gap 4.
+        let gear = |row: RECT| {
+            let left = row.left + s(12 + 20 + 10 + 28 + 4);
+            let top = (row.top + row.bottom) / 2 - s(12);
+            RECT { left, top, right: left + s(24), bottom: top + s(24) }
         };
+        let service = gear(rows[Binding::Translate as usize]);
+        let search_service = gear(rows[Binding::SearchImage as usize]);
 
         let right = WIDTH - PAD - 18;
         let row_top = |row: i32, height: i32| general_top + GENERAL_ROW * row + (GENERAL_ROW - height) / 2;
@@ -493,6 +495,7 @@ impl Layout {
             rows,
             clear,
             service,
+            search_service,
             toggle,
             auto_update,
             output,
@@ -527,6 +530,7 @@ impl Layout {
                     .chain([
                         (Target::ClearSecondary, self.clear),
                         (Target::Service, self.service),
+                        (Target::SearchService, self.search_service),
                         (Target::Output, self.output),
                     ])
                     .chain((0..THEMES.len()).map(|index| (Target::Theme(index), self.themes[index])))
@@ -848,6 +852,11 @@ unsafe fn activate(window: HWND, target: Target) {
         Target::Service => {
             if let Err(error) = translate_settings::open(window) {
                 crate::show_error(window, &format!("无法打开翻译设置。\n{error}"));
+            }
+        }
+        Target::SearchService => {
+            if let Err(error) = crate::image_search_settings::open(window) {
+                crate::show_error(window, &format!("无法打开识图设置。\n{error}"));
             }
         }
         Target::Tab(tab) => {
@@ -1537,13 +1546,13 @@ impl<'a> Painter<'a> {
         icons::paint(self.dc, icon, Icon::Close, color);
     }
 
-    /// A small gear after the "翻译" label that opens the translation service window.
-    unsafe fn service_link(&self) {
-        let rect = self.layout.service;
-        let hover = self.hover(Target::Service);
-        if hover > 0.0 || self.state.pressed == Some(Target::Service) {
+    /// A small gear after a label that opens a service window: translation
+    /// after "翻译", the image search engines after "识图".
+    unsafe fn service_link(&self, target: Target, rect: RECT) {
+        let hover = self.hover(target);
+        if hover > 0.0 || self.state.pressed == Some(target) {
             if let Some(graphics) = Graphics::new(self.dc) {
-                let face = self.face(Target::Service, self.palette.card);
+                let face = self.face(target, self.palette.card);
                 graphics.fill_round(ui::to_f(rect), self.f(6.0), argb(face, 255));
             }
         }
@@ -1771,7 +1780,8 @@ impl<'a> Painter<'a> {
             );
             self.key_field(index, self.s(24));
         }
-        self.service_link();
+        self.service_link(Target::Service, self.layout.service);
+        self.service_link(Target::SearchService, self.layout.search_service);
     }
 
     /// A shortcut drawn as keycaps, right-aligned in its field.
@@ -2211,6 +2221,7 @@ fn binding_icon(binding: Binding) -> Icon {
         Binding::Pin => Icon::Pin,
         Binding::ExtractText => Icon::ExtractText,
         Binding::Translate => Icon::Translate,
+        Binding::SearchImage => Icon::SearchImage,
         Binding::Arrow => Icon::Arrow,
         Binding::Number => Icon::Number,
         Binding::Magnify => Icon::Magnify,

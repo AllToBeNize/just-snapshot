@@ -27,6 +27,8 @@ pub enum Action {
     Pin,
     ExtractText,
     Translate,
+    /// Reverse image search; a menu picks the engine.
+    SearchImage,
     Cancel,
     /// Recording mode: start recording the selected area.
     Record,
@@ -63,6 +65,7 @@ impl Action {
             Binding::Pin => Self::Pin,
             Binding::ExtractText => Self::ExtractText,
             Binding::Translate => Self::Translate,
+            Binding::SearchImage => Self::SearchImage,
             Binding::Arrow => Self::Tool(Tool::Arrow),
             Binding::Number => Self::Tool(Tool::Number),
             Binding::Magnify => Self::Tool(Tool::Magnify),
@@ -98,6 +101,7 @@ impl Action {
             Self::Pin => Binding::Pin,
             Self::ExtractText => Binding::ExtractText,
             Self::Translate => Binding::Translate,
+            Self::SearchImage => Binding::SearchImage,
             Self::Cancel | Self::Record | Self::SystemAudio | Self::Microphone | Self::KeysPanel | Self::PadPanel => return None,
         })
     }
@@ -140,7 +144,7 @@ impl Action {
 }
 
 // Snipaste-style order: drawing tools | history | text | output, ending with exit and copy.
-pub const ACTIONS: [Action; 17] = [
+pub const ACTIONS: [Action; 18] = [
     Action::Tool(Tool::Rectangle),
     Action::Tool(Tool::Text),
     Action::Tool(Tool::Brush),
@@ -153,6 +157,7 @@ pub const ACTIONS: [Action; 17] = [
     Action::Redo,
     Action::ExtractText,
     Action::Translate,
+    Action::SearchImage,
     Action::ScrollCapture,
     Action::Pin,
     Action::Save,
@@ -172,6 +177,7 @@ const LABEL_TEXT: [&str; ACTIONS.len()] = [
     "重做",
     "提取文本",
     "翻译",
+    "识图",
     "长截图",
     "贴图",
     "保存",
@@ -179,7 +185,7 @@ const LABEL_TEXT: [&str; ACTIONS.len()] = [
     "复制",
 ];
 /// Indexes of the first button in every group after the first.
-const GROUP_STARTS: [usize; 3] = [8, 10, 12];
+const GROUP_STARTS: [usize; 3] = [8, 10, 13];
 const OFFSET: i32 = 8;
 const GROUP_GAP: i32 = 11;
 const PADDING: i32 = 4;
@@ -272,6 +278,12 @@ impl Toolbar {
         }
     }
 
+    /// Where `action`'s button is, if this toolbar has it.
+    pub fn button_bounds(self, action: Action) -> Option<RECT> {
+        let index = self.actions().iter().position(|&candidate| candidate == action)?;
+        Some(self.button(index))
+    }
+
     pub fn hit(self, point: POINT) -> Option<Action> {
         self.actions()
             .iter()
@@ -327,9 +339,13 @@ impl Toolbar {
     /// the bars stacked against the toolbar (`obstacles`): when both sides
     /// are taken it moves past the whole stack.
     pub fn tooltip_clear_of(self, action: Action, obstacles: &[RECT]) -> Option<(RECT, Vec<u16>)> {
+        self.label_clear_of(action, crate::wide(&action.tip()), obstacles)
+    }
+
+    /// Like `tooltip_clear_of` with any text, such as a progress message.
+    pub fn label_clear_of(self, action: Action, label: Vec<u16>, obstacles: &[RECT]) -> Option<(RECT, Vec<u16>)> {
         let index = self.actions().iter().position(|&candidate| candidate == action)?;
         let button = self.button(index);
-        let label = crate::wide(&action.tip());
         let width = unsafe { measure_tip(&label) } + 22;
         let height = 28;
         let left = ((button.left + button.right - width) / 2)
@@ -514,6 +530,7 @@ fn action_icon(action: Action) -> Icon {
         Action::Pin => Icon::Pin,
         Action::ExtractText => Icon::ExtractText,
         Action::Translate => Icon::Translate,
+        Action::SearchImage => Icon::SearchImage,
         Action::Cancel => Icon::Close,
         Action::Record => Icon::Record,
         Action::SystemAudio => Icon::Sound,

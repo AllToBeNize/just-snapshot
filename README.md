@@ -12,6 +12,7 @@
 | 贴图 | 把截图钉在屏幕最前面，可缩放、调透明度、分组 |
 | 提取文字 | 离线识别文字和二维码 / 条形码，在贴图上直接拖选复制 |
 | 翻译 | 识别后翻译，译文盖在原文位置；默认免费服务，也可接 OpenAI 兼容接口、DeepL、百度、有道 |
+| 识图 | 把截图交给 Google Lens 或 Yandex 以图搜图，结果在浏览器打开；也能接自己的识图接口 |
 | 找回上次截图 | 误按 `Esc` 后一键回到上次的画面、选区和标注 |
 | 复制即文件 | 复制的截图在资源管理器里 `Ctrl+V` 就是 PNG 文件 |
 
@@ -42,7 +43,7 @@
 | --- | --- |
 | 矩形 · 文本 · 画笔 · 马赛克 · 箭头 · 序号 · 放大镜 · 选择 | `Ctrl+1` ～ `Ctrl+8` |
 | 撤回 · 重做 | `Ctrl+Z` · `Ctrl+Y` / `Ctrl+Shift+Z` |
-| 提取文本 · 翻译 | `Ctrl+E` · `Ctrl+F` |
+| 提取文本 · 翻译 · 识图 | `Ctrl+E` · `Ctrl+F` · `Ctrl+I` |
 | 长截图 · 贴图 · 保存 | `Ctrl+L` · `Ctrl+T` · `Ctrl+S` |
 | 复制 · 退出 | `Ctrl+C` / `Enter` / 双击 · `Esc` |
 | 选中整个屏幕 | `Ctrl+A` |
@@ -112,9 +113,24 @@
 
 密钥只存在 Windows 凭据管理器（名称以 `just-snapshot/translate/` 开头），不写进任何文件。
 
+## 识图
+
+工具栏的「识图」`Ctrl+I` 在按钮下弹出引擎菜单：选 Google、Yandex 或自己加的引擎，或者「全部引擎」同时搜、每个引擎开一个标签页。上传时工具栏上显示「正在用 … 识图」，截图界面先留着；结果页在默认浏览器打开后截图界面才关闭，失败时弹出原因，可以直接再试。贴图的右键菜单和托盘菜单「识图上次截图」里有同样的引擎菜单。
+
+引擎在设置「识图」一行的齿轮里改（菜单最后一项「设置识图接口…」也能打开）。每个引擎是一组字段：
+
+| 字段 | 说明 |
+| --- | --- |
+| 上传地址 | 截图以 multipart 表单 POST 到这里；`{timestamp}` 换成当前毫秒数 |
+| 文件字段 | 图片放在哪个表单字段 |
+| 结果字段 | 留空：由浏览器上传，跟着服务器的跳转打开结果页（Google Lens 这样，它的结果只认上传时的浏览器会话）。填了：由程序上传，按路径从返回的 JSON 取值，如 `blocks.0.params.cbirId`（Yandex 这样） |
+| 结果链接 | 结果页地址，`{value}` 换成取到的值（自动 URL 编码）；留空表示取到的值本身就是网址 |
+
+「测试」用程序图标搜一次，在浏览器里打开结果。浏览器上传时程序会在临时文件夹写一个内嵌截图的小网页（`%TEMP%\just-snapshot-search\`），十分钟后的下一次识图时删掉。内置的 Google、Yandex 可以改，也能「恢复默认」；自己加的可以删除。
+
 ## 贴图
 
-`Ctrl+T` 把截图钉在屏幕最前面：左键拖动，滚轮缩放，`Ctrl+滚轮` 调透明度，`Esc` 或双击关闭。右键菜单可以复制、保存、取消置顶、分组；托盘菜单「贴图」里按组显示 / 隐藏或全部关闭。
+`Ctrl+T` 把截图钉在屏幕最前面：左键拖动，滚轮缩放，`Ctrl+滚轮` 调透明度，`Esc` 或双击关闭。右键菜单可以复制、保存、识图、取消置顶、分组；托盘菜单「贴图」里按组显示 / 隐藏或全部关闭。
 
 ## 设置
 
@@ -140,6 +156,7 @@
 | `recording.txt` | 录像位置、帧率、画质、声音和鼠标指针默认值 |
 | `overlay.txt` | 按键面板的显示状态、位置、大小、不透明度 |
 | `translate.txt` | 翻译服务商和非密钥参数 |
+| `image_search.txt` | 识图引擎（没有这个文件时用内置的 Google、Yandex） |
 | `update.txt` | 更新镜像（`mirrors=https://镜像1/;https://镜像2/`，GitHub 失败后依次尝试）和跳过的版本 |
 
 ## 扩展开发
@@ -171,6 +188,7 @@
 | 长截图 | `scroll_capture.rs`、`scroll_stitch.rs`、`scroll_input.rs` |
 | 录像与按键显示 | `recorder.rs`、`recording_ui.rs`、`gif_export.rs`、`input_overlay.rs` |
 | 文字识别与翻译 | `ocr.rs`、`codes.rs`、`pin_text.rs`、`translate.rs`、`pin_translate.rs` |
+| 识图 | `image_search.rs`、`image_search_settings.rs` |
 | 设置、主题、图标 | `settings.rs`、`theme.rs`、`icons.rs`、`icons/lucide.rs` |
 | 安装与更新 | `setup.rs`、`update.rs`、`update_ui.rs` |
 

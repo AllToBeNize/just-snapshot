@@ -65,6 +65,7 @@ mod tests {
     mod clipboard;
     mod marks;
     mod record;
+    mod search;
     mod select;
     mod text;
 }
@@ -85,6 +86,8 @@ const FINISH_TEXT: u32 = WM_APP + 3;
 const TEXT_INPUT_CLICK: u32 = WM_APP + 8;
 /// A key / gamepad panel was changed on the panel itself (see `panels_changed`).
 const PANELS_CHANGED: u32 = WM_APP + 10;
+/// Posted by the image search thread; `lparam` owns a `Box<image_search::Outcome>`.
+const SEARCH_DONE: u32 = WM_APP + 11;
 const TEXT_CARET_TIMER: usize = 3;
 
 thread_local! {
@@ -123,21 +126,27 @@ impl Kept {
     /// The screen back as a bitmap, ready to show again.
     unsafe fn unpack(self) -> io::Result<Last> {
         let packed = self.frozen.join().map_err(|_| io::Error::other("上次的截图没能保存下来。"))?;
-        let mut image = match packed {
-            Packed::Raw(image) => image,
-            Packed::Png(bytes) => crate::app_icon::decode(&bytes).ok_or_else(|| io::Error::other("上次的截图没能读回来。"))?,
+        Ok(Last {
+            desktop: packed.desktop(self.bounds)?,
+            rect: self.rect,
+            annotations: self.annotations,
+            style: self.style,
+        })
+    }
+}
+
+impl Packed {
+    unsafe fn desktop(&self, bounds: RECT) -> io::Result<Desktop> {
+        let mut image = match self {
+            Packed::Raw(image) => image.clone(),
+            Packed::Png(bytes) => crate::app_icon::decode(bytes).ok_or_else(|| io::Error::other("上次的截图没能读回来。"))?,
         };
         // GDI captures carry no alpha; keep the bitmap exactly as captured.
         for pixel in image.pixels.chunks_exact_mut(4) {
             pixel[3] = 0;
         }
         let (surface, _, _) = image.into_surface()?;
-        Ok(Last {
-            desktop: Desktop { bounds: self.bounds, surface },
-            rect: self.rect,
-            annotations: self.annotations,
-            style: self.style,
-        })
+        Ok(Desktop { bounds, surface })
     }
 }
 
@@ -196,6 +205,8 @@ struct Selection {
     /// The mouse pointer as it was at capture time, for the show-pointer shortcut.
     pointer_layer: Option<PointerLayer>,
     pick_drag: Option<PickDrag>,
+    /// An image search is running; what the toolbar says meanwhile.
+    search: Option<String>,
     editor: Option<Editor>,
     brush_cursor: Option<Cursor>,
     mosaic_cursor: Option<(i32, Cursor)>,
@@ -430,6 +441,23 @@ pub fn has_last() -> bool {
     LAST.with_borrow(Option::is_some)
 }
 
+/// The last capture as it would be copied: the selected area with its
+/// annotations. `Ok(None)` when there is none. It stays available.
+pub unsafe fn last_image() -> Result<Option<Image>, String> {
+    let Some(kept) = LAST.take() else { return Ok(None) };
+    let Kept { bounds, frozen, rect, annotations, style } = kept;
+    let packed = frozen.join().map_err(|_| "上次的截图没能保存下来。".to_string())?;
+    let image = packed
+        .desktop(bounds)
+        .and_then(|desktop| desktop.composite_crop(rect, |dc| annotations.paint(dc, rect, false, None)))
+        .map_err(|error| error.to_string());
+    // Already packed: the thread only hands it back.
+    if let Ok(frozen) = std::thread::Builder::new().name("snapshot-keep-last".into()).spawn(move || packed) {
+        LAST.set(Some(Kept { bounds, frozen, rect, annotations, style }));
+    }
+    image.map(Some)
+}
+
 /// Opens the last capture again. `Ok(false)` when there is none.
 pub unsafe fn restore_last(instance: HINSTANCE) -> Result<bool, String> {
     if SESSION.with_borrow(Option::is_some) || scroll_capture::is_open() {
@@ -582,6 +610,7 @@ unsafe fn open_selection(instance: HINSTANCE, start: Start) -> io::Result<()> {
         layer: None,
         picked: Vec::new(),
         pick_drag: None,
+        search: None,
         record,
         live,
         pointer_layer,
@@ -785,6 +814,7 @@ unsafe fn handle_message(window: HWND, message: u32, wparam: WPARAM, lparam: LPA
             }
         }
         SIZE_DONE => finish_size_input(window, lparam as HWND, wparam != 0),
+        SEARCH_DONE => finish_search(window, crate::image_search::Outcome::from_message(lparam)),
         PANELS_CHANGED => {
             if let Some(bounds) = SESSION.with_borrow(|session| Some(session.as_ref()?.panel_bar?.bounds)) {
                 invalidate(window, &bounds, 0);

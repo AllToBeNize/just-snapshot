@@ -1,5 +1,5 @@
 //! Minimal blocking HTTPS over WinHTTP: POST for the translation services,
-//! GET and streaming downloads for updates. System TLS and the system proxy,
+//! multipart uploads for image search, GET and streaming downloads for updates. System TLS and the system proxy,
 //! nothing bundled. Call it off the UI thread.
 
 use std::{ffi::c_void, ptr::null};
@@ -156,6 +156,16 @@ impl Exchange {
         })
     }
 
+    /// The whole body as text.
+    unsafe fn text(&self) -> Result<String, String> {
+        let mut bytes = Vec::new();
+        self.read(|chunk| {
+            bytes.extend_from_slice(chunk);
+            Ok(())
+        })?;
+        Ok(String::from_utf8_lossy(&bytes).into_owned())
+    }
+
     /// The announced body length, when the server sent one.
     unsafe fn length(&self) -> Option<u64> {
         query_number(&self.request, WINHTTP_QUERY_CONTENT_LENGTH)
@@ -196,14 +206,9 @@ unsafe fn query_number(request: &Handle, info: u32) -> Option<u64> {
 pub fn post(url: &str, headers: &[(&str, &str)], body: &[u8]) -> Result<Response, String> {
     unsafe {
         let exchange = Exchange::send("POST", url, headers, body)?;
-        let mut bytes = Vec::new();
-        exchange.read(|chunk| {
-            bytes.extend_from_slice(chunk);
-            Ok(())
-        })?;
         Ok(Response {
             status: exchange.status,
-            body: String::from_utf8_lossy(&bytes).into_owned(),
+            body: exchange.text()?,
         })
     }
 }
@@ -256,6 +261,40 @@ pub fn download(
     }
 }
 
+/// POSTs `file` as the multipart/form-data field `field`, named `file_name`
+/// with the type `mime`. Any HTTP status is returned; only transport failures
+/// are errors.
+pub fn upload(url: &str, field: &str, file_name: &str, mime: &str, file: &[u8]) -> Result<Response, String> {
+    let boundary = format!("----just-snapshot-{:016x}", boundary_seed());
+    let body = multipart(&boundary, field, file_name, mime, file);
+    let content_type = format!("multipart/form-data; boundary={boundary}");
+    unsafe {
+        let exchange = Exchange::send("POST", url, &[("Content-Type", &content_type)], &body)?;
+        Ok(Response {
+            status: exchange.status,
+            body: exchange.text()?,
+        })
+    }
+}
+
+/// Changes per call, so the boundary never shows up inside the file by chance twice.
+fn boundary_seed() -> u64 {
+    let time = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_nanos() as u64);
+    time ^ (std::process::id() as u64).rotate_left(32)
+}
+
+fn multipart(boundary: &str, field: &str, file_name: &str, mime: &str, file: &[u8]) -> Vec<u8> {
+    let mut body = format!(
+        "--{boundary}\r\nContent-Disposition: form-data; name=\"{field}\"; filename=\"{file_name}\"\r\nContent-Type: {mime}\r\n\r\n"
+    )
+    .into_bytes();
+    body.extend_from_slice(file);
+    body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+    body
+}
+
 /// The error `download` returns when `progress` asked it to stop.
 pub const CANCELLED: &str = "已取消下载";
 
@@ -268,7 +307,8 @@ pub fn form(pairs: &[(&str, &str)]) -> String {
         .join("&")
 }
 
-fn encode(value: &str) -> String {
+/// Percent-encodes everything but RFC 3986 unreserved characters.
+pub fn encode(value: &str) -> String {
     value
         .bytes()
         .map(|byte| match byte {
@@ -356,6 +396,23 @@ pub(crate) mod tests {
         let error = post("http://127.0.0.1:9/", &[], b"").err().unwrap();
         assert!(error.contains("连不上服务器"), "{error}");
         assert!(post("not a url", &[], b"").err().unwrap().contains("格式不对"));
+    }
+
+    #[test]
+    fn uploads_a_file_as_multipart_form_data() {
+        let (address, received) = serve(vec![(200, "{}".into())]);
+        let upload = upload(&format!("{address}/up?x=1"), "encoded_image", "capture.png", "image/png", b"PNGDATA").unwrap();
+        assert_eq!(upload.status, 200);
+        let request = received.recv().unwrap();
+        assert!(request.starts_with("POST /up?x=1 HTTP/1.1"), "{request}");
+        let boundary = request
+            .lines()
+            .find_map(|line| line.strip_prefix("Content-Type: multipart/form-data; boundary="))
+            .unwrap()
+            .to_string();
+        assert!(request.contains(&format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"encoded_image\"; filename=\"capture.png\"\r\nContent-Type: image/png\r\n\r\nPNGDATA\r\n--{boundary}--\r\n"
+        )));
     }
 
     #[test]

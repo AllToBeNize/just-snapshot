@@ -76,6 +76,7 @@ pub(super) unsafe fn session(instance: HINSTANCE) -> HWND {
         layer: None,
         picked: Vec::new(),
         pick_drag: None,
+        search: None,
         record: None,
         live: None,
         pointer_layer: None,

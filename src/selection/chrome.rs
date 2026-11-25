@@ -46,13 +46,27 @@ pub(super) unsafe fn refresh_toolbar(window: HWND) {
 /// The tooltip of `action` on `toolbar`, kept clear of the option bars
 /// stacked against the toolbar.
 pub(super) fn tooltip(selection: &Selection, toolbar: Toolbar, action: Action) -> Option<(RECT, Vec<u16>)> {
-    let obstacles: Vec<RECT> = selection
+    toolbar.tooltip_clear_of(action, &bar_bounds(selection))
+}
+
+/// The bars stacked against the toolbar, which labels keep clear of.
+fn bar_bounds(selection: &Selection) -> Vec<RECT> {
+    selection
         .options
         .map(|options| options.bounds)
         .into_iter()
         .chain(selection.panel_bar.map(|bar| bar.bounds))
-        .collect();
-    toolbar.tooltip_clear_of(action, &obstacles)
+        .collect()
+}
+
+/// The label over the toolbar right now: the image search progress while
+/// it runs, else the hovered button's tooltip.
+pub(super) fn current_tip(selection: &Selection) -> Option<(RECT, Vec<u16>)> {
+    let toolbar = selection.toolbar?;
+    match &selection.search {
+        Some(label) => toolbar.label_clear_of(Action::SearchImage, crate::wide(label), &bar_bounds(selection)),
+        None => tooltip(selection, toolbar, selection.toolbar_hover?),
+    }
 }
 
 pub(super) unsafe fn refresh_options(window: HWND) {
@@ -326,6 +340,10 @@ pub(super) unsafe fn command(window: HWND, action: Action) {
     finish_text(window, true);
     if action == Action::ScrollCapture {
         start_scroll_capture(window);
+        return;
+    }
+    if action == Action::SearchImage {
+        search_image(window);
         return;
     }
     if matches!(action, Action::Copy | Action::Save | Action::Pin | Action::ExtractText | Action::Translate) {

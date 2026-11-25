@@ -73,6 +73,7 @@ fn new_text_can_be_resized_before_typing_and_reopened_after_moving() {
         layer: None,
         picked: Vec::new(),
         pick_drag: None,
+        search: None,
         record: None,
         live: None,
         pointer_layer: None,

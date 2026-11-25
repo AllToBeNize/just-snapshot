@@ -84,9 +84,10 @@ const DRAWING: [HintRow; 10] = [
     (HintInput::Bound(Binding::Undo), w!("撤回")),
     (HintInput::Bound(Binding::Redo), w!("重做")),
 ];
-const OUTPUT: [HintRow; 7] = [
+const OUTPUT: [HintRow; 8] = [
     (HintInput::Bound(Binding::ExtractText), w!("提取文本")),
     (HintInput::Bound(Binding::Translate), w!("翻译")),
+    (HintInput::Bound(Binding::SearchImage), w!("识图")),
     (HintInput::Bound(Binding::LongCapture), w!("长截图")),
     (HintInput::Bound(Binding::Pin), w!("贴图")),
     (HintInput::Bound(Binding::Save), w!("保存")),

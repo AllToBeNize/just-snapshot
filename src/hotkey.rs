@@ -31,6 +31,8 @@ pub enum Binding {
     Redo,
     ExtractText,
     Translate,
+    /// In the capture: reverse image search, picking the engine from a menu.
+    SearchImage,
     LongCapture,
     Pin,
     Save,
@@ -69,7 +71,7 @@ pub enum Global {
 }
 
 /// In toolbar order, so the settings list reads like the toolbar.
-pub const BINDINGS: [Binding; 26] = [
+pub const BINDINGS: [Binding; 27] = [
     Binding::Capture,
     Binding::Rectangle,
     Binding::Text,
@@ -83,6 +85,7 @@ pub const BINDINGS: [Binding; 26] = [
     Binding::Redo,
     Binding::ExtractText,
     Binding::Translate,
+    Binding::SearchImage,
     Binding::LongCapture,
     Binding::Pin,
     Binding::Save,
@@ -111,6 +114,7 @@ const NAMES: [&str; BINDINGS.len()] = [
     "redo",
     "extract_text",
     "translate",
+    "search_image",
     "long_capture",
     "pin",
     "save",
@@ -139,6 +143,7 @@ const LABELS: [&str; BINDINGS.len()] = [
     "重做",
     "提取文本",
     "翻译",
+    "识图",
     "长截图",
     "贴图",
     "保存",
@@ -225,6 +230,7 @@ pub const DEFAULT: Bindings = Bindings([
     ctrl(b'Y'),
     ctrl(b'E'),
     ctrl(b'F'),
+    ctrl(b'I'),
     ctrl(b'L'),
     ctrl(b'T'),
     ctrl(b'S'),

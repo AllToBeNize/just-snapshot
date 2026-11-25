@@ -15,6 +15,8 @@ mod global_hotkey;
 mod hotkey;
 mod http;
 mod icons;
+mod image_search;
+mod image_search_settings;
 mod input_overlay;
 mod migrate;
 mod mosaic;
@@ -77,6 +79,8 @@ use windows_sys::{
 };
 
 const TRAY_MESSAGE: u32 = WM_APP + 1;
+/// Posted by the image search thread; `lparam` owns a `Box<image_search::Outcome>`.
+const SEARCH_DONE: u32 = WM_APP + 30;
 const MENU_CAPTURE: usize = 1;
 const MENU_CONFIG: usize = 2;
 const MENU_EXIT: usize = 3;
@@ -97,6 +101,8 @@ const UPDATE_TIMER: usize = 1;
 const UPDATE_DELAY_MS: u32 = 30_000;
 /// Menu ids for "show group N" start here.
 const MENU_GROUP: usize = 100;
+/// "识图上次截图": the image search engines, past any group number.
+const MENU_SEARCH: usize = 0x8000;
 static TASKBAR_CREATED: OnceLock<u32> = OnceLock::new();
 thread_local! {
     static TRAY_ICONS: Cell<[HICON; 2]> = const { Cell::new([null_mut(); 2]) };
@@ -226,6 +232,7 @@ unsafe fn run(args: &[String]) -> Result<(), String> {
     pinned::register(instance).map_err(|error| error.to_string())?;
     settings::register(instance).map_err(|error| error.to_string())?;
     translate_settings::register().map_err(|error| error.to_string())?;
+    image_search_settings::register().map_err(|error| error.to_string())?;
     output_settings::register().map_err(|error| error.to_string())?;
     input_overlay::register(instance).map_err(|error| error.to_string())?;
     recording_ui::register(instance).map_err(|error| error.to_string())?;
@@ -291,6 +298,7 @@ unsafe fn run(args: &[String]) -> Result<(), String> {
                 return Ok(());
             }
             _ if translate_settings::dialog_message(&message) => {}
+            _ if image_search_settings::dialog_message(&message) => {}
             _ if output_settings::dialog_message(&message) => {}
             _ => {
                 TranslateMessage(&message);
@@ -318,6 +326,12 @@ unsafe extern "system" fn tray_proc(
             Some(hotkey::Global::ShowPad) => input_overlay::toggle(input_overlay::Panel::Pad),
             None => {}
         },
+        SEARCH_DONE => {
+            let outcome = image_search::Outcome::from_message(lparam);
+            if let (_, Some(message)) = outcome.open() {
+                show_error(window, &message);
+            }
+        }
         TRAY_MESSAGE => match lparam as u32 {
             WM_RBUTTONUP => tray_menu(window),
             WM_LBUTTONDBLCLK => begin_capture(window),
@@ -446,6 +460,12 @@ unsafe fn tray_menu(window: HWND) {
     let last_item = wide(&format!("找回上次截图{}", shortcut(hotkey::Global::Last)));
     let last_flags = if selection::has_last() { MF_STRING } else { MF_STRING | MF_GRAYED };
     AppendMenuW(menu, last_flags, MENU_LAST, last_item.as_ptr());
+    let engines = image_search::load().unwrap_or_default();
+    let search_menu = CreatePopupMenu();
+    if !search_menu.is_null() {
+        image_search::append_items(search_menu, MENU_SEARCH, &engines);
+        AppendMenuW(menu, MF_POPUP | last_flags, search_menu as usize, w!("识图上次截图"));
+    }
     let recording = recording_ui::is_recording();
     let record_label = if recording { "停止录像" } else { "区域录像" };
     let record_item = wide(&format!("{record_label}{}", shortcut(hotkey::Global::Record)));
@@ -500,6 +520,9 @@ unsafe fn tray_menu(window: HWND) {
         MENU_PINS_SHOW => pinned::set_all_hidden(false),
         MENU_PINS_HIDE => pinned::set_all_hidden(true),
         MENU_PINS_CLOSE => pinned::close_all(),
+        id if (MENU_SEARCH..MENU_SEARCH + image_search::MENU_IDS).contains(&id) => {
+            search_last(window, image_search::picked(id, MENU_SEARCH, engines))
+        }
         id if id > MENU_GROUP => pinned::toggle_group((id - MENU_GROUP) as u32),
         MENU_CONFIG | MENU_CONFLICT => open_settings(window),
         MENU_CHECK_UPDATE => update_ui::check_now(window),
@@ -606,6 +629,26 @@ unsafe fn restore_last(window: HWND) {
         Ok(true) => {}
         Ok(false) => notify(window, "没有可以找回的截图", "截一张图之后，就能用这个功能找回上一次的选区和标注。"),
         Err(error) => show_error(window, &format!("无法找回上次截图。\n{error}")),
+    }
+}
+
+/// Searches the last capture with the engines picked in the tray menu.
+unsafe fn search_last(window: HWND, pick: Option<image_search::Pick>) {
+    match pick {
+        Some(image_search::Pick::Engines(engines)) => match selection::last_image() {
+            Ok(Some(image)) => {
+                notify(window, &image_search::busy_label(&engines), "完成后会在浏览器里打开结果页。");
+                image_search::start(window, SEARCH_DONE, engines, image);
+            }
+            Ok(None) => notify(window, "没有可以识图的截图", "截一张图之后，就能拿它去识图。"),
+            Err(error) => show_error(window, &format!("无法读取上次截图。\n{error}")),
+        },
+        Some(image_search::Pick::Settings) => {
+            if let Err(error) = image_search_settings::open(window) {
+                show_error(window, &format!("无法打开识图设置。\n{error}"));
+            }
+        }
+        None => {}
     }
 }
 

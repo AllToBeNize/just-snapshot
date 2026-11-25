@@ -58,6 +58,8 @@ const OCR_DONE: u32 = WM_APP + 1;
 const TRANSLATE_DONE: u32 = WM_APP + 2;
 /// The translation settings changed; pins waiting for them try again.
 const RETRANSLATE: u32 = WM_APP + 3;
+/// Posted by the image search thread; `lparam` owns a `Box<image_search::Outcome>`.
+const SEARCH_DONE: u32 = WM_APP + 4;
 const SHIMMER_TIMER: usize = 3;
 const SHIMMER_FRAME_MS: u32 = 33;
 const WHEEL_SCROLL: i32 = 48;
@@ -79,6 +81,8 @@ const MENU_HIDE_GROUP: usize = 5;
 const MENU_CLOSE: usize = 6;
 /// "Move to group N" items start here.
 const MENU_GROUP: usize = 100;
+/// The image search engines, past any group number.
+const MENU_SEARCH: usize = 0x8000;
 
 pub fn opacity_step() -> u8 {
     OPACITY_STEP.get()
@@ -453,7 +457,7 @@ unsafe fn save_image(window: HWND, pin: &mut Pin) {
     }
 }
 
-/// The right-click menu: copy, save, stay on top, groups and close.
+/// The right-click menu: copy, save, image search, stay on top, groups and close.
 unsafe fn context_menu(window: HWND, pin: &mut Pin) {
     let menu = CreatePopupMenu();
     if menu.is_null() {
@@ -461,6 +465,13 @@ unsafe fn context_menu(window: HWND, pin: &mut Pin) {
     }
     AppendMenuW(menu, MF_STRING, MENU_COPY, w!("复制图片\tCtrl+C"));
     AppendMenuW(menu, MF_STRING, MENU_SAVE, w!("保存…"));
+    // A settings file that cannot be read still leaves the way to fix it.
+    let engines = crate::image_search::load().unwrap_or_default();
+    let search_menu = CreatePopupMenu();
+    if !search_menu.is_null() {
+        crate::image_search::append_items(search_menu, MENU_SEARCH, &engines);
+        AppendMenuW(menu, MF_POPUP, search_menu as usize, w!("识图"));
+    }
     AppendMenuW(menu, MF_SEPARATOR, 0, null());
     AppendMenuW(menu, MF_STRING | if pin.topmost { MF_CHECKED } else { 0 }, MENU_TOPMOST, w!("置顶"));
     let groups_menu = CreatePopupMenu();
@@ -494,6 +505,23 @@ unsafe fn context_menu(window: HWND, pin: &mut Pin) {
             toast(window, pin, format!("已移到组 {}，新贴图也会放进这一组", pin.group));
         }
         MENU_HIDE_GROUP => toggle_group(pin.group),
+        id if (MENU_SEARCH..MENU_SEARCH + crate::image_search::MENU_IDS).contains(&id) => {
+            match crate::image_search::picked(id, MENU_SEARCH, engines) {
+                Some(crate::image_search::Pick::Engines(engines)) => match pin_image(pin) {
+                    Ok(image) => {
+                        toast(window, pin, crate::image_search::busy_label(&engines));
+                        crate::image_search::start(window, SEARCH_DONE, engines, image);
+                    }
+                    Err(error) => show_error(window, &format!("无法识图。\n{error}")),
+                },
+                Some(crate::image_search::Pick::Settings) => {
+                    if let Err(error) = crate::image_search_settings::open(window) {
+                        show_error(window, &format!("无法打开识图设置。\n{error}"));
+                    }
+                }
+                None => {}
+            }
+        }
         MENU_CLOSE => {
             DestroyWindow(window);
         }
@@ -1000,6 +1028,15 @@ unsafe extern "system" fn window_proc(
                     Outcome::Failed(error) => Phase::Failed(error),
                 };
                 refresh_popup(window, &*pin);
+            }
+        }
+        SEARCH_DONE => {
+            let outcome = crate::image_search::Outcome::from_message(lparam);
+            let (opened, failure) = outcome.open();
+            if let Some(message) = failure {
+                show_error(window, &message);
+            } else if !pin.is_null() && opened > 0 {
+                toast(window, &mut *pin, "已在浏览器打开识图结果".into());
             }
         }
         RETRANSLATE if !pin.is_null() => {
