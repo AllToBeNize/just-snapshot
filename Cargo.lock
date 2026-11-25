@@ -245,9 +245,10 @@ dependencies = [
 
 [[package]]
 name = "just-snapshot"
-version = "0.5.5"
+version = "0.5.6"
 dependencies = [
  "gif",
+ "miniz_oxide 0.8.9",
  "ort",
  "png",
  "rxing",

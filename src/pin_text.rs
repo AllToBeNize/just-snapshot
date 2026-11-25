@@ -24,10 +24,16 @@ pub enum Status {
     Failed,
 }
 
+/// Width kept free at the top right for the pin's pushpin, in 96-DPI pixels.
+pub const PUSHPIN_ROOM: i32 = 30;
+
 pub struct TextLayer {
     pub status: Status,
     anchor: Option<Pos>,
     focus: Option<Pos>,
+    /// Where the button went down, in client pixels; a drag selects once
+    /// it moves this far, a click only clears.
+    pressed_at: Option<POINT>,
     pub selecting: bool,
     pub hovering: bool,
     pub button_hovered: bool,
@@ -74,6 +80,7 @@ impl TextLayer {
             status: Status::Recognizing,
             anchor: None,
             focus: None,
+            pressed_at: None,
             selecting: false,
             hovering: false,
             button_hovered: false,
@@ -106,39 +113,49 @@ impl TextLayer {
         let width = unsafe { ui::measure(dc, BUTTON_LABEL, fonts.small) } + view.s(20);
         let height = view.s(26);
         let margin = view.s(6);
+        // Left of the pin's pushpin in the top-right corner.
+        let right = image.right - margin - view.s(PUSHPIN_ROOM);
         let rect = RECT {
-            left: image.right - margin - width,
+            left: right - width,
             top: image.top + margin,
-            right: image.right - margin,
+            right,
             bottom: image.top + margin + height,
         };
         (rect.left >= image.left && rect.bottom <= image.bottom).then_some(rect)
     }
 
-    /// Whether `point` is on recognized text, where a drag selects instead of moving the pin.
+    /// Whether `point` is on recognized text, where a drag selects instead
+    /// of moving the pin: anywhere along a line, gaps between words
+    /// included, and a little above and below it.
     pub fn over_text(&self, view: View, point: POINT) -> bool {
         if self.code_at(view, point).is_some() {
             return true;
         }
-        let slack = 3.0 / view.zoom;
         let (x, y) = view.to_image(point);
-        self.lines().iter().flat_map(|line| &line.words).any(|word| {
-            x >= word.rect[0] - slack
-                && x <= word.rect[2] + slack
-                && y >= word.rect[1] - slack
-                && y <= word.rect[3] + slack
+        self.lines().iter().any(|line| {
+            let [left, top, right, bottom] = line.bounds();
+            let slack = (3.0 / view.zoom).max((bottom - top) * 0.25);
+            x >= left - slack && x <= right + slack && y >= top - slack && y <= bottom + slack
         })
     }
 
+    /// The button went down on the text: nothing shows until it drags.
     pub fn begin(&mut self, view: View, point: POINT) {
         let pos = nearest(self.lines(), view.to_image(point));
         self.anchor = pos;
-        self.focus = pos;
+        self.focus = None;
+        self.pressed_at = Some(point);
         self.selecting = pos.is_some();
     }
 
-    /// Extends the selection to `point`. True if it changed.
+    /// Extends the selection to `point` once the press has become a drag.
+    /// True if it changed.
     pub fn extend(&mut self, view: View, point: POINT) -> bool {
+        let threshold = (3.0 * view.scale).round() as i32;
+        let moved = self.pressed_at.is_some_and(|at| (point.x - at.x).abs() > threshold || (point.y - at.y).abs() > threshold);
+        if self.focus.is_none() && !moved {
+            return false;
+        }
         let pos = nearest(self.lines(), view.to_image(point));
         pos.is_some() && std::mem::replace(&mut self.focus, pos) != pos
     }

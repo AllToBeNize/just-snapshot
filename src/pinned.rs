@@ -2,12 +2,14 @@ use crate::{
     capture::{Image, Surface},
     hotkey::DEFAULT_OPACITY_STEP,
     codes, ocr,
+    gdiplus::Graphics,
+    icons::{self, Icon},
     output::copy_text,
     pin_text::{Status, TextLayer, View},
     pin_translate::{self, Phase, Target as PaneTarget, TranslatePane},
     selection_geometry::{contains, mouse_point},
     show_error,
-    theme::{self, mix},
+    theme::{self, argb, mix},
     toolbar::paint_size_badge,
     translate::{self, Service, LANGUAGES},
     translate_settings,
@@ -45,6 +47,8 @@ const POPUP_CLASS: *const u16 = w!("Snapshot.Translation");
 /// Gap between a pin and its translation popup.
 const POPUP_GAP: i32 = 8;
 const GLOW: i32 = 5;
+/// The selected pins' edge (COLORREF, 0x00BBGGRR): Snipaste's soft red.
+const SELECTED_GLOW: u32 = 0x005a_50f0;
 const BADGE_TIMER: usize = 1;
 const BADGE_DURATION_MS: u32 = 1200;
 const MIN_OPACITY: i32 = 15;
@@ -75,7 +79,6 @@ thread_local! {
 
 const MENU_COPY: usize = 1;
 const MENU_SAVE: usize = 2;
-const MENU_TOPMOST: usize = 3;
 const MENU_NEW_GROUP: usize = 4;
 const MENU_HIDE_GROUP: usize = 5;
 const MENU_CLOSE: usize = 6;
@@ -144,7 +147,6 @@ struct Pin {
     fonts: Fonts,
     /// Pins are shown and hidden by group from the tray.
     group: u32,
-    topmost: bool,
     /// Kept above the other pins even when they are clicked.
     above: bool,
     /// Picked with Ctrl+click; dragging, the wheel, Esc and the menu act on
@@ -154,6 +156,8 @@ struct Pin {
     hidden: bool,
     /// When and where the last double-click was, so a third click selects the line.
     double_click: Option<(u32, POINT)>,
+    /// The pointer is over the pin; the raised pushpin shows.
+    hovering: bool,
     note: String,
     /// The image with the translation drawn over the original lines.
     translated: Option<Surface>,
@@ -247,6 +251,23 @@ impl Pin {
         button.is_some_and(|button| contains(button, point))
     }
 
+    /// The pushpin in the top-right corner: always there while kept above
+    /// the other pins (pressed down), on hover otherwise (raised).
+    fn pushpin(&self) -> Option<RECT> {
+        if !self.above && !self.hovering {
+            return None;
+        }
+        let image = self.image_rect();
+        let size = self.s(24);
+        let margin = self.s(5);
+        let rect = RECT { left: image.right - margin - size, top: image.top + margin, right: image.right - margin, bottom: image.top + margin + size };
+        (rect.left >= image.left + margin && rect.bottom <= image.bottom - margin).then_some(rect)
+    }
+
+    fn over_pushpin(&self, point: POINT) -> bool {
+        self.pushpin().is_some_and(|rect| contains(rect, point))
+    }
+
     unsafe fn over_button(&self, window: HWND, point: POINT) -> bool {
         let Some(text) = &self.text else { return false };
         let dc = GetDC(window);
@@ -324,11 +345,11 @@ pub unsafe fn open(image: Image, bounds: RECT, mode: Mode) -> io::Result<()> {
         scale,
         fonts: Fonts::new(scale),
         group: CURRENT_GROUP.get(),
-        topmost: true,
         above: false,
         selected: false,
         hidden: false,
         double_click: None,
+        hovering: false,
         note: String::new(),
         translated: None,
         show_original: false,
@@ -360,7 +381,8 @@ pub unsafe fn open(image: Image, bounds: RECT, mode: Mode) -> io::Result<()> {
     if recognize {
         start_recognition(window, &mut *pin);
     }
-    // A new pin starts on top; pins kept above the others go back over it.
+    // A new pin starts on top and selected; pins kept above the others go back over it.
+    select_only(window);
     raise_above_pins();
     Ok(())
 }
@@ -469,14 +491,10 @@ unsafe fn toggle_selected(window: HWND, pin: &mut Pin) {
     set_selected(window, pin, !pin.selected);
 }
 
-/// A plain click on a pin outside the selection ends the selection.
-unsafe fn click_without_ctrl(window: HWND, pin: &Pin) {
-    if !pin.selected {
-        for (other, other_pin) in pins() {
-            if other != window {
-                set_selected(other, &mut *other_pin, false);
-            }
-        }
+/// A plain click: this pin becomes the only selected one, like in a file list.
+unsafe fn select_only(window: HWND) {
+    for (other, other_pin) in pins() {
+        set_selected(other, &mut *other_pin, other == window);
     }
 }
 
@@ -547,19 +565,6 @@ pub unsafe fn close_all() {
     }
 }
 
-/// Keeps a pin above other windows, or lets them cover it.
-unsafe fn set_topmost(window: HWND, pin: &mut Pin, topmost: bool) {
-    pin.topmost = topmost;
-    if !topmost {
-        pin.above = false;
-    }
-    let after = if topmost { HWND_TOPMOST } else { HWND_NOTOPMOST };
-    SetWindowPos(window, after, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-    if !pin.popup.is_null() {
-        SetWindowPos(pin.popup, after, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-    }
-}
-
 /// The pin's image as shown, at its original size.
 unsafe fn pin_image(pin: &Pin) -> io::Result<Image> {
     pin.surface.image(pin.width, pin.height)
@@ -586,7 +591,7 @@ unsafe fn save_image(window: HWND, pin: &mut Pin) {
     }
 }
 
-/// The right-click menu: copy, save, image search, stay on top, groups and
+/// The right-click menu: copy, save, image search, 置顶 (above the other pins), groups and
 /// close. With several pins selected, the window and group items act on all of them.
 unsafe fn context_menu(window: HWND, pin: &mut Pin) {
     let menu = CreatePopupMenu();
@@ -607,9 +612,8 @@ unsafe fn context_menu(window: HWND, pin: &mut Pin) {
     }
     AppendMenuW(menu, MF_SEPARATOR, 0, null());
     let check = |on: bool| if on { MF_CHECKED } else { 0 };
-    let topmost_label = several("置顶", "置顶（选中的 {n} 张）");
-    AppendMenuW(menu, MF_STRING | check(pin.topmost), MENU_TOPMOST, topmost_label.as_ptr());
-    let above_label = several("在其他贴图上面", "在其他贴图上面（选中的 {n} 张）");
+    // Every pin stays above other windows; 置顶 keeps one above the other pins.
+    let above_label = several("置顶", "置顶（选中的 {n} 张）");
     AppendMenuW(menu, MF_STRING | check(pin.above), MENU_ABOVE, above_label.as_ptr());
     let groups_menu = CreatePopupMenu();
     let groups = groups();
@@ -642,19 +646,11 @@ unsafe fn context_menu(window: HWND, pin: &mut Pin) {
     match chosen as usize {
         MENU_COPY => copy_image(window, pin),
         MENU_SAVE => save_image(window, pin),
-        MENU_TOPMOST => {
-            let topmost = !pin.topmost;
-            for (other, other_pin) in &targets {
-                set_topmost(*other, &mut **other_pin, topmost);
-            }
-        }
         MENU_ABOVE => {
             let above = !pin.above;
             for (other, other_pin) in &targets {
-                if above && !(**other_pin).topmost {
-                    set_topmost(*other, &mut **other_pin, true);
-                }
                 (**other_pin).above = above;
+                InvalidateRect(*other, null(), 0);
             }
             raise_above_pins();
         }
@@ -1005,6 +1001,10 @@ unsafe fn track_leave(window: HWND, client: bool) {
 }
 
 unsafe fn set_hover(window: HWND, pin: &mut Pin, hovering: bool, button: bool) {
+    if pin.hovering != hovering {
+        pin.hovering = hovering;
+        InvalidateRect(window, null(), 0);
+    }
     if let Some(text) = &mut pin.text {
         if text.hovering != hovering || text.button_hovered != button {
             text.hovering = hovering;
@@ -1023,6 +1023,13 @@ unsafe extern "system" fn window_proc(
     let pin = GetWindowLongPtrW(window, GWLP_USERDATA) as *mut Pin;
     match message {
         WM_NCHITTEST => {
+            if !pin.is_null() {
+                let mut point = mouse_point(lparam);
+                ScreenToClient(window, &mut point);
+                if (*pin).over_pushpin(point) {
+                    return HTCLIENT as LRESULT;
+                }
+            }
             if !pin.is_null() && (*pin).translated.is_some() {
                 let mut point = mouse_point(lparam);
                 ScreenToClient(window, &mut point);
@@ -1051,7 +1058,7 @@ unsafe extern "system" fn window_proc(
             ScreenToClient(window, &mut point);
             let view = (*pin).view(window);
             let over_code = (*pin).text.as_ref().is_some_and(|text| text.code_at(view, point).is_some());
-            let cursor = if over_code || (*pin).over_button(window, point) || (*pin).over_toggle(window, point) {
+            let cursor = if over_code || (*pin).over_pushpin(point) || (*pin).over_button(window, point) || (*pin).over_toggle(window, point) {
                 IDC_HAND
             } else {
                 IDC_IBEAM
@@ -1104,8 +1111,29 @@ unsafe extern "system" fn window_proc(
                 SetForegroundWindow(window);
                 return 0;
             }
-            click_without_ctrl(window, &*pin);
-            return DefWindowProcW(window, message, wparam, lparam);
+            // Like a file list: pressing an unselected pin selects only it;
+            // pressing a selected one keeps the selection so a drag moves
+            // them all, and a click without dragging then keeps only it.
+            let selected = (*pin).selected;
+            if !selected {
+                select_only(window);
+            }
+            let mut before = RECT::default();
+            GetWindowRect(window, &mut before);
+            // Returns when the button is released, after any move.
+            let result = DefWindowProcW(window, message, wparam, lparam);
+            let mut after = RECT::default();
+            GetWindowRect(window, &mut after);
+            if selected && IsWindow(window) != 0 && before.left == after.left && before.top == after.top {
+                select_only(window);
+            }
+            return result;
+        }
+        WM_LBUTTONDOWN if !pin.is_null() && (*pin).over_pushpin(mouse_point(lparam)) => {
+            // The pushpin presses the pin down above the others, or lifts it.
+            (*pin).above = !(*pin).above;
+            raise_above_pins();
+            InvalidateRect(window, null(), 0);
         }
         WM_LBUTTONDOWN if !pin.is_null() && ctrl_down() => {
             toggle_selected(window, &mut *pin);
@@ -1126,7 +1154,8 @@ unsafe extern "system" fn window_proc(
             }
         }
         WM_LBUTTONDOWN if !pin.is_null() => {
-            click_without_ctrl(window, &*pin);
+            // A plain click on the text selects only this pin.
+            select_only(window);
             let point = mouse_point(lparam);
             let view = (*pin).view(window);
             let code = (*pin).text.as_ref().and_then(|text| text.code_at(view, point));
@@ -1156,6 +1185,9 @@ unsafe extern "system" fn window_proc(
                     InvalidateRect(window, null(), 0);
                 }
             }
+        }
+        WM_LBUTTONDBLCLK if !pin.is_null() && ctrl_down() => {
+            toggle_selected(window, &mut *pin);
         }
         WM_LBUTTONDBLCLK if !pin.is_null() => {
             // Like a terminal: double-click picks the word, a third click the line.
@@ -1285,6 +1317,11 @@ unsafe extern "system" fn window_proc(
             return DefWindowProcW(window, message, wparam, lparam);
         }
         WM_NCRBUTTONUP | WM_RBUTTONUP if !pin.is_null() => context_menu(window, &mut *pin),
+        // With Ctrl held, the second click of a double-click toggles the
+        // selection again instead of closing the pin.
+        WM_NCLBUTTONDBLCLK if !pin.is_null() && ctrl_down() => {
+            toggle_selected(window, &mut *pin);
+        }
         WM_NCLBUTTONDBLCLK => {
             DestroyWindow(window);
         }
@@ -1365,63 +1402,66 @@ unsafe extern "system" fn window_proc(
                 EndPaint(window, &paint);
                 return 0;
             };
-            let dc = buffer.dc;
-            let mut bounds = client;
-            let brush = GetStockObject(DC_BRUSH);
-            // A glow that fades from the theme accent into its shadow.
-            let palette = theme::palette();
-            for step in 0..5 {
-                let color = mix(palette.shadow, palette.accent_hover, step as f32 / 4.0);
-                SetDCBrushColor(dc, color);
-                FrameRect(dc, &bounds, brush);
-                InflateRect(&mut bounds, -1, -1);
-            }
-            let bounds = (*pin).image_rect();
-            SetStretchBltMode(dc, HALFTONE);
-            SetBrushOrgEx(dc, 0, 0, null_mut());
-            StretchBlt(
-                dc,
-                bounds.left,
-                bounds.top,
-                bounds.right - bounds.left,
-                bounds.bottom - bounds.top,
-                match &(*pin).translated {
-                    Some(translated) if !(*pin).show_original => translated.dc,
-                    _ => (*pin).surface.dc,
-                },
-                0,
-                0,
-                (*pin).width,
-                (*pin).height,
-                SRCCOPY,
-            );
-            if let Some(text) = (*pin).text.as_ref().filter(|_| !(*pin).showing_translation()) {
-                text.paint(dc, (*pin).view(window), bounds, &(*pin).fonts);
-            }
-            if let Some(button) = (*pin).toggle_button(dc) {
-                let palette = theme::palette();
-                let label = if (*pin).show_original { TOGGLE_TRANSLATION } else { TOGGLE_ORIGINAL };
-                ui::button(dc, button, label, (*pin).fonts.small, palette, false, palette.card, 7.0 * (*pin).scale);
-            }
-            if (*pin).selected {
-                // A solid accent frame over the image edge marks the selection.
-                SetDCBrushColor(dc, palette.accent);
-                let mut frame = bounds;
-                for _ in 0..(*pin).s(3).max(2) {
-                    FrameRect(dc, &frame, brush);
-                    InflateRect(&mut frame, -1, -1);
-                }
-            }
-            if let Some(badge) = (*pin).badge {
-                paint_badge(dc, bounds, &*pin, badge);
-            }
-            BitBlt(target, 0, 0, client.right, client.bottom, dc, 0, 0, SRCCOPY);
+            paint_pin(window, &*pin, buffer.dc, client);
+            BitBlt(target, 0, 0, client.right, client.bottom, buffer.dc, 0, 0, SRCCOPY);
             drop(buffer);
             EndPaint(window, &paint);
         }
         _ => return DefWindowProcW(window, message, wparam, lparam),
     }
     0
+}
+
+/// Draws the pin's whole client area into `dc`: glow, image, text layer,
+/// buttons, pushpin and badge.
+unsafe fn paint_pin(window: HWND, pin: &Pin, dc: HDC, client: RECT) {
+    let mut bounds = client;
+    let brush = GetStockObject(DC_BRUSH);
+    // A glow that fades into the shadow: a soft red on the selected pins,
+    // like Snipaste, a quiet border on the rest.
+    let palette = theme::palette();
+    let edge = if pin.selected { SELECTED_GLOW } else { mix(palette.key_border, palette.shadow, 0.35) };
+    for step in 0..5 {
+        // The outer rings lean towards the shadow so the red reads as see-through.
+        let reach = if pin.selected { 0.35 + 0.65 * step as f32 / 4.0 } else { step as f32 / 4.0 };
+        let color = mix(palette.shadow, edge, reach);
+        SetDCBrushColor(dc, color);
+        FrameRect(dc, &bounds, brush);
+        InflateRect(&mut bounds, -1, -1);
+    }
+    let bounds = pin.image_rect();
+    SetStretchBltMode(dc, HALFTONE);
+    SetBrushOrgEx(dc, 0, 0, null_mut());
+    StretchBlt(
+        dc,
+        bounds.left,
+        bounds.top,
+        bounds.right - bounds.left,
+        bounds.bottom - bounds.top,
+        match &pin.translated {
+            Some(translated) if !pin.show_original => translated.dc,
+            _ => pin.surface.dc,
+        },
+        0,
+        0,
+        pin.width,
+        pin.height,
+        SRCCOPY,
+    );
+    if let Some(text) = pin.text.as_ref().filter(|_| !pin.showing_translation()) {
+        text.paint(dc, pin.view(window), bounds, &pin.fonts);
+    }
+    if let Some(button) = pin.toggle_button(dc) {
+        let palette = theme::palette();
+        let label = if pin.show_original { TOGGLE_TRANSLATION } else { TOGGLE_ORIGINAL };
+        ui::button(dc, button, label, pin.fonts.small, palette, false, palette.card, 7.0 * pin.scale);
+    }
+    if let Some(rect) = pin.pushpin() {
+        paint_pushpin(dc, rect, pin.above);
+    }
+    if let Some(badge) = pin.badge {
+        paint_badge(dc, bounds, pin, badge);
+    }
 }
 
 /// The translation popup. Its state lives in the owning pin; keys go to the
@@ -1519,6 +1559,24 @@ unsafe extern "system" fn popup_proc(popup: HWND, message: u32, wparam: WPARAM, 
     0
 }
 
+/// The pushpin: pressed down (accent, filled) while the pin stays above the
+/// others, raised (quiet, outlined) otherwise.
+unsafe fn paint_pushpin(dc: HDC, rect: RECT, down: bool) {
+    let palette = theme::palette();
+    let size = rect.right - rect.left;
+    if let Some(graphics) = Graphics::new(dc) {
+        let bounds = ui::to_f(rect);
+        if down {
+            graphics.fill_round(bounds, size as f32 / 2.0, argb(palette.accent, 240));
+        } else {
+            graphics.fill_round(bounds, size as f32 / 2.0, argb(palette.card, 210));
+            graphics.stroke_round(ui::inset(bounds, 0.5), size as f32 / 2.0, argb(palette.key_border, 230), 1.0);
+        }
+    }
+    let color = if down { 0x00ff_ffff } else { palette.secondary };
+    icons::paint(dc, ui::inflate(rect, -(size / 5)), Icon::Pin, color);
+}
+
 unsafe fn paint_badge(dc: HDC, image: RECT, pin: &Pin, badge: Badge) {
     const WIDTH: i32 = 110;
     const HEIGHT: i32 = 24;
@@ -1600,9 +1658,7 @@ mod tests {
             assert!(shown(window_of(2)) != 0);
 
             let (window, pin) = all[0];
-            assert!(GetWindowLongW(window, GWL_EXSTYLE) as u32 & WS_EX_TOPMOST != 0);
-            set_topmost(window, &mut *pin, false);
-            assert!(GetWindowLongW(window, GWL_EXSTYLE) as u32 & WS_EX_TOPMOST == 0, "置顶 off");
+            assert!(GetWindowLongW(window, GWL_EXSTYLE) as u32 & WS_EX_TOPMOST != 0, "pins stay above other windows");
             let copy = pin_image(&*pin).unwrap();
             assert_eq!((copy.width, copy.height), (40, 30));
             assert_eq!(copy.pixels[..3], [128, 128, 128]);
@@ -1611,6 +1667,10 @@ mod tests {
             let current = pins();
             assert_eq!(current.len(), 3);
             let [(a, pa), (b, pb), (c, pc)] = [current[0], current[1], current[2]];
+            assert_eq!([(*pa).selected, (*pb).selected, (*pc).selected].iter().filter(|&&on| on).count(), 1, "the newest pin is selected");
+            for (window, pin) in &current {
+                set_selected(*window, &mut **pin, false);
+            }
             toggle_selected(a, &mut *pa);
             toggle_selected(b, &mut *pb);
             let mut picked: Vec<isize> = targets(a).iter().map(|(window, _)| *window as isize).collect();
@@ -1630,8 +1690,8 @@ mod tests {
             assert_eq!(rect(c), before_c);
             SendMessageW(a, WM_MOUSEWHEEL, (WHEEL_NOTCH as usize) << 16, 0);
             assert!((*pa).zoom > 1.0 && (*pb).zoom > 1.0 && (*pc).zoom == 1.0, "the wheel zooms the selection");
-            click_without_ctrl(c, &*pc);
-            assert!(!(*pa).selected && !(*pb).selected, "a plain click elsewhere ends the selection");
+            select_only(c);
+            assert!(!(*pa).selected && !(*pb).selected && (*pc).selected, "a plain click selects only that pin");
 
             // Hidden on its own until the tray shows everything again.
             (*pc).hidden = true;
@@ -1641,7 +1701,6 @@ mod tests {
             assert!(shown(c) != 0);
 
             // Kept above the other pins even when another comes to the front.
-            set_topmost(a, &mut *pa, true);
             (*pa).above = true;
             raise_above_pins();
             SetWindowPos(b, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
@@ -1653,6 +1712,47 @@ mod tests {
             close_all();
             assert!(pins().is_empty());
             CURRENT_GROUP.set(1);
+        }
+    }
+
+    /// Renders a selected pin kept above the others and a plain one to
+    /// `%TEMP%\snapshot-preview`. Run with `<test binary> pinned::tests::preview --ignored`.
+    #[test]
+    #[ignore]
+    fn preview() {
+        unsafe {
+            let _ = register(GetModuleHandleW(null()));
+            close_all();
+            let folder = std::env::temp_dir().join("snapshot-preview");
+            std::fs::create_dir_all(&folder).unwrap();
+            let image = || Image { width: 220, height: 120, pixels: [235, 225, 215, 0].repeat(220 * 120) };
+            open(image(), RECT { left: 40, top: 40, right: 260, bottom: 160 }, Mode::Plain).unwrap();
+            open(image(), RECT { left: 300, top: 40, right: 520, bottom: 160 }, Mode::Plain).unwrap();
+            let all = pins();
+            let (first, first_pin) = all.iter().copied().find(|(_, pin)| !(**pin).selected).unwrap();
+            (*first_pin).above = true;
+            select_only(first);
+            // The other one with the pointer over it: the raised pushpin shows.
+            if let Some((other, other_pin)) = all.iter().copied().find(|&(window, _)| window != first) {
+                set_hover(other, &mut *other_pin, true, false);
+            }
+            for (index, (window, _)) in pins().into_iter().enumerate() {
+                let mut bounds = RECT::default();
+                GetWindowRect(window, &mut bounds);
+                let (width, height) = (bounds.right - bounds.left, bounds.bottom - bounds.top);
+                let surface = Surface::new(null_mut(), width, height).unwrap();
+                let pin = GetWindowLongPtrW(window, GWLP_USERDATA) as *const Pin;
+                paint_pin(window, &*pin, surface.dc, RECT { left: 0, top: 0, right: width, bottom: height });
+                GdiFlush();
+                let bounds = RECT { left: 0, top: 0, right: width, bottom: height };
+                let mut picture = crate::capture::Desktop { bounds, surface }.crop(bounds).unwrap();
+                for pixel in picture.pixels.chunks_exact_mut(4) {
+                    pixel[3] = 255;
+                }
+                let name = if window == first { "selected-pinned" } else { "hovered" };
+                picture.save_png(&folder.join(format!("pin-{index}-{name}.png"))).unwrap();
+            }
+            close_all();
         }
     }
 
