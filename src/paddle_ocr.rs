@@ -106,6 +106,7 @@ pub fn recognize(image: &Image, folder: &Path) -> Result<Vec<Line>, String> {
     if trace {
         eprintln!("detect {:?} ({} boxes)", start.elapsed(), boxes.len());
     }
+    let mut boxes = join_touching(boxes);
     sort_reading_order(&mut boxes);
     let texts = recognize_boxes(&mut engine, image, &boxes).map_err(|error| format!("文字识别失败。\n{error}"))?;
     if trace {
@@ -118,6 +119,37 @@ pub fn recognize(image: &Image, folder: &Path) -> Result<Vec<Line>, String> {
         .filter(|(_, line)| !line.words.is_empty())
         .collect();
     Ok(merge_rows(pieces))
+}
+
+/// Small text gets cut inside identifiers, mostly at underscores; read
+/// apart, each piece sees half the character at the cut (`user_` +
+/// `_spec`, or `user.` + `_name`). Boxes on one row that touch, at the
+/// same text height, are read as one box instead: the recognizer reads the
+/// whole run and puts any spaces in itself.
+fn join_touching(mut boxes: Vec<Region>) -> Vec<Region> {
+    boxes.sort_by_key(|region| (region.left, region.top));
+    let mut joined: Vec<Region> = Vec::new();
+    for region in boxes {
+        let touches = joined.iter().rposition(|row| {
+            let (low, high) = (row.height().min(region.height()), row.height().max(region.height()));
+            let overlap = row.bottom.min(region.bottom) - row.top.max(region.top);
+            let gap = region.left - row.right;
+            high * 2 <= low * 3 && overlap * 10 >= low * 7 && gap * 2 <= low && region.right > row.right
+        });
+        match touches {
+            Some(index) => {
+                let row = &mut joined[index];
+                *row = Region {
+                    left: row.left.min(region.left),
+                    top: row.top.min(region.top),
+                    right: row.right.max(region.right),
+                    bottom: row.bottom.max(region.bottom),
+                };
+            }
+            None => joined.push(region),
+        }
+    }
+    joined
 }
 
 /// The detector splits a line at wide gaps (log columns, `key: value`);
@@ -590,6 +622,21 @@ mod tests {
         ]);
         let texts: Vec<String> = lines.iter().map(Line::text).collect();
         assert_eq!(texts, ["PY: Warning: QQ", "Actor", "next"]);
+    }
+
+    #[test]
+    fn boxes_touching_on_a_row_are_read_as_one() {
+        let at = |left, top, right, bottom| Region { left, top, right, bottom };
+        let joined = join_touching(vec![
+            at(46, 251, 155, 275),  // self.user.
+            at(150, 253, 195, 273), // _name_
+            at(193, 253, 243, 275), // list
+            at(258, 252, 300, 275), // apart by a space and more: its own box
+            at(150, 230, 200, 252), // the row above
+            at(300, 240, 330, 300), // a tall box beside: another size of text
+        ]);
+        assert!(joined.contains(&at(46, 251, 243, 275)), "{joined:?}");
+        assert_eq!(joined.len(), 4, "{joined:?}");
     }
 
     #[test]
