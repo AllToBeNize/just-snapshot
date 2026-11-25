@@ -162,14 +162,41 @@ impl TextLayer {
         pos.is_some() && std::mem::replace(&mut self.focus, pos) != pos
     }
 
-    /// Double-click: the token under the point, up to the nearest spaces.
+    /// Double-click: the word under the point the way a code editor sees
+    /// it: letters, digits and underscores together (`E_WindowPlacementAnchors`),
+    /// a run of CJK characters, or a single mark (`=`, `.`). It crosses OCR
+    /// word boundaries where nothing separates them in the picture.
     pub fn select_word(&mut self, view: View, point: POINT) {
-        if let Some((line, word, _)) = nearest(self.lines(), view.to_image(point)) {
-            let (from, to) = self.lines()[line].token(word);
-            let end = length(&self.lines()[line].words[to]);
-            self.anchor = Some((line, from, 0));
-            self.focus = Some((line, to, end));
+        let lines = self.lines();
+        let Some((line, word, offset)) = character_at(lines, view.to_image(point)) else { return };
+        // The line's characters in order; None where a space or gap separates words.
+        let mut characters: Vec<Option<(usize, usize, char)>> = Vec::new();
+        let mut at = 0;
+        for (index, candidate) in lines[line].words.iter().enumerate() {
+            if index > 0 && !lines[line].attached(index) {
+                characters.push(None);
+            }
+            for (position, character) in candidate.text.chars().enumerate() {
+                if index == word && position == offset {
+                    at = characters.len();
+                }
+                characters.push(Some((index, position, character)));
+            }
         }
+        let Some(Some((_, _, here))) = characters.get(at).copied() else { return };
+        let kind = class(here);
+        let same = |slot: Option<(usize, usize, char)>| kind != CharClass::Mark && slot.is_some_and(|(_, _, c)| class(c) == kind);
+        let mut first = at;
+        while first > 0 && same(characters[first - 1]) {
+            first -= 1;
+        }
+        let mut last = at;
+        while last + 1 < characters.len() && same(characters[last + 1]) {
+            last += 1;
+        }
+        let (Some((from_word, from_offset, _)), Some((to_word, to_offset, _))) = (characters[first], characters[last]) else { return };
+        self.anchor = Some((line, from_word, from_offset));
+        self.focus = Some((line, to_word, to_offset + 1));
     }
 
     /// Triple-click: the whole line.
@@ -248,14 +275,15 @@ impl TextLayer {
         let pad = 2.0 * view.scale;
         let range = self.range();
         if let Some((from, to)) = range {
+            let fixed = monospace(lines);
             for index in from.0..=to.0 {
                 let line = &lines[index];
                 let last = line.words.len() - 1;
                 let start = if index == from.0 { from } else { (index, 0, 0) };
                 let end = if index == to.0 { to } else { (index, last, length(&line.words[last])) };
                 let [_, top, _, bottom] = line.bounds();
-                let left = caret_x(&line.words[start.1], start.2);
-                let right = caret_x(&line.words[end.1], end.2);
+                let left = caret_x(&line.words[start.1], start.2, fixed);
+                let right = caret_x(&line.words[end.1], end.2, fixed);
                 if right - left < 0.5 {
                     continue;
                 }
@@ -388,11 +416,54 @@ fn length(word: &ocr::Word) -> usize {
     word.text.chars().count()
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum CharClass {
+    /// Letters, digits and underscores: an identifier.
+    Word,
+    Cjk,
+    /// Anything else stands alone.
+    Mark,
+}
+
+fn class(character: char) -> CharClass {
+    if is_wide(character) {
+        CharClass::Cjk
+    } else if character.is_alphanumeric() || character == '_' {
+        CharClass::Word
+    } else {
+        CharClass::Mark
+    }
+}
+
+fn is_wide(character: char) -> bool {
+    ('\u{2e80}'..='\u{9fff}').contains(&character) || ('\u{f900}'..='\u{ffef}').contains(&character)
+}
+
+/// Code is shot in fixed-width fonts: when the Latin words all come out
+/// about as wide per character, every character gets the same width.
+fn monospace(lines: &[Line]) -> bool {
+    let widths: Vec<f32> = lines
+        .iter()
+        .flat_map(|line| &line.words)
+        .filter(|word| word.text.is_ascii() && word.text.len() >= 3)
+        .map(|word| (word.rect[2] - word.rect[0]) / word.text.len() as f32)
+        .collect();
+    if widths.len() < 2 {
+        return false;
+    }
+    let mean = widths.iter().sum::<f32>() / widths.len() as f32;
+    let spread = (widths.iter().map(|width| (width - mean).powi(2)).sum::<f32>() / widths.len() as f32).sqrt();
+    spread < mean * 0.12
+}
+
 /// A character's share of its word's width: OCR only boxes whole words, so
-/// characters are placed by how wide they usually are.
-fn weight(character: char) -> f32 {
-    if ('\u{2e80}'..='\u{9fff}').contains(&character) || ('\u{f900}'..='\u{ffef}').contains(&character) {
+/// characters are placed by how wide they usually are, or all alike in a
+/// fixed-width font.
+fn weight(character: char, fixed: bool) -> f32 {
+    if is_wide(character) {
         2.0
+    } else if fixed {
+        1.0
     } else if "il.,:;|'!`Iıj ".contains(character) {
         0.6
     } else if "mwMW".contains(character) {
@@ -403,8 +474,8 @@ fn weight(character: char) -> f32 {
 }
 
 /// The x of the caret before character `offset` of `word`, in image pixels.
-fn caret_x(word: &ocr::Word, offset: usize) -> f32 {
-    let weights: Vec<f32> = word.text.chars().map(weight).collect();
+fn caret_x(word: &ocr::Word, offset: usize, fixed: bool) -> f32 {
+    let weights: Vec<f32> = word.text.chars().map(|character| weight(character, fixed)).collect();
     let total: f32 = weights.iter().sum::<f32>().max(f32::EPSILON);
     let before: f32 = weights.iter().take(offset).sum();
     word.rect[0] + (word.rect[2] - word.rect[0]) * before / total
@@ -423,9 +494,22 @@ fn nearest(lines: &[Line], (x, y): (f32, f32)) -> Option<Pos> {
     let (word, _) = words.iter().enumerate().min_by(|(_, a), (_, b)| {
         distance(a.rect[0], a.rect[2], x).total_cmp(&distance(b.rect[0], b.rect[2], x))
     })?;
+    let fixed = monospace(lines);
     let offset = (0..=length(&words[word]))
-        .min_by(|&a, &b| (caret_x(&words[word], a) - x).abs().total_cmp(&(caret_x(&words[word], b) - x).abs()))
+        .min_by(|&a, &b| (caret_x(&words[word], a, fixed) - x).abs().total_cmp(&(caret_x(&words[word], b, fixed) - x).abs()))
         .unwrap_or(0);
+    Some((line, word, offset))
+}
+
+/// The character under an image point (not the gap between characters).
+fn character_at(lines: &[Line], (x, y): (f32, f32)) -> Option<Pos> {
+    let (line, word, _) = nearest(lines, (x, y))?;
+    let target = &lines[line].words[word];
+    let fixed = monospace(lines);
+    let count = length(target);
+    let offset = (0..count)
+        .find(|&offset| x < caret_x(target, offset + 1, fixed))
+        .unwrap_or(count.saturating_sub(1));
     Some((line, word, offset))
 }
 
@@ -495,6 +579,55 @@ mod tests {
         assert_eq!(layer.copy_text(), "ere\r\n末行");
         assert!(layer.clear());
         assert_eq!(layer.copy_text(), "第一行\r\nSecond line here\r\n末行", "nothing selected copies all");
+    }
+
+    fn code_line(text: &str) -> Line {
+        // A fixed-width font: every character 8 px wide.
+        let mut left = 0.0;
+        let words = text
+            .split(' ')
+            .map(|piece| {
+                let width = piece.chars().count() as f32 * 8.0;
+                let word = Word { text: piece.into(), rect: [left, 0.0, left + width, 14.0], spaced: false };
+                left += width + 8.0;
+                word
+            })
+            .collect();
+        Line { words }
+    }
+
+    #[test]
+    fn double_click_picks_identifiers_like_a_code_editor() {
+        let mut layer = TextLayer::new();
+        layer.status = Status::Ready(vec![code_line("layout_mode=E_WindowPlacementAnchors.Environment, tool_tip=None")]);
+        let view = View { origin: POINT { x: 0, y: 0 }, zoom: 1.0, scale: 1.0 };
+        // Inside Placement, character 25.
+        layer.select_word(view, POINT { x: 25 * 8 + 3, y: 7 });
+        assert_eq!(layer.copy_text(), "E_WindowPlacementAnchors");
+        // On the underscore of layout_mode.
+        layer.select_word(view, POINT { x: 6 * 8 + 3, y: 7 });
+        assert_eq!(layer.copy_text(), "layout_mode");
+        // A mark stands alone.
+        layer.select_word(view, POINT { x: 11 * 8 + 3, y: 7 });
+        assert_eq!(layer.copy_text(), "=");
+        // Words split by OCR with nothing between them still join.
+        let mut split = code_line("layout _mode=E");
+        split.words[1].rect[0] = 48.0;
+        split.words[1].rect[2] = 48.0 + 8.0 * 7.0;
+        layer.status = Status::Ready(vec![split]);
+        layer.select_word(view, POINT { x: 2 * 8 + 3, y: 7 });
+        assert_eq!(layer.copy_text(), "layout_mode");
+    }
+
+    #[test]
+    fn a_fixed_width_font_places_every_character_alike() {
+        let lines = vec![code_line("self.window_manager.instance tool_tip=None, render_target")];
+        assert!(monospace(&lines));
+        let word = &lines[0].words[0];
+        assert_eq!(caret_x(word, 4, true), 32.0, "after self, 4 × 8 px");
+        // Proportional UI text is not taken for fixed-width.
+        let ui = vec![line(0.0, &["Save", "illicit", "MMMM", "window"])];
+        assert!(!monospace(&ui));
     }
 
     #[test]

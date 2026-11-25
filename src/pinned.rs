@@ -24,7 +24,7 @@ use std::{
 use windows_sys::{
     core::w,
     Win32::{
-        Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM},
+        Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM},
         Graphics::Gdi::*,
         System::LibraryLoader::GetModuleHandleW,
         UI::{
@@ -46,8 +46,9 @@ const TOGGLE_TRANSLATION: &str = "显示译文";
 const POPUP_CLASS: *const u16 = w!("Snapshot.Translation");
 /// Gap between a pin and its translation popup.
 const POPUP_GAP: i32 = 8;
-const GLOW: i32 = 5;
-/// The selected pins' halo (COLORREF, 0x00BBGGRR): Snipaste's soft red.
+/// Room around the image for its shadow and selection ring.
+const GLOW: i32 = 8;
+/// The selected pins' ring (COLORREF, 0x00BBGGRR): Snipaste's soft red.
 const SELECTED_GLOW: u32 = 0x006f_6ff2;
 const BADGE_TIMER: usize = 1;
 const BADGE_DURATION_MS: u32 = 1200;
@@ -77,6 +78,8 @@ thread_local! {
     static HIDDEN_GROUPS: RefCell<Vec<u32>> = const { RefCell::new(Vec::new()) };
     /// Recently closed pins, newest first, for 找回关闭的贴图.
     static CLOSED: RefCell<Vec<Closed>> = const { RefCell::new(Vec::new()) };
+    /// Pins to draw again once the current message is handled.
+    static DIRTY: RefCell<Vec<isize>> = const { RefCell::new(Vec::new()) };
 }
 
 /// How many closed pins can be brought back.
@@ -388,11 +391,8 @@ pub unsafe fn open(image: Image, bounds: RECT, mode: Mode) -> io::Result<()> {
     let recognize = pin.source.is_some();
     let pin = Box::into_raw(pin);
     SetWindowLongPtrW(window, GWLP_USERDATA, pin as isize);
-    if SetLayeredWindowAttributes(window, 0, 255, LWA_ALPHA) == 0 {
-        let error = io::Error::last_os_error();
-        DestroyWindow(window);
-        return Err(error);
-    }
+    // Per-pixel alpha: the shadow and the selection ring are see-through.
+    present(window, &*pin);
     ShowWindow(window, SW_SHOW);
     SetForegroundWindow(window);
     if regrouped {
@@ -408,6 +408,7 @@ pub unsafe fn open(image: Image, bounds: RECT, mode: Mode) -> io::Result<()> {
     // A new pin starts on top and selected; pins kept above the others go back over it.
     select_only(window);
     raise_above_pins();
+    flush();
     Ok(())
 }
 
@@ -493,14 +494,10 @@ pub unsafe fn restore_closed(index: usize) -> Result<(), String> {
         let (width, height) = (*pin).window_size();
         SetWindowPos(window, null_mut(), 0, 0, width, height, SWP_NOMOVE | SWP_NOACTIVATE | SWP_NOZORDER);
     }
-    if closed.opacity != 100 {
-        let alpha = ((closed.opacity * 255 + 50) / 100) as u8;
-        if SetLayeredWindowAttributes(window, 0, alpha, LWA_ALPHA) != 0 {
-            (*pin).opacity = closed.opacity;
-        }
-    }
+    (*pin).opacity = closed.opacity;
     raise_above_pins();
-    InvalidateRect(window, null(), 0);
+    invalidate(window);
+    flush();
     Ok(())
 }
 
@@ -608,7 +605,7 @@ unsafe fn targets(window: HWND) -> Vec<(HWND, *mut Pin)> {
 unsafe fn set_selected(window: HWND, pin: &mut Pin, selected: bool) {
     if pin.selected != selected {
         pin.selected = selected;
-        InvalidateRect(window, null(), 0);
+        invalidate(window);
     }
 }
 
@@ -670,11 +667,7 @@ unsafe fn zoom_by(window: HWND, pin: &mut Pin, factor: f64) {
 }
 
 unsafe fn change_opacity(window: HWND, pin: &mut Pin, notches: i32) {
-    let opacity = (pin.opacity + notches * i32::from(opacity_step())).clamp(MIN_OPACITY, 100);
-    let alpha = ((opacity * 255 + 50) / 100) as u8;
-    if SetLayeredWindowAttributes(window, 0, alpha, LWA_ALPHA) != 0 {
-        pin.opacity = opacity;
-    }
+    pin.opacity = (pin.opacity + notches * i32::from(opacity_step())).clamp(MIN_OPACITY, 100);
     show_badge(window, pin, Badge::Opacity);
 }
 
@@ -682,7 +675,7 @@ unsafe fn show_badge(window: HWND, pin: &mut Pin, badge: Badge) {
     if SetTimer(window, BADGE_TIMER, BADGE_DURATION_MS, None) != 0 {
         pin.badge = Some(badge);
     }
-    InvalidateRect(window, null(), 0);
+    invalidate(window);
 }
 
 pub unsafe fn close_all() {
@@ -783,7 +776,7 @@ unsafe fn context_menu(window: HWND, pin: &mut Pin) {
             let above = !pin.above;
             for (other, other_pin) in &targets {
                 (**other_pin).above = above;
-                InvalidateRect(*other, null(), 0);
+                invalidate(*other);
             }
             raise_above_pins();
         }
@@ -960,7 +953,7 @@ unsafe fn start_recognition(window: HWND, pin: &mut Pin) {
         pane.phase = Phase::Recognizing;
         SetTimer(window, SHIMMER_TIMER, SHIMMER_FRAME_MS, None);
     }
-    InvalidateRect(window, null(), 0);
+    invalidate(window);
     refresh_popup(window, pin);
     let target = window as isize;
     std::thread::spawn(move || {
@@ -977,7 +970,7 @@ unsafe fn start_recognition(window: HWND, pin: &mut Pin) {
 unsafe fn start_translation(window: HWND, pin: &mut Pin) {
     // Back to the original until the new translation arrives.
     if pin.translated.take().is_some() {
-        InvalidateRect(window, null(), 0);
+        invalidate(window);
     }
     let Some(pane) = &mut pin.translate else { return };
     let lines = pin.text.as_ref().map_or(&[][..], TextLayer::lines);
@@ -1133,7 +1126,7 @@ unsafe fn toast(window: HWND, pin: &mut Pin, message: String) {
         pin.note = message;
         pin.badge = Some(Badge::Note);
     }
-    InvalidateRect(window, null(), 0);
+    invalidate(window);
 }
 
 unsafe fn copy(window: HWND, pin: &mut Pin, all: bool) {
@@ -1169,18 +1162,117 @@ unsafe fn track_leave(window: HWND, client: bool) {
 unsafe fn set_hover(window: HWND, pin: &mut Pin, hovering: bool, button: bool) {
     if pin.hovering != hovering {
         pin.hovering = hovering;
-        InvalidateRect(window, null(), 0);
+        invalidate(window);
     }
     if let Some(text) = &mut pin.text {
         if text.hovering != hovering || text.button_hovered != button {
             text.hovering = hovering;
             text.button_hovered = button;
-            InvalidateRect(window, null(), 0);
+            invalidate(window);
         }
     }
 }
 
-unsafe extern "system" fn window_proc(
+/// Handles the message, then draws the pins that changed: layered windows
+/// fed by `UpdateLayeredWindow` get no WM_PAINT.
+unsafe extern "system" fn window_proc(window: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    let result = pin_proc(window, message, wparam, lparam);
+    flush();
+    result
+}
+
+/// Marks a pin to be drawn again after the current message.
+unsafe fn invalidate(window: HWND) {
+    DIRTY.with_borrow_mut(|dirty| {
+        if !dirty.contains(&(window as isize)) {
+            dirty.push(window as isize);
+        }
+    });
+}
+
+/// Draws every pin marked by `invalidate`.
+unsafe fn flush() {
+    for window in DIRTY.take() {
+        let window = window as HWND;
+        let pin = GetWindowLongPtrW(window, GWLP_USERDATA) as *const Pin;
+        if IsWindow(window) != 0 && !pin.is_null() {
+            present(window, &*pin);
+        }
+    }
+}
+
+/// Renders the pin with per-pixel alpha and hands it to the window.
+unsafe fn present(window: HWND, pin: &Pin) {
+    let (width, height) = pin.window_size();
+    let Ok(surface) = Surface::new(null_mut(), width, height) else { return };
+    paint_pin(window, pin, surface.dc, RECT { left: 0, top: 0, right: width, bottom: height });
+    GdiFlush();
+    let edge = if pin.selected {
+        Edge::Selected
+    } else if pin.hovering {
+        Edge::Hovered
+    } else {
+        Edge::Plain
+    };
+    compose(surface.bytes_mut(width, height), width, height, pin.image_rect(), edge, theme::palette().accent);
+    let blend = BLENDFUNCTION {
+        BlendOp: AC_SRC_OVER as u8,
+        BlendFlags: 0,
+        SourceConstantAlpha: ((pin.opacity * 255 + 50) / 100) as u8,
+        AlphaFormat: AC_SRC_ALPHA as u8,
+    };
+    let size = SIZE { cx: width, cy: height };
+    let origin = POINT::default();
+    let screen = GetDC(null_mut());
+    UpdateLayeredWindow(window, screen, null(), &size, surface.dc, &origin, 0, &blend, ULW_ALPHA);
+    ReleaseDC(null_mut(), screen);
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Edge {
+    Plain,
+    Hovered,
+    Selected,
+}
+
+/// Turns the painted pin into premultiplied BGRA: the image opaque, around
+/// it a soft see-through shadow, and on hover or selection a thin ring
+/// hugging the image (the ring color over the shadow).
+fn compose(pixels: &mut [u8], width: i32, height: i32, image: RECT, edge: Edge, accent: u32) {
+    let glow = GLOW as f32;
+    for y in 0..height {
+        let cy = y as f32 + 0.5;
+        let dy = (image.top as f32 - cy).max(cy - image.bottom as f32).max(0.0);
+        for x in 0..width {
+            let index = ((y * width + x) * 4) as usize;
+            let cx = x as f32 + 0.5;
+            let dx = (image.left as f32 - cx).max(cx - image.right as f32).max(0.0);
+            if dx == 0.0 && dy == 0.0 {
+                pixels[index + 3] = 255;
+                continue;
+            }
+            let distance = (dx * dx + dy * dy).sqrt();
+            let fade = (1.0 - distance / glow).clamp(0.0, 1.0);
+            let shadow = 0.22 * fade * fade;
+            // A ring `width` px wide with a soft outer pixel.
+            let ring = |width: f32, alpha: f32| alpha * (1.0 - (distance - width).max(0.0) / 1.2).clamp(0.0, 1.0);
+            let (color, ring_alpha) = match edge {
+                Edge::Plain => (0, 0.0),
+                Edge::Hovered => (mix(SELECTED_GLOW, accent, 0.5), ring(1.5, 0.55)),
+                Edge::Selected => (SELECTED_GLOW, ring(2.0, 0.9)),
+            };
+            let alpha = ring_alpha + shadow * (1.0 - ring_alpha);
+            // Premultiplied: the shadow is black, so only the ring adds color.
+            let channel = |shift: u32| ((color >> shift) & 0xff) as f32 * ring_alpha;
+            pixels[index] = channel(16).round() as u8;
+            pixels[index + 1] = channel(8).round() as u8;
+            pixels[index + 2] = channel(0).round() as u8;
+            pixels[index + 3] = (alpha * 255.0).round() as u8;
+        }
+    }
+}
+
+unsafe extern "system" fn pin_proc(
     window: HWND,
     message: u32,
     wparam: WPARAM,
@@ -1241,14 +1333,14 @@ unsafe extern "system" fn window_proc(
             if let Some(text) = &mut (*pin).text {
                 let code = if text.selecting { None } else { text.code_at(view, point) };
                 if std::mem::replace(&mut text.hovered_code, code) != code {
-                    InvalidateRect(window, null(), 0);
+                    invalidate(window);
                 }
             }
             let view = (*pin).view(window);
             if let Some(text) = &mut (*pin).text {
                 if text.selecting && text.extend(view, point) {
                     (*pin).dragged = true;
-                    InvalidateRect(window, null(), 0);
+                    invalidate(window);
                 }
             }
         }
@@ -1257,16 +1349,16 @@ unsafe extern "system" fn window_proc(
             set_hover(window, &mut *pin, true, false);
         }
         WM_MOUSELEAVE | WM_NCMOUSELEAVE if !pin.is_null() => {
-            // Moving between the frame and the text also "leaves"; only the real exit counts.
+            // Moving between the frame and the text also "leaves"; only the
+            // real exit counts. Pins overlap, so ask what is under the
+            // pointer instead of whether it is inside this pin's bounds.
             let mut point = POINT::default();
-            let mut bounds = RECT::default();
             GetCursorPos(&mut point);
-            GetWindowRect(window, &mut bounds);
-            if !contains(bounds, point) {
+            if WindowFromPoint(point) != window {
                 set_hover(window, &mut *pin, false, false);
                 if let Some(text) = &mut (*pin).text {
                     if text.hovered_code.take().is_some() {
-                        InvalidateRect(window, null(), 0);
+                        invalidate(window);
                     }
                 }
             }
@@ -1274,7 +1366,7 @@ unsafe extern "system" fn window_proc(
         WM_NCLBUTTONDOWN if !pin.is_null() && wparam == HTCAPTION as usize => {
             // A click off the text clears the text selection.
             if (*pin).text.as_mut().is_some_and(TextLayer::clear) {
-                InvalidateRect(window, null(), 0);
+                invalidate(window);
             }
             if ctrl_down() {
                 toggle_selected(window, &mut *pin);
@@ -1303,7 +1395,7 @@ unsafe extern "system" fn window_proc(
             // The pushpin presses the pin down above the others, or lifts it.
             (*pin).above = !(*pin).above;
             raise_above_pins();
-            InvalidateRect(window, null(), 0);
+            invalidate(window);
         }
         WM_LBUTTONDOWN if !pin.is_null() && ctrl_down() => {
             toggle_selected(window, &mut *pin);
@@ -1314,13 +1406,13 @@ unsafe extern "system" fn window_proc(
         }
         WM_LBUTTONDOWN if !pin.is_null() && (*pin).over_toggle(window, mouse_point(lparam)) => {
             (*pin).show_original = !(*pin).show_original;
-            InvalidateRect(window, null(), 0);
+            invalidate(window);
         }
         WM_LBUTTONDOWN if !pin.is_null() && is_triple_click(&mut *pin, mouse_point(lparam)) => {
             let view = (*pin).view(window);
             if let Some(text) = &mut (*pin).text {
                 text.select_line(view, mouse_point(lparam));
-                InvalidateRect(window, null(), 0);
+                invalidate(window);
             }
         }
         WM_LBUTTONDOWN if !pin.is_null() => {
@@ -1339,7 +1431,7 @@ unsafe extern "system" fn window_proc(
                     text.begin(view, point);
                     (*pin).dragged = false;
                     SetCapture(window);
-                    InvalidateRect(window, null(), 0);
+                    invalidate(window);
                 }
             }
         }
@@ -1352,7 +1444,7 @@ unsafe extern "system" fn window_proc(
                         text.clear();
                     }
                     ReleaseCapture();
-                    InvalidateRect(window, null(), 0);
+                    invalidate(window);
                 }
             }
         }
@@ -1365,7 +1457,7 @@ unsafe extern "system" fn window_proc(
             let view = (*pin).view(window);
             if let Some(text) = &mut (*pin).text {
                 text.select_word(view, mouse_point(lparam));
-                InvalidateRect(window, null(), 0);
+                invalidate(window);
             }
         }
         WM_CAPTURECHANGED if !pin.is_null() => {
@@ -1394,7 +1486,7 @@ unsafe extern "system" fn window_proc(
                     if let Some(text) = &mut (*pin).text {
                         text.status = Status::Failed;
                     }
-                    InvalidateRect(window, null(), 0);
+                    invalidate(window);
                     match &mut (*pin).translate {
                         // The popup shows the whole error with a retry button.
                         Some(pane) => {
@@ -1424,7 +1516,7 @@ unsafe extern "system" fn window_proc(
                         .and_then(|image| image.into_surface().ok());
                     (*pin).translated = overlay.map(|(surface, _, _)| surface);
                     (*pin).show_original = false;
-                    InvalidateRect(window, null(), 0);
+                    invalidate(window);
                 }
                 let pane = (*pin).translate.as_mut().unwrap();
                 pane.phase = match outcome {
@@ -1467,7 +1559,7 @@ unsafe extern "system" fn window_proc(
             if let Some(text) = &mut (*pin).text {
                 text.toast = None;
             }
-            InvalidateRect(window, null(), 0);
+            invalidate(window);
         }
         WM_WINDOWPOSCHANGED if !pin.is_null() => {
             if !(*pin).popup.is_null() {
@@ -1484,7 +1576,7 @@ unsafe extern "system" fn window_proc(
         // Clicking another window clears the text selection too.
         WM_ACTIVATE if !pin.is_null() && (wparam & 0xffff) as u32 == WA_INACTIVE => {
             if (*pin).text.as_mut().is_some_and(TextLayer::clear) {
-                InvalidateRect(window, null(), 0);
+                invalidate(window);
             }
             return DefWindowProcW(window, message, wparam, lparam);
         }
@@ -1506,7 +1598,7 @@ unsafe extern "system" fn window_proc(
         WM_KEYDOWN if wparam == VK_ESCAPE as usize => {
             let cleared = !pin.is_null() && (*pin).text.as_mut().is_some_and(TextLayer::clear);
             if cleared {
-                InvalidateRect(window, null(), 0);
+                invalidate(window);
             } else {
                 // Esc on a selected pin closes the whole selection.
                 for (other, _) in targets(window) {
@@ -1534,7 +1626,7 @@ unsafe extern "system" fn window_proc(
                 b'A' => {
                     if let Some(text) = &mut (*pin).text {
                         text.select_all();
-                        InvalidateRect(window, null(), 0);
+                        invalidate(window);
                     }
                 }
                 _ => {}
@@ -1568,22 +1660,13 @@ unsafe extern "system" fn window_proc(
         WM_TIMER if !pin.is_null() && wparam == BADGE_TIMER => {
             KillTimer(window, BADGE_TIMER);
             (*pin).badge = None;
-            InvalidateRect(window, null(), 0);
+            invalidate(window);
         }
         WM_PAINT if !pin.is_null() => {
             let mut paint = PAINTSTRUCT::default();
-            let target = BeginPaint(window, &mut paint);
-            let mut client = RECT::default();
-            GetClientRect(window, &mut client);
-            // Paint off screen so the selection does not flicker while dragging.
-            let Ok(buffer) = Surface::new(target, client.right, client.bottom) else {
-                EndPaint(window, &paint);
-                return 0;
-            };
-            paint_pin(window, &*pin, buffer.dc, client);
-            BitBlt(target, 0, 0, client.right, client.bottom, buffer.dc, 0, 0, SRCCOPY);
-            drop(buffer);
+            BeginPaint(window, &mut paint);
             EndPaint(window, &paint);
+            invalidate(window);
         }
         _ => return DefWindowProcW(window, message, wparam, lparam),
     }
@@ -1593,28 +1676,8 @@ unsafe extern "system" fn window_proc(
 /// Draws the pin's whole client area into `dc`: glow, image, text layer,
 /// buttons, pushpin and badge.
 unsafe fn paint_pin(window: HWND, pin: &Pin, dc: HDC, client: RECT) {
-    let mut bounds = client;
-    let brush = GetStockObject(DC_BRUSH);
-    // A glow that fades into the shadow, outer ring first: a soft red halo
-    // on the selected pins (like Snipaste), a fainter red-to-blue blend
-    // under the pointer, a quiet border on the rest. The rings lean towards
-    // the shadow so the color reads as see-through.
-    let palette = theme::palette();
-    let quiet = mix(palette.key_border, palette.shadow, 0.35);
-    for step in 0..5 {
-        let inward = step as f32 / 4.0;
-        let (edge, reach) = if pin.selected {
-            (SELECTED_GLOW, 0.15 + 0.5 * inward)
-        } else if pin.hovering {
-            (mix(SELECTED_GLOW, palette.accent, inward), 0.12 + 0.38 * inward)
-        } else {
-            (quiet, inward)
-        };
-        let color = mix(palette.shadow, edge, reach);
-        SetDCBrushColor(dc, color);
-        FrameRect(dc, &bounds, brush);
-        InflateRect(&mut bounds, -1, -1);
-    }
+    // The shadow and the selection ring are added with alpha in `compose`.
+    ui::fill(dc, client, 0);
     let bounds = pin.image_rect();
     SetStretchBltMode(dc, HALFTONE);
     SetBrushOrgEx(dc, 0, 0, null_mut());
@@ -1802,6 +1865,27 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_shadow_is_see_through_and_the_selection_ring_thin() {
+        let (width, height) = (40, 30);
+        let image = RECT { left: GLOW, top: GLOW, right: width - GLOW, bottom: height - GLOW };
+        let alpha = |edge: Edge, x: i32, y: i32| {
+            let mut pixels = vec![0u8; (width * height * 4) as usize];
+            compose(&mut pixels, width, height, image, edge, 0x00ff_8040);
+            pixels[((y * width + x) * 4 + 3) as usize]
+        };
+        let middle = height / 2;
+        assert_eq!(alpha(Edge::Plain, width / 2, middle), 255, "the image is opaque");
+        // Plain: a faint shadow fading to nothing at the outer edge.
+        let next_to = alpha(Edge::Plain, GLOW - 1, middle);
+        assert!(next_to > 20 && next_to < 70, "{next_to}");
+        assert_eq!(alpha(Edge::Plain, 0, middle), 0);
+        // Selected: a strong ring right at the edge, back to the shadow within a few pixels.
+        assert!(alpha(Edge::Selected, GLOW - 1, middle) > 200);
+        assert!(alpha(Edge::Selected, GLOW - 5, middle) < 40, "thin, not a halo");
+        assert!(alpha(Edge::Hovered, GLOW - 1, middle) > next_to && alpha(Edge::Hovered, GLOW - 1, middle) < alpha(Edge::Selected, GLOW - 1, middle));
+    }
+
+    #[test]
     fn the_recognition_toast_counts_text_and_codes() {
         let qr = codes::Code { text: "x".into(), matrix: true, rect: [0.0; 4] };
         let bar = codes::Code { text: "y".into(), matrix: false, rect: [0.0; 4] };
@@ -1964,9 +2048,16 @@ mod tests {
                 let pin = GetWindowLongPtrW(window, GWLP_USERDATA) as *const Pin;
                 paint_pin(window, &*pin, surface.dc, RECT { left: 0, top: 0, right: width, bottom: height });
                 GdiFlush();
+                let edge = if (*pin).selected { Edge::Selected } else if (*pin).hovering { Edge::Hovered } else { Edge::Plain };
+                compose(surface.bytes_mut(width, height), width, height, (*pin).image_rect(), edge, theme::palette().accent);
                 let bounds = RECT { left: 0, top: 0, right: width, bottom: height };
                 let mut picture = crate::capture::Desktop { bounds, surface }.crop(bounds).unwrap();
+                // Over a mid-gray desktop, as the window would show.
                 for pixel in picture.pixels.chunks_exact_mut(4) {
+                    let keep = 255 - u32::from(pixel[3]);
+                    for channel in &mut pixel[..3] {
+                        *channel = (u32::from(*channel) + 90 * keep / 255) as u8;
+                    }
                     pixel[3] = 255;
                 }
                 let name = if window == first { "selected-pinned" } else if window == hovered { "hovered" } else { "plain" };
