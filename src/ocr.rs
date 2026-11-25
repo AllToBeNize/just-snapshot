@@ -85,20 +85,6 @@ impl Line {
         let gap = word.rect[0] - before.rect[2];
         !word.spaced && !needs_space(&before.text, &word.text) && gap <= height * 0.3
     }
-
-    /// The words that read as one token around `index`, the way a terminal
-    /// picks a word on double-click: everything up to the nearest space.
-    pub fn token(&self, index: usize) -> (usize, usize) {
-        let mut from = index;
-        while self.attached(from) {
-            from -= 1;
-        }
-        let mut to = index;
-        while self.attached(to + 1) {
-            to += 1;
-        }
-        (from, to)
-    }
 }
 
 /// Drops what is not text at the ends of each line: the outliner's actor
@@ -413,16 +399,16 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn double_click_tokens_stop_at_spaces_like_a_terminal() {
-        let line = Line { words: vec![at("0", 0.0, 15.0), at("复", 30.0, 15.0), at("制", 45.0, 15.0), at("Recast-Nav", 70.0, 90.0), at("(Editor)", 170.0, 60.0)] };
-        assert_eq!(line.token(1), (1, 2), "a Chinese phrase is one token");
-        assert_eq!(line.token(3), (3, 3));
-        // 复制 then Latin with no space between reads 复制Recast-Nav: one token.
+    fn words_attach_unless_a_space_or_gap_separates_them() {
+        let line = Line { words: vec![at("0", 0.0, 15.0), at("复", 30.0, 15.0), at("制", 45.0, 15.0), at("Save-As", 70.0, 90.0), at("(Copy)", 170.0, 60.0)] };
+        assert!(line.attached(2), "a Chinese phrase holds together");
+        assert!(!line.attached(1) && !line.attached(3) && !line.attached(4));
+        // 复制 then Latin with no gap between reads 复制Save-As.
         let mut joined = line.clone();
         joined.words[3].rect = [60.0, 0.0, 150.0, 16.0];
         assert!(joined.attached(3));
         joined.words[3].spaced = true;
-        assert!(!joined.attached(3) && joined.token(2) == (1, 2));
+        assert!(!joined.attached(3));
     }
 
     #[test]

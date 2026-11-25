@@ -1268,11 +1268,11 @@ fn compose(pixels: &mut [u8], width: i32, height: i32, image: RECT, edge: Edge, 
             let (color, ring_alpha) = match edge {
                 Edge::Plain => (0, 0.0),
                 Edge::Hovered => (mix(HOVER_RED, accent, 0.5), ring(1.5, 0.55)),
-                Edge::Selected => (accent, ring(2.0, 0.85)),
+                Edge::Selected => (accent, ring(1.0, 0.85)),
                 // The selection ring as it is, with the hover's red in a
                 // 5 px band around it, denser towards the image.
                 Edge::SelectedHovered => {
-                    let blue = ring(2.0, 0.85);
+                    let blue = ring(1.0, 0.85);
                     let inward = (1.0 - distance / 5.0).clamp(0.0, 1.0);
                     let red = (0.18 + 0.37 * inward) * (5.0 - distance).clamp(0.0, 1.0);
                     if blue >= red { (accent, blue) } else { (mix(HOVER_RED, accent, inward * 0.5), red) }
