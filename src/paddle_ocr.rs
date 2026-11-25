@@ -135,10 +135,7 @@ fn merge_rows(pieces: Vec<(Region, Line)>) -> Vec<Line> {
         match joins {
             Some(index) => {
                 let (row, existing) = &mut rows[index];
-                if let Some(first) = line.words.first_mut() {
-                    first.spaced = true;
-                }
-                existing.words.append(&mut line.words);
+                join_words(&mut existing.words, &mut line.words);
                 *row = Region {
                     left: row.left.min(region.left),
                     top: row.top.min(region.top),
@@ -150,6 +147,35 @@ fn merge_rows(pieces: Vec<(Region, Line)>) -> Vec<Line> {
         }
     }
     rows.into_iter().map(|(_, line)| line).collect()
+}
+
+/// Appends the words of a box to the row before it. Small text gets split
+/// inside identifiers (at underscores mostly), so the boxes only read as
+/// apart where their characters leave a gap; where the boxes overlap, a
+/// character both of them read is kept once (`user_` + `_name`).
+fn join_words(row: &mut Vec<Word>, words: &mut Vec<Word>) {
+    let (Some(before), Some(first)) = (row.last(), words.first_mut()) else {
+        row.append(words);
+        return;
+    };
+    let height = (first.rect[3] - first.rect[1]).max(before.rect[3] - before.rect[1]);
+    let character = (before.rect[2] - before.rect[0]) / before.text.chars().count().max(1) as f32;
+    let overlap = before.rect[2] - first.rect[0];
+    let repeated = before.text.chars().last().filter(|&last| first.text.starts_with(last));
+    // A cut right on an underscore leaves it at the edge of both boxes.
+    let twice = |last: char| overlap >= character * 0.3 || (last == '_' && overlap >= -height * 0.2);
+    if let Some(last) = repeated.filter(|&last| twice(last)) {
+        first.text.drain(..last.len_utf8());
+        first.rect[0] = first.rect[0].max(before.rect[2]);
+    }
+    // Word boxes reach a little past their characters, so a space between
+    // words leaves a gap of about a third of the height, a cut inside a word
+    // none.
+    first.spaced = first.rect[0] - before.rect[2] > height * 0.2;
+    if first.text.is_empty() {
+        words.remove(0);
+    }
+    row.append(words);
 }
 
 /// Pixel bounds in the source image, right and bottom exclusive.
@@ -533,6 +559,11 @@ mod tests {
             println!("== {name}: {} lines in {:?}", lines.len(), start.elapsed());
             for line in &lines {
                 println!("  {}", line.text());
+                if std::env::var_os("SNAPSHOT_OCR_WORDS").is_some() {
+                    for word in &line.words {
+                        println!("    {:?} {:?} spaced={}", word.text, word.rect, word.spaced);
+                    }
+                }
             }
             if name == "rendered" {
                 let text = ocr::text(&lines);
@@ -559,6 +590,29 @@ mod tests {
         ]);
         let texts: Vec<String> = lines.iter().map(Line::text).collect();
         assert_eq!(texts, ["PY: Warning: QQ", "Actor", "next"]);
+    }
+
+    #[test]
+    fn identifiers_cut_into_boxes_join_back_without_spaces() {
+        let piece = |left: f32, right: f32, text: &str| {
+            let region = Region { left: left as i32, top: 0, right: right as i32, bottom: 18 };
+            (region, Line { words: vec![Word { text: text.into(), rect: [left, 0.0, right, 18.0], spaced: false }] })
+        };
+        // Read from a pin: the underscore at the cut came back in both boxes.
+        let lines = merge_rows(vec![
+            piece(15.0, 32.5, "if"),
+            piece(39.5, 108.5, "user_"),
+            piece(103.0, 141.7, "_name"),
+            piece(147.2, 163.5, "is"),
+            piece(170.3, 197.0, "not"),
+            piece(197.5, 230.0, "None:"),
+        ]);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].text(), "if user_name is not None:");
+        assert!(lines[0].attached(2), "double-click crosses the cut");
+        // Boxes that only touch at the cut.
+        let lines = merge_rows(vec![piece(38.3, 86.0, "u_cfg_"), piece(86.0, 132.5, "_out_"), piece(128.6, 172.9, "proxy")]);
+        assert_eq!(lines[0].text(), "u_cfg_out_path");
     }
 
     #[test]

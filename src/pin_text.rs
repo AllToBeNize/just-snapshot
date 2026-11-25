@@ -481,15 +481,30 @@ fn caret_x(word: &ocr::Word, offset: usize, fixed: bool) -> f32 {
     word.rect[0] + (word.rect[2] - word.rect[0]) * before / total
 }
 
-/// The caret nearest to an image point: the closest line by height, then
-/// the closest gap between characters along x.
+/// The caret nearest to an image point: the closest line by height (of
+/// lines side by side at that height, like line numbers beside code, the
+/// closest along x), then the closest gap between characters along x.
 fn nearest(lines: &[Line], (x, y): (f32, f32)) -> Option<Pos> {
     let distance = |low: f32, high: f32, value: f32| (low - value).max(value - high).max(0.0);
-    let (line, _) = lines.iter().enumerate().min_by(|(_, a), (_, b)| {
-        let [_, a_top, _, a_bottom] = a.bounds();
-        let [_, b_top, _, b_bottom] = b.bounds();
-        distance(a_top, a_bottom, y).total_cmp(&distance(b_top, b_bottom, y))
-    })?;
+    let vertical = |line: &Line| {
+        let [_, top, _, bottom] = line.bounds();
+        distance(top, bottom, y)
+    };
+    let closest = lines.iter().map(vertical).min_by(f32::total_cmp)?;
+    let (line, _) = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| {
+            let [_, top, _, bottom] = line.bounds();
+            vertical(line) <= closest + (bottom - top) * 0.25
+        })
+        .min_by(|(_, a), (_, b)| {
+            let horizontal = |line: &Line| {
+                let [left, _, right, _] = line.bounds();
+                distance(left, right, x)
+            };
+            horizontal(a).total_cmp(&horizontal(b)).then(vertical(a).total_cmp(&vertical(b)))
+        })?;
     let words = &lines[line].words;
     let (word, _) = words.iter().enumerate().min_by(|(_, a), (_, b)| {
         distance(a.rect[0], a.rect[2], x).total_cmp(&distance(b.rect[0], b.rect[2], x))
@@ -617,6 +632,24 @@ mod tests {
         layer.status = Status::Ready(vec![split]);
         layer.select_word(view, POINT { x: 2 * 8 + 3, y: 7 });
         assert_eq!(layer.copy_text(), "layout_mode");
+    }
+
+    #[test]
+    fn line_numbers_beside_code_do_not_take_the_click() {
+        // OCR reads the gutter and the code as two lines at the same height.
+        let mut code = code_line("self.cached_user_name = None");
+        for word in &mut code.words {
+            word.rect[0] += 100.0;
+            word.rect[2] += 100.0;
+        }
+        let number = Line { words: vec![Word { text: "564".into(), rect: [2.0, 1.0, 30.0, 15.0], spaced: false }] };
+        let mut layer = TextLayer::new();
+        layer.status = Status::Ready(vec![number, code]);
+        let view = View { origin: POINT { x: 0, y: 0 }, zoom: 1.0, scale: 1.0 };
+        layer.select_word(view, POINT { x: 100 + 14 * 8 + 3, y: 7 });
+        assert_eq!(layer.copy_text(), "cached_user_name");
+        layer.select_word(view, POINT { x: 12, y: 7 });
+        assert_eq!(layer.copy_text(), "564");
     }
 
     #[test]

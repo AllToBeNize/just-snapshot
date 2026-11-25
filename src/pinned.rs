@@ -46,7 +46,7 @@ const TOGGLE_TRANSLATION: &str = "显示译文";
 const POPUP_CLASS: *const u16 = w!("Snapshot.Translation");
 /// Gap between a pin and its translation popup.
 const POPUP_GAP: i32 = 8;
-/// Room around the image for its shadow and selection ring.
+/// Room around the image for its shadow and selection glow.
 const GLOW: i32 = 8;
 /// The selected pins' ring (COLORREF, 0x00BBGGRR): Snipaste's soft red.
 const SELECTED_GLOW: u32 = 0x006f_6ff2;
@@ -1236,8 +1236,8 @@ enum Edge {
 }
 
 /// Turns the painted pin into premultiplied BGRA: the image opaque, around
-/// it a soft see-through shadow, and on hover or selection a thin ring
-/// hugging the image (the ring color over the shadow).
+/// it a soft see-through shadow, on hover a thin ring hugging the image
+/// and on selection a red-to-accent band (the color over the shadow).
 fn compose(pixels: &mut [u8], width: i32, height: i32, image: RECT, edge: Edge, accent: u32) {
     let glow = GLOW as f32;
     for y in 0..height {
@@ -1259,7 +1259,12 @@ fn compose(pixels: &mut [u8], width: i32, height: i32, image: RECT, edge: Edge, 
             let (color, ring_alpha) = match edge {
                 Edge::Plain => (0, 0.0),
                 Edge::Hovered => (mix(SELECTED_GLOW, accent, 0.5), ring(1.5, 0.55)),
-                Edge::Selected => (SELECTED_GLOW, ring(2.0, 0.9)),
+                // A 5 px band, red outside blending into the accent inside,
+                // denser towards the image.
+                Edge::Selected => {
+                    let inward = (1.0 - distance / 5.0).clamp(0.0, 1.0);
+                    (mix(SELECTED_GLOW, accent, inward), (0.18 + 0.37 * inward) * (5.0 - distance).clamp(0.0, 1.0))
+                }
             };
             let alpha = ring_alpha + shadow * (1.0 - ring_alpha);
             // Premultiplied: the shadow is black, so only the ring adds color.
@@ -1865,7 +1870,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_shadow_is_see_through_and_the_selection_ring_thin() {
+    fn the_shadow_is_see_through_the_hover_ring_thin_and_the_selection_a_band() {
         let (width, height) = (40, 30);
         let image = RECT { left: GLOW, top: GLOW, right: width - GLOW, bottom: height - GLOW };
         let alpha = |edge: Edge, x: i32, y: i32| {
@@ -1879,10 +1884,13 @@ mod tests {
         let next_to = alpha(Edge::Plain, GLOW - 1, middle);
         assert!(next_to > 20 && next_to < 70, "{next_to}");
         assert_eq!(alpha(Edge::Plain, 0, middle), 0);
-        // Selected: a strong ring right at the edge, back to the shadow within a few pixels.
-        assert!(alpha(Edge::Selected, GLOW - 1, middle) > 200);
-        assert!(alpha(Edge::Selected, GLOW - 5, middle) < 40, "thin, not a halo");
-        assert!(alpha(Edge::Hovered, GLOW - 1, middle) > next_to && alpha(Edge::Hovered, GLOW - 1, middle) < alpha(Edge::Selected, GLOW - 1, middle));
+        // Hovered: a thin ring right at the edge, back to the shadow within a few pixels.
+        assert!(alpha(Edge::Hovered, GLOW - 1, middle) > next_to + 60);
+        assert!(alpha(Edge::Hovered, GLOW - 5, middle) < 40, "thin, not a halo");
+        // Selected: a wider band, see-through and fading outwards.
+        let band = |inset: i32| alpha(Edge::Selected, GLOW - inset, middle);
+        assert!(band(1) > band(3) && band(3) > band(5) && band(1) < 200, "{} {} {}", band(1), band(3), band(5));
+        assert!(band(4) > alpha(Edge::Plain, GLOW - 4, middle) + 30, "the band is wider than the hover ring");
     }
 
     #[test]
