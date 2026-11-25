@@ -105,6 +105,9 @@ const UPDATE_DELAY_MS: u32 = 30_000;
 const MENU_GROUP: usize = 100;
 /// "识图上次截图": the image search engines, past any group number.
 const MENU_SEARCH: usize = 0x8000;
+/// 找回关闭的贴图: one id per closed pin, then 全部找回.
+const MENU_RESTORE: usize = 0x9000;
+const MENU_RESTORE_ALL: usize = MENU_RESTORE + pinned::CLOSED_KEPT;
 static TASKBAR_CREATED: OnceLock<u32> = OnceLock::new();
 thread_local! {
     static TRAY_ICONS: Cell<[HICON; 2]> = const { Cell::new([null_mut(); 2]) };
@@ -522,6 +525,16 @@ unsafe fn tray_menu(window: HWND) {
         MENU_PINS_SHOW => pinned::set_all_hidden(false),
         MENU_PINS_HIDE => pinned::set_all_hidden(true),
         MENU_PINS_CLOSE => pinned::close_all(),
+        MENU_RESTORE_ALL => {
+            if let Err(error) = pinned::restore_all_closed() {
+                show_error(window, &format!("无法找回贴图。\n{error}"));
+            }
+        }
+        id if (MENU_RESTORE..MENU_RESTORE_ALL).contains(&id) => {
+            if let Err(error) = pinned::restore_closed(id - MENU_RESTORE) {
+                show_error(window, &format!("无法找回贴图。\n{error}"));
+            }
+        }
         id if (MENU_SEARCH..MENU_SEARCH + image_search::MENU_IDS).contains(&id) => {
             search_last(window, image_search::picked(id, MENU_SEARCH, engines))
         }
@@ -559,6 +572,20 @@ unsafe fn pins_menu() -> HMENU {
     }
     let none = gray(groups.is_empty());
     AppendMenuW(menu, MF_SEPARATOR, 0, null());
+    // Recently closed pins, newest first, brought back where they were.
+    let closed = pinned::closed_pins();
+    let restore = CreatePopupMenu();
+    if !restore.is_null() {
+        for (index, label) in closed.iter().enumerate() {
+            let label = wide(label);
+            AppendMenuW(restore, MF_STRING, MENU_RESTORE + index, label.as_ptr());
+        }
+        if closed.len() > 1 {
+            AppendMenuW(restore, MF_SEPARATOR, 0, null());
+            AppendMenuW(restore, MF_STRING, MENU_RESTORE_ALL, w!("全部找回"));
+        }
+        AppendMenuW(menu, MF_POPUP | gray(closed.is_empty()), restore as usize, w!("找回关闭的贴图"));
+    }
     AppendMenuW(menu, MF_STRING | none, MENU_PINS_CLOSE, w!("关闭所有贴图"));
     menu
 }

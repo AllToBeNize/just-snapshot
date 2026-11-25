@@ -16,7 +16,9 @@ use crate::{
 };
 
 /// Word position: (line, word), ordered in reading order.
-pub type Pos = (usize, usize);
+/// A caret between characters: line, word, and how many of the word's
+/// characters come before it.
+pub type Pos = (usize, usize, usize);
 
 pub enum Status {
     Recognizing,
@@ -162,26 +164,30 @@ impl TextLayer {
 
     /// Double-click: the token under the point, up to the nearest spaces.
     pub fn select_word(&mut self, view: View, point: POINT) {
-        if let Some((line, word)) = nearest(self.lines(), view.to_image(point)) {
+        if let Some((line, word, _)) = nearest(self.lines(), view.to_image(point)) {
             let (from, to) = self.lines()[line].token(word);
-            self.anchor = Some((line, from));
-            self.focus = Some((line, to));
+            let end = length(&self.lines()[line].words[to]);
+            self.anchor = Some((line, from, 0));
+            self.focus = Some((line, to, end));
         }
     }
 
     /// Triple-click: the whole line.
     pub fn select_line(&mut self, view: View, point: POINT) {
-        if let Some((line, _)) = nearest(self.lines(), view.to_image(point)) {
-            self.anchor = Some((line, 0));
-            self.focus = Some((line, self.lines()[line].words.len() - 1));
+        if let Some((line, _, _)) = nearest(self.lines(), view.to_image(point)) {
+            let words = &self.lines()[line].words;
+            let end = (line, words.len() - 1, length(&words[words.len() - 1]));
+            self.anchor = Some((line, 0, 0));
+            self.focus = Some(end);
         }
     }
 
     pub fn select_all(&mut self) {
         let lines = self.lines();
         if let Some(last) = lines.len().checked_sub(1) {
-            let end = (last, lines[last].words.len() - 1);
-            self.anchor = Some((0, 0));
+            let words = &lines[last].words;
+            let end = (last, words.len() - 1, length(&words[words.len() - 1]));
+            self.anchor = Some((0, 0, 0));
             self.focus = Some(end);
         }
     }
@@ -197,26 +203,42 @@ impl TextLayer {
         self.range().is_some()
     }
 
+    /// The selection in reading order; none while empty.
     fn range(&self) -> Option<(Pos, Pos)> {
         let (a, b) = (self.anchor?, self.focus?);
-        Some(if a <= b { (a, b) } else { (b, a) })
+        let (from, to) = if a <= b { (a, b) } else { (b, a) };
+        (self.slices(from, to).iter().any(|line| !line.text().is_empty())).then_some((from, to))
+    }
+
+    /// The selected part of each line from `from` to `to`, words cut at the carets.
+    fn slices(&self, from: Pos, to: Pos) -> Vec<Line> {
+        let lines = self.lines();
+        (from.0..=to.0)
+            .map(|index| {
+                let line = &lines[index];
+                let first = if index == from.0 { (from.1, from.2) } else { (0, 0) };
+                let last = if index == to.0 { (to.1, to.2) } else { (line.words.len() - 1, usize::MAX) };
+                let words = (first.0..=last.0)
+                    .filter_map(|word_index| {
+                        let word = &line.words[word_index];
+                        let start = if word_index == first.0 { first.1 } else { 0 };
+                        let end = if word_index == last.0 { last.1 } else { usize::MAX };
+                        let text: String = word.text.chars().skip(start).take(end.saturating_sub(start)).collect();
+                        (!text.is_empty()).then(|| ocr::Word { text, ..word.clone() })
+                    })
+                    .collect();
+                Line { words }
+            })
+            .collect()
     }
 
     /// The selected text, or everything when nothing is selected.
     pub fn copy_text(&self) -> String {
         let lines = self.lines();
-        let Some(((first_line, first_word), (last_line, last_word))) = self.range() else {
+        let Some((from, to)) = self.range() else {
             return ocr::text(lines);
         };
-        (first_line..=last_line)
-            .map(|index| {
-                let line = &lines[index];
-                let from = if index == first_line { first_word } else { 0 };
-                let to = if index == last_line { last_word + 1 } else { line.words.len() };
-                line.text_of(from, to)
-            })
-            .collect::<Vec<_>>()
-            .join("\r\n")
+        self.slices(from, to).iter().map(Line::text).collect::<Vec<_>>().join("\r\n")
     }
 
     pub unsafe fn paint(&self, dc: HDC, view: View, image: RECT, fonts: &Fonts) {
@@ -225,13 +247,19 @@ impl TextLayer {
         let lines = self.lines();
         let pad = 2.0 * view.scale;
         let range = self.range();
-        if let Some(((first_line, first_word), (last_line, last_word))) = range {
-            for index in first_line..=last_line {
+        if let Some((from, to)) = range {
+            for index in from.0..=to.0 {
                 let line = &lines[index];
-                let from = if index == first_line { first_word } else { 0 };
-                let to = if index == last_line { last_word } else { line.words.len() - 1 };
+                let last = line.words.len() - 1;
+                let start = if index == from.0 { from } else { (index, 0, 0) };
+                let end = if index == to.0 { to } else { (index, last, length(&line.words[last])) };
                 let [_, top, _, bottom] = line.bounds();
-                let rect = [line.words[from].rect[0], top, line.words[to].rect[2], bottom];
+                let left = caret_x(&line.words[start.1], start.2);
+                let right = caret_x(&line.words[end.1], end.2);
+                if right - left < 0.5 {
+                    continue;
+                }
+                let rect = [left, top, right, bottom];
                 graphics.fill_round(
                     ui::inset(view.to_client(rect), -pad),
                     pad,
@@ -356,8 +384,34 @@ unsafe fn paint_note(dc: HDC, view: View, image: RECT, fonts: &Fonts, note: &str
     );
 }
 
-/// The word nearest to an image point: the closest line by height, then the
-/// closest word in it along x.
+fn length(word: &ocr::Word) -> usize {
+    word.text.chars().count()
+}
+
+/// A character's share of its word's width: OCR only boxes whole words, so
+/// characters are placed by how wide they usually are.
+fn weight(character: char) -> f32 {
+    if ('\u{2e80}'..='\u{9fff}').contains(&character) || ('\u{f900}'..='\u{ffef}').contains(&character) {
+        2.0
+    } else if "il.,:;|'!`Iıj ".contains(character) {
+        0.6
+    } else if "mwMW".contains(character) {
+        1.5
+    } else {
+        1.0
+    }
+}
+
+/// The x of the caret before character `offset` of `word`, in image pixels.
+fn caret_x(word: &ocr::Word, offset: usize) -> f32 {
+    let weights: Vec<f32> = word.text.chars().map(weight).collect();
+    let total: f32 = weights.iter().sum::<f32>().max(f32::EPSILON);
+    let before: f32 = weights.iter().take(offset).sum();
+    word.rect[0] + (word.rect[2] - word.rect[0]) * before / total
+}
+
+/// The caret nearest to an image point: the closest line by height, then
+/// the closest gap between characters along x.
 fn nearest(lines: &[Line], (x, y): (f32, f32)) -> Option<Pos> {
     let distance = |low: f32, high: f32, value: f32| (low - value).max(value - high).max(0.0);
     let (line, _) = lines.iter().enumerate().min_by(|(_, a), (_, b)| {
@@ -365,10 +419,14 @@ fn nearest(lines: &[Line], (x, y): (f32, f32)) -> Option<Pos> {
         let [_, b_top, _, b_bottom] = b.bounds();
         distance(a_top, a_bottom, y).total_cmp(&distance(b_top, b_bottom, y))
     })?;
-    let (word, _) = lines[line].words.iter().enumerate().min_by(|(_, a), (_, b)| {
+    let words = &lines[line].words;
+    let (word, _) = words.iter().enumerate().min_by(|(_, a), (_, b)| {
         distance(a.rect[0], a.rect[2], x).total_cmp(&distance(b.rect[0], b.rect[2], x))
     })?;
-    Some((line, word))
+    let offset = (0..=length(&words[word]))
+        .min_by(|&a, &b| (caret_x(&words[word], a) - x).abs().total_cmp(&(caret_x(&words[word], b) - x).abs()))
+        .unwrap_or(0);
+    Some((line, word, offset))
 }
 
 #[cfg(test)]
@@ -418,16 +476,23 @@ mod tests {
     }
 
     #[test]
-    fn dragging_selects_across_lines_in_reading_order() {
+    fn dragging_selects_character_by_character_across_lines() {
         let mut layer = layer();
         assert_eq!(layer.copy_text(), "第一行\r\nSecond line here\r\n末行");
-        // Drag backwards from the 2nd word of line 3 to the 2nd word of line 1.
-        layer.begin(VIEW, at(40, 45));
-        assert!(layer.extend(VIEW, at(35, 5)));
-        assert!(!layer.extend(VIEW, at(36, 6)), "same word, no change");
+        // "Second" spans x 0..24, four pixels a letter: drag from after S to after o.
+        layer.begin(VIEW, at(4, 22));
+        assert!(!layer.extend(VIEW, at(4, 22)), "a click is not a selection");
+        assert!(!layer.has_selection());
+        assert!(layer.extend(VIEW, at(16, 22)));
+        assert_eq!(layer.copy_text(), "eco");
+        assert!(!layer.extend(VIEW, at(17, 23)), "same caret, no change");
+        // Backwards from the end of the last line to the start of 一.
+        layer.clear();
+        layer.begin(VIEW, at(54, 45));
+        assert!(layer.extend(VIEW, at(30, 5)));
         assert_eq!(layer.copy_text(), "一行\r\nSecond line here\r\n末行");
-        layer.extend(VIEW, at(70, 25));
-        assert_eq!(layer.copy_text(), "here\r\n末行");
+        layer.extend(VIEW, at(66, 25));
+        assert_eq!(layer.copy_text(), "ere\r\n末行");
         assert!(layer.clear());
         assert_eq!(layer.copy_text(), "第一行\r\nSecond line here\r\n末行", "nothing selected copies all");
     }

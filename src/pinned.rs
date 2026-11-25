@@ -47,8 +47,8 @@ const POPUP_CLASS: *const u16 = w!("Snapshot.Translation");
 /// Gap between a pin and its translation popup.
 const POPUP_GAP: i32 = 8;
 const GLOW: i32 = 5;
-/// The selected pins' edge (COLORREF, 0x00BBGGRR): Snipaste's soft red.
-const SELECTED_GLOW: u32 = 0x005a_50f0;
+/// The selected pins' halo (COLORREF, 0x00BBGGRR): Snipaste's soft red.
+const SELECTED_GLOW: u32 = 0x006f_6ff2;
 const BADGE_TIMER: usize = 1;
 const BADGE_DURATION_MS: u32 = 1200;
 const MIN_OPACITY: i32 = 15;
@@ -75,6 +75,28 @@ thread_local! {
     static CURRENT_GROUP: Cell<u32> = const { Cell::new(1) };
     /// Groups hidden from the tray or a pin's menu.
     static HIDDEN_GROUPS: RefCell<Vec<u32>> = const { RefCell::new(Vec::new()) };
+    /// Recently closed pins, newest first, for 找回关闭的贴图.
+    static CLOSED: RefCell<Vec<Closed>> = const { RefCell::new(Vec::new()) };
+}
+
+/// How many closed pins can be brought back.
+pub const CLOSED_KEPT: usize = 10;
+
+/// A closed pin as it was: the picture squeezed into a PNG in the
+/// background, where it sat, how it looked.
+struct Closed {
+    picture: std::thread::JoinHandle<Result<Vec<u8>, String>>,
+    /// The window's bounds, glow included.
+    window: RECT,
+    width: i32,
+    height: i32,
+    zoom: f64,
+    opacity: i32,
+    group: u32,
+    above: bool,
+    mode: Mode,
+    /// "14:05 关闭", for the tray menu.
+    closed_at: String,
 }
 
 const MENU_COPY: usize = 1;
@@ -85,6 +107,8 @@ const MENU_CLOSE: usize = 6;
 const MENU_ABOVE: usize = 7;
 const MENU_HIDE: usize = 8;
 const MENU_DESELECT: usize = 9;
+const MENU_EXTRACT: usize = 10;
+const MENU_TRANSLATE: usize = 11;
 /// "Move to group N" items start here.
 const MENU_GROUP: usize = 100;
 /// The image search engines, past any group number.
@@ -387,6 +411,108 @@ pub unsafe fn open(image: Image, bounds: RECT, mode: Mode) -> io::Result<()> {
     Ok(())
 }
 
+/// Keeps a closing pin for 找回关闭的贴图; the oldest beyond `CLOSED_KEPT` goes.
+unsafe fn remember_closed(window: HWND, pin: &Pin) {
+    let Ok(image) = pin_image(pin) else { return };
+    let mut bounds = RECT::default();
+    GetWindowRect(window, &mut bounds);
+    let picture = std::thread::spawn(move || {
+        let mut png = Vec::new();
+        image.write_png(&mut png).map(|()| png).map_err(|error| error.to_string())
+    });
+    let mut time = windows_sys::Win32::Foundation::SYSTEMTIME::default();
+    windows_sys::Win32::System::SystemInformation::GetLocalTime(&mut time);
+    let mode = if pin.translate.is_some() {
+        Mode::Translate
+    } else if pin.text.is_some() {
+        Mode::Text
+    } else {
+        Mode::Plain
+    };
+    let closed = Closed {
+        picture,
+        window: bounds,
+        width: pin.width,
+        height: pin.height,
+        zoom: pin.zoom,
+        opacity: pin.opacity,
+        group: pin.group,
+        above: pin.above,
+        mode,
+        closed_at: format!("{:02}:{:02} 关闭", time.wHour, time.wMinute),
+    };
+    CLOSED.with_borrow_mut(|closed_pins| {
+        closed_pins.insert(0, closed);
+        closed_pins.truncate(CLOSED_KEPT);
+    });
+}
+
+/// The closed pins for the tray menu, newest first: "14:05 关闭 · 640×360 · 文字".
+pub fn closed_pins() -> Vec<String> {
+    CLOSED.with_borrow(|closed| {
+        closed
+            .iter()
+            .map(|pin| {
+                let kind = match pin.mode {
+                    Mode::Plain => "",
+                    Mode::Text => " · 文字",
+                    Mode::Translate => " · 翻译",
+                };
+                format!("{} · {}×{}{kind}", pin.closed_at, pin.width, pin.height)
+            })
+            .collect()
+    })
+}
+
+/// Opens closed pin `index` (0 is the newest) again where it was.
+pub unsafe fn restore_closed(index: usize) -> Result<(), String> {
+    let Some(closed) = CLOSED.with_borrow_mut(|closed| (index < closed.len()).then(|| closed.remove(index))) else {
+        return Ok(());
+    };
+    let png = closed.picture.join().map_err(|_| "关闭的贴图没能保存下来。".to_string())??;
+    let mut image = crate::app_icon::decode(&png).ok_or("关闭的贴图没能读回来。")?;
+    // GDI captures carry no alpha; keep the picture exactly as it was.
+    for pixel in image.pixels.chunks_exact_mut(4) {
+        pixel[3] = 0;
+    }
+    let image_bounds = RECT {
+        left: closed.window.left + GLOW,
+        top: closed.window.top + GLOW,
+        right: closed.window.left + GLOW + closed.width,
+        bottom: closed.window.top + GLOW + closed.height,
+    };
+    let previous_group = CURRENT_GROUP.replace(closed.group);
+    let opened = open(image, image_bounds, closed.mode);
+    CURRENT_GROUP.set(previous_group);
+    opened.map_err(|error| error.to_string())?;
+    // `open` selects the new pin; find it and put back how it looked.
+    let Some((window, pin)) = pins().into_iter().find(|&(_, pin)| (*pin).selected) else { return Ok(()) };
+    (*pin).above = closed.above;
+    if closed.zoom != 1.0 {
+        (*pin).zoom = closed.zoom;
+        let (width, height) = (*pin).window_size();
+        SetWindowPos(window, null_mut(), 0, 0, width, height, SWP_NOMOVE | SWP_NOACTIVATE | SWP_NOZORDER);
+    }
+    if closed.opacity != 100 {
+        let alpha = ((closed.opacity * 255 + 50) / 100) as u8;
+        if SetLayeredWindowAttributes(window, 0, alpha, LWA_ALPHA) != 0 {
+            (*pin).opacity = closed.opacity;
+        }
+    }
+    raise_above_pins();
+    InvalidateRect(window, null(), 0);
+    Ok(())
+}
+
+/// Brings back every closed pin, oldest first so the newest ends on top.
+pub unsafe fn restore_all_closed() -> Result<(), String> {
+    let count = CLOSED.with_borrow(Vec::len);
+    for index in (0..count).rev() {
+        restore_closed(index)?;
+    }
+    Ok(())
+}
+
 /// A millisecond clock for animations; only differences matter.
 fn now_ms() -> u32 {
     std::time::SystemTime::now()
@@ -603,6 +729,11 @@ unsafe fn context_menu(window: HWND, pin: &mut Pin) {
     let several = |single: &str, many: &str| crate::wide(&if count > 1 { many.replace("{n}", &count.to_string()) } else { single.to_string() });
     AppendMenuW(menu, MF_STRING, MENU_COPY, w!("复制图片\tCtrl+C"));
     AppendMenuW(menu, MF_STRING, MENU_SAVE, w!("保存…"));
+    AppendMenuW(menu, MF_SEPARATOR, 0, null());
+    // Turn this pin into a text or translate pin; already done shows checked.
+    let done = |on: bool| if on { MF_CHECKED | MF_GRAYED } else { 0 };
+    AppendMenuW(menu, MF_STRING | done(pin.text.is_some()), MENU_EXTRACT, w!("提取文字"));
+    AppendMenuW(menu, MF_STRING | done(pin.translate.is_some()), MENU_TRANSLATE, w!("翻译"));
     // A settings file that cannot be read still leaves the way to fix it.
     let engines = crate::image_search::load().unwrap_or_default();
     let search_menu = CreatePopupMenu();
@@ -646,6 +777,8 @@ unsafe fn context_menu(window: HWND, pin: &mut Pin) {
     match chosen as usize {
         MENU_COPY => copy_image(window, pin),
         MENU_SAVE => save_image(window, pin),
+        MENU_EXTRACT => extract_text(window, pin),
+        MENU_TRANSLATE => translate_pin(window, pin),
         MENU_ABOVE => {
             let above = !pin.above;
             for (other, other_pin) in &targets {
@@ -782,6 +915,39 @@ unsafe fn refresh_popup(window: HWND, pin: &Pin) {
     place_popup(window, pin);
     if !pin.popup.is_null() {
         InvalidateRect(pin.popup, null(), 0);
+    }
+}
+
+/// 提取文字 from the menu: recognizes the pin's text in place, so it can be
+/// selected and copied like a pin made with 提取文本.
+unsafe fn extract_text(window: HWND, pin: &mut Pin) {
+    if pin.text.is_some() {
+        return;
+    }
+    match pin_image(pin) {
+        Ok(image) => {
+            pin.source = Some(image);
+            pin.text = Some(TextLayer::new());
+            start_recognition(window, pin);
+        }
+        Err(error) => show_error(window, &format!("无法识别文字。\n{error}")),
+    }
+}
+
+/// 翻译 from the menu: adds the translation popup; recognizes first if the
+/// text is not there yet (the translation follows when it is).
+unsafe fn translate_pin(window: HWND, pin: &mut Pin) {
+    if pin.translate.is_some() {
+        return;
+    }
+    pin.translate = Some(TranslatePane::new());
+    open_popup(window, pin);
+    match pin.text.as_ref().map(|text| &text.status) {
+        None => extract_text(window, pin),
+        Some(Status::Ready(_)) => start_translation(window, pin),
+        Some(Status::Failed) => start_recognition(window, pin),
+        // Still recognizing: OCR_DONE starts the translation.
+        Some(Status::Recognizing) => {}
     }
 }
 
@@ -1106,6 +1272,10 @@ unsafe extern "system" fn window_proc(
             }
         }
         WM_NCLBUTTONDOWN if !pin.is_null() && wparam == HTCAPTION as usize => {
+            // A click off the text clears the text selection.
+            if (*pin).text.as_mut().is_some_and(TextLayer::clear) {
+                InvalidateRect(window, null(), 0);
+            }
             if ctrl_down() {
                 toggle_selected(window, &mut *pin);
                 SetForegroundWindow(window);
@@ -1311,8 +1481,16 @@ unsafe extern "system" fn window_proc(
             return DefWindowProcW(window, message, wparam, lparam);
         }
         WM_ERASEBKGND => return 1,
+        // Clicking another window clears the text selection too.
+        WM_ACTIVATE if !pin.is_null() && (wparam & 0xffff) as u32 == WA_INACTIVE => {
+            if (*pin).text.as_mut().is_some_and(TextLayer::clear) {
+                InvalidateRect(window, null(), 0);
+            }
+            return DefWindowProcW(window, message, wparam, lparam);
+        }
         WM_NCDESTROY if !pin.is_null() => {
             SetWindowLongPtrW(window, GWLP_USERDATA, 0);
+            remember_closed(window, &*pin);
             drop(Box::from_raw(pin));
             return DefWindowProcW(window, message, wparam, lparam);
         }
@@ -1417,13 +1595,21 @@ unsafe extern "system" fn window_proc(
 unsafe fn paint_pin(window: HWND, pin: &Pin, dc: HDC, client: RECT) {
     let mut bounds = client;
     let brush = GetStockObject(DC_BRUSH);
-    // A glow that fades into the shadow: a soft red on the selected pins,
-    // like Snipaste, a quiet border on the rest.
+    // A glow that fades into the shadow, outer ring first: a soft red halo
+    // on the selected pins (like Snipaste), a fainter red-to-blue blend
+    // under the pointer, a quiet border on the rest. The rings lean towards
+    // the shadow so the color reads as see-through.
     let palette = theme::palette();
-    let edge = if pin.selected { SELECTED_GLOW } else { mix(palette.key_border, palette.shadow, 0.35) };
+    let quiet = mix(palette.key_border, palette.shadow, 0.35);
     for step in 0..5 {
-        // The outer rings lean towards the shadow so the red reads as see-through.
-        let reach = if pin.selected { 0.35 + 0.65 * step as f32 / 4.0 } else { step as f32 / 4.0 };
+        let inward = step as f32 / 4.0;
+        let (edge, reach) = if pin.selected {
+            (SELECTED_GLOW, 0.15 + 0.5 * inward)
+        } else if pin.hovering {
+            (mix(SELECTED_GLOW, palette.accent, inward), 0.12 + 0.38 * inward)
+        } else {
+            (quiet, inward)
+        };
         let color = mix(palette.shadow, edge, reach);
         SetDCBrushColor(dc, color);
         FrameRect(dc, &bounds, brush);
@@ -1709,8 +1895,42 @@ mod tests {
                 above = GetWindow(above, GW_HWNDPREV);
             }
             assert!(above == a, "the pin kept above stays over the raised one");
+            // Closed pins come back where they were, as they were.
+            let (window, pin) = pins()[0];
+            (*pin).zoom = 1.5;
+            (*pin).above = true;
+            let group = (*pin).group;
+            let mut before = RECT::default();
+            GetWindowRect(window, &mut before);
+            let count = pins().len();
+            CLOSED.set(Vec::new());
+            DestroyWindow(window);
+            assert_eq!(pins().len(), count - 1);
+            assert_eq!(closed_pins().len(), 1);
+            assert!(closed_pins()[0].contains("40×30"), "{:?}", closed_pins());
+            restore_closed(0).unwrap();
+            assert!(closed_pins().is_empty());
+            let (back, back_pin) = pins().into_iter().find(|&(_, pin)| (*pin).selected).unwrap();
+            let mut after = RECT::default();
+            GetWindowRect(back, &mut after);
+            assert_eq!((after.left, after.top), (before.left, before.top));
+            assert!((*back_pin).zoom == 1.5 && (*back_pin).above && (*back_pin).group == group);
+            assert_eq!(pin_image(&*back_pin).unwrap().pixels[..3], [128, 128, 128]);
             close_all();
             assert!(pins().is_empty());
+            assert_eq!(closed_pins().len(), count);
+            restore_all_closed().unwrap();
+            assert_eq!(pins().len(), count);
+
+            // 提取文字 and 翻译 from the menu turn a plain pin into a text or translate pin.
+            let (window, pin) = pins()[0];
+            assert!((*pin).text.is_none());
+            extract_text(window, &mut *pin);
+            assert!((*pin).text.is_some() && (*pin).source.is_some());
+            translate_pin(window, &mut *pin);
+            assert!((*pin).translate.is_some() && !(*pin).popup.is_null());
+            close_all();
+            CLOSED.set(Vec::new());
             CURRENT_GROUP.set(1);
         }
     }
@@ -1728,14 +1948,14 @@ mod tests {
             let image = || Image { width: 220, height: 120, pixels: [235, 225, 215, 0].repeat(220 * 120) };
             open(image(), RECT { left: 40, top: 40, right: 260, bottom: 160 }, Mode::Plain).unwrap();
             open(image(), RECT { left: 300, top: 40, right: 520, bottom: 160 }, Mode::Plain).unwrap();
+            open(image(), RECT { left: 560, top: 40, right: 780, bottom: 160 }, Mode::Plain).unwrap();
             let all = pins();
-            let (first, first_pin) = all.iter().copied().find(|(_, pin)| !(**pin).selected).unwrap();
+            let (first, first_pin) = all[0];
             (*first_pin).above = true;
             select_only(first);
-            // The other one with the pointer over it: the raised pushpin shows.
-            if let Some((other, other_pin)) = all.iter().copied().find(|&(window, _)| window != first) {
-                set_hover(other, &mut *other_pin, true, false);
-            }
+            // The second with the pointer over it: the raised pushpin and the hover glow.
+            let (hovered, hovered_pin) = all[1];
+            set_hover(hovered, &mut *hovered_pin, true, false);
             for (index, (window, _)) in pins().into_iter().enumerate() {
                 let mut bounds = RECT::default();
                 GetWindowRect(window, &mut bounds);
@@ -1749,7 +1969,7 @@ mod tests {
                 for pixel in picture.pixels.chunks_exact_mut(4) {
                     pixel[3] = 255;
                 }
-                let name = if window == first { "selected-pinned" } else { "hovered" };
+                let name = if window == first { "selected-pinned" } else if window == hovered { "hovered" } else { "plain" };
                 picture.save_png(&folder.join(format!("pin-{index}-{name}.png"))).unwrap();
             }
             close_all();
