@@ -39,19 +39,27 @@ fn the_recording_picker_shows_the_live_screen_through_a_dim_mask() {
             return;
         }
         invalidate(window, null(), 0);
-        // Run messages for a moment, as the app's loop would (the element probe
-        // also talks to this window and needs it answered).
-        pump(Duration::from_millis(300));
-        let (inside, outside) = SESSION.with_borrow(|session| {
-            let selection = session.as_ref().unwrap();
-            let (width, height) = (selection.canvas.right, selection.canvas.bottom);
-            let pixels = selection.live.as_ref().unwrap().bytes(width, height);
-            let at = |x: i32, y: i32| {
-                let index = ((y * width + x) * 4) as usize;
-                [pixels[index], pixels[index + 1], pixels[index + 2], pixels[index + 3]]
-            };
-            (at(200, 200), at(450, 150))
-        });
+        // Run messages as the app's loop would (the element probe also talks
+        // to this window and needs it answered) until the mask is painted:
+        // a fixed wait read it unpainted on a busy machine.
+        let read = || {
+            SESSION.with_borrow(|session| {
+                let selection = session.as_ref().unwrap();
+                let (width, height) = (selection.canvas.right, selection.canvas.bottom);
+                let pixels = selection.live.as_ref().unwrap().bytes(width, height);
+                let at = |x: i32, y: i32| {
+                    let index = ((y * width + x) * 4) as usize;
+                    [pixels[index], pixels[index + 1], pixels[index + 2], pixels[index + 3]]
+                };
+                (at(200, 200), at(450, 150))
+            })
+        };
+        let until = Instant::now() + Duration::from_secs(3);
+        pump(Duration::from_millis(100));
+        while read().1 != [0, 0, 0, 102] && Instant::now() < until {
+            pump(Duration::from_millis(50));
+        }
+        let (inside, outside) = read();
         assert_eq!(inside, [0, 0, 0, 1], "inside the area: see-through, still takes the mouse");
         assert_eq!(outside, [0, 0, 0, 102], "outside: the dim mask over the live screen");
         DestroyWindow(window);
