@@ -288,12 +288,10 @@ impl TextLayer {
                 if right - left < 0.5 {
                     continue;
                 }
-                let rect = [left, top, right, bottom];
-                graphics.fill_round(
-                    ui::inset(view.to_client(rect), -pad),
-                    pad,
-                    argb(palette.accent, 96),
-                );
+                // Flush with the carets left and right, like an editor's
+                // selection, so it never reaches into the next character.
+                let [left, top, right, bottom] = view.to_client([left, top, right, bottom]);
+                graphics.fill_round([left, top - pad, right, bottom + pad], pad, argb(palette.accent, 96));
             }
         } else if self.hovering {
             // A faint mark on every line shows the text can be selected.

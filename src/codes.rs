@@ -54,7 +54,7 @@ pub fn detect(image: &Image) -> Vec<Code> {
     if image.width < MIN_SIZE as i32 || image.height < MIN_SIZE as i32 {
         return Vec::new();
     }
-    let luma = image
+    let luma: Vec<u8> = image
         .pixels
         .chunks_exact(4)
         .map(|bgra| ((u32::from(bgra[2]) * 77 + u32::from(bgra[1]) * 150 + u32::from(bgra[0]) * 29) >> 8) as u8)
@@ -65,7 +65,7 @@ pub fn detect(image: &Image) -> Vec<Code> {
         AlsoInverted: Some(true),
         ..Default::default()
     };
-    let Ok(results) = detect_multiple_in_luma_with_hints(luma, image.width as u32, image.height as u32, &mut hints)
+    let Ok(results) = detect_multiple_in_luma_with_hints(luma.clone(), image.width as u32, image.height as u32, &mut hints)
     else {
         return Vec::new();
     };
@@ -89,6 +89,9 @@ pub fn detect(image: &Image) -> Vec<Code> {
             (left, top, right, bottom) = (left - pad, top - pad, right + pad, bottom + pad);
         } else {
             let middle = (top + bottom) / 2.0;
+            if !bars_run_down(&luma, image.width, image.height, middle, left, right) {
+                continue;
+            }
             (top, bottom) = (middle - BARCODE_HALF_HEIGHT, middle + BARCODE_HALF_HEIGHT);
         }
         let rect = [
@@ -108,6 +111,32 @@ pub fn detect(image: &Image) -> Vec<Code> {
     }
     codes.sort_by(|a, b| a.rect[1].total_cmp(&b.rect[1]).then(a.rect[0].total_cmp(&b.rect[0])));
     codes
+}
+
+/// Whether the bars a barcode reader read along row `y` continue above and
+/// below it. The weak one-dimensional formats (Codabar, ITF, Code 39…) also
+/// decode a row through text, like `= True` in code; text changes within a
+/// few pixels up or down, bars do not.
+fn bars_run_down(luma: &[u8], width: i32, height: i32, y: f32, left: f32, right: f32) -> bool {
+    let (left, right) = (left.max(0.0) as i32, (right as i32).min(width));
+    if right - left < 8 {
+        return false;
+    }
+    let row = |y: i32| &luma[(y * width + left) as usize..(y * width + right) as usize];
+    let middle = row(y as i32);
+    let threshold = middle.iter().map(|&value| u32::from(value)).sum::<u32>() / middle.len() as u32;
+    let dark = |values: &[u8]| values.iter().map(|&value| u32::from(value) < threshold).collect::<Vec<_>>();
+    let bars = dark(middle);
+    let same = |other: i32| {
+        let matching = dark(row(other)).iter().zip(&bars).filter(|(a, b)| a == b).count();
+        matching * 10 >= bars.len() * 9
+    };
+    // The reader may have read near the top or bottom of the bars: measure
+    // how far they reach both ways. Barcodes are at least about a sixth as
+    // tall as wide; a line of text is not.
+    let up = (1..).take_while(|step| y as i32 - step >= 0 && same(y as i32 - step)).count() as i32;
+    let down = (1..).take_while(|step| y as i32 + step < height && same(y as i32 + step)).count() as i32;
+    (up + down + 1) as f32 >= ((right - left) as f32 * 0.15).max(8.0)
 }
 
 fn overlaps(a: [f32; 4], b: [f32; 4]) -> bool {
@@ -135,6 +164,25 @@ pub(crate) mod tests {
             }
         }
         Image { width, height, pixels }
+    }
+
+    /// Codes found in the PNGs of `SNAPSHOT_CODE_IMAGES`, with their formats:
+    /// `codes_live --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn codes_live() {
+        let Some(folder) = std::env::var_os("SNAPSHOT_CODE_IMAGES") else { return };
+        for entry in std::fs::read_dir(folder).unwrap().flatten() {
+            let image = crate::app_icon::decode(&std::fs::read(entry.path()).unwrap()).unwrap();
+            let luma = image.pixels.chunks_exact(4).map(|bgra| ((u32::from(bgra[2]) * 77 + u32::from(bgra[1]) * 150 + u32::from(bgra[0]) * 29) >> 8) as u8).collect();
+            let mut hints = DecodeHints { TryHarder: Some(true), AlsoInverted: Some(true), ..Default::default() };
+            let results = detect_multiple_in_luma_with_hints(luma, image.width as u32, image.height as u32, &mut hints).unwrap_or_default();
+            println!("== {:?}", entry.file_name());
+            for result in results {
+                println!("  {:?} {:?} {:?}", result.getBarcodeFormat(), result.getText(), result.getPoints());
+            }
+            println!("  kept: {:?}", detect(&image));
+        }
     }
 
     #[test]
@@ -166,6 +214,20 @@ pub(crate) mod tests {
     #[test]
     fn plain_text_has_no_codes() {
         let image = unsafe { crate::ocr::tests::sample("没有二维码 No codes here 12345", 18, true) };
+        assert!(detect(&image).is_empty());
+    }
+
+    #[test]
+    fn a_barcode_row_without_bars_above_and_below_is_text() {
+        // A real barcode cut down to a strip as tall as a line of text.
+        let mut image = render(500, 140, &[(BarcodeFormat::CODE_128, "SNAP-2026-1120", 20, 20, 1)]);
+        assert_eq!(detect(&image).len(), 1);
+        for (index, pixel) in image.pixels.chunks_exact_mut(4).enumerate() {
+            let y = index as i32 / 500;
+            if !(44..56).contains(&y) {
+                pixel[..3].fill(255);
+            }
+        }
         assert!(detect(&image).is_empty());
     }
 
